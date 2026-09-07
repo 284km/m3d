@@ -162,11 +162,18 @@ module Frame {
     let c = V3.scale (V3.add lo hi) 0.5 in
     let r = V3.length (V3.scale (V3.sub hi lo) 0.5) in
     let r = if r <= 0.0 then 1.0 else r in
-    // 45 degrees vertical, and a distance that leaves a margin: 2.4 rather than
-    // the 1/sin(fov/2) that just fits, because a model whose bounds are a
-    // sphere touches the frame edge and looks cropped.
+    // 45 degrees vertical. A sphere of radius r just fits at r / sin(fov/2) --
+    // sin and not tan, because the frame is tangent to the sphere rather than
+    // passing through its centre -- and 1.15 leaves a margin so the silhouette
+    // does not touch the edge.
+    //
+    // sin comes from tan by identity and a sqrt, both correctly rounded, so the
+    // framing stays exact and does not drag a trigonometric function onto the
+    // path. The first version divided by tan and multiplied by 2.4, which is
+    // 2.2x too far: Duck came out 779 pixels of a 128x128 frame.
     let tan_half = 0.41421356237309503 in
-    let dist = r * 2.4 / tan_half in
+    let sin_half = tan_half / sqrt (1.0 + tan_half * tan_half) in
+    let dist = r / sin_half * 1.15 in
     let dir = V3.normalize (v3 { x = 0.7, y = 0.5, z = 1.0 }) in
     let eye = V3.add c (V3.scale dir dist) in
     let znear = dist * 0.01 in

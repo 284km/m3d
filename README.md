@@ -324,13 +324,32 @@ differ by up to 47 levels out of 255 in the middle, and they agree *exactly*
 when the three normals are the same. Both halves are needed; the second is what
 stops the first from passing for a per-pixel path that is simply wrong.
 
+## Two bugs it found in its own dependencies
+
+Rendering a frame of shaded spheres turned up a real one in the PNG path, and
+it took two commits in two other repositories to fix:
+
+- **mgz's DEFLATE aborted.** RFC 1951 gives the code-length alphabet at most 7
+  bits where the literal and distance trees get 15, and the fallback that
+  handles an over-wide tree checked the other two and never that one. A 32×32
+  image of random pixels is enough — and it is *data dependent*: 16, 48, 64, 96
+  and 128 square all encode fine.
+- **mpng called `deflate_dynamic` past the fallback.** Once the abort became a
+  graceful empty return, that turned into an **empty IDAT** — a corrupt PNG,
+  which is quieter than a crash.
+
+The regression test in mgz is worth a look for its shape: **a sweep of random
+byte strings does not reproduce the bug**, measured, so the 3,104 bytes that a
+real caller produced are committed as a fixture instead.
+
 ## What is not here yet
 
 The fourth column of the north-star table — agreement with a reference
 renderer. three.js reads the same files and the camera this program prints is
 exactly what it needs, so the instrument has been ready since the loader
-landed. What it needs now is a corpus with curved geometry in it, since a
-comparison over flat-faced boxes would not exercise much.
+landed, and the corpus now has curved geometry in it (`Duck`, and
+`MetalRoughSpheresNoTextures`, which sweeps metallic and roughness across a
+grid — a million triangles). What is left is the comparison itself.
 
 Also owed: near-plane clipping (a triangle with any vertex behind the eye is
 dropped whole, which is right for every model in the corpus and wrong for a
