@@ -122,21 +122,21 @@ def read_pins():
                 continue
             name, _, rest = line.partition("\t")
             t = rest.split()
-            if len(t) < 4:
+            if len(t) < 5:
                 continue
             try:
-                nums = tuple(float(x) for x in t[:4])
+                nums = tuple(float(x) for x in t[:5])
             except ValueError:
                 continue
             # A row may carry trailing text, and when it does that text is a REASON:
             # the feature this renderer has not implemented yet. It is the only thing
             # that lets a row sit below the absolute IoU floor -- see below.
-            pins[name.strip()] = (nums, " ".join(t[4:]))
+            pins[name.strip()] = (nums, " ".join(t[5:]))
     return pins
 
 
 def main():
-    name, mine_p, stock_p, patched_p = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    name, mine_p, stock_p, patched_p, nomip_p = sys.argv[1:6]
     (w, h), a = load(mine_p)
     if w != h:
         print(f"{name:<30} FAIL — m3d wrote {w}x{h}, and this gate renders squares")
@@ -144,6 +144,10 @@ def main():
     b, err = load_reference(stock_p, w)
     if err is None:
         c, err = load_reference(patched_p, w)
+    if err is None and nomip_p != patched_p:
+        e, err = load_reference(nomip_p, w)
+    else:
+        e = c
     if err is not None:
         print(f"{name:<30} FAIL — {err}")
         return 1
@@ -158,7 +162,13 @@ def main():
         return 1
     iou = inter / union
     m_stock, _ = mae(a, b, both)
-    m_patch, pct = mae(a, c, [x and covered(q) for x, q in zip(ca, c)])
+    m_patch, _ = mae(a, c, [x and covered(q) for x, q in zip(ca, c)])
+    # THE COLUMN THAT MEASURES THIS RENDERER. The two above measure three.js's
+    # departures from glTF and this renderer's missing mipmaps; with both taken out
+    # of the way, what is left is the shading m3d actually implements. So the
+    # differing-pixel share is taken from THIS comparison and not from the middle
+    # one -- it is the sharp number, and it should be sharp about the right thing.
+    m_nomip, pct = mae(a, e, [x and covered(q) for x, q in zip(ca, e)])
 
     problems = []
     pins = read_pins()
@@ -167,7 +177,7 @@ def main():
         if iou < IOU_FLOOR:
             problems.append(f"IoU {iou:.3f} is below the absolute floor {IOU_FLOOR}")
     else:
-        (pi, ps, pp, pd), reason = pins[name]
+        (pi, ps, pp, pn, pd), reason = pins[name]
         # THE FLOOR CAN ONLY BE WAIVED BY NAMING WHAT IT IS WAITING ON. Some models
         # disagree about their silhouette because this renderer does not implement a
         # feature they use -- skinning, morph targets -- and pinning those rows at
@@ -185,16 +195,19 @@ def main():
         # A pin of 0 differing pixels is a claim of byte-identical output. It gets no
         # slack: the whole value of such a pin is that ONE changed pixel breaks it.
         if pd == 0.0:
-            if pct != 0.0:
+            if m_nomip != 0.0 or pct != 0.0:
                 problems.append(f"the two renderers were byte-identical here and now differ on {pct:.2f}% of pixels")
         else:
             if m_patch > pp + MAE_SLACK_PATCHED:
                 problems.append(f"glTF-BRDF MAE rose from its pin {pp:.2f}")
+            if m_nomip > pn + MAE_SLACK_PATCHED:
+                problems.append(f"the comparable MAE rose from its pin {pn:.2f}")
             if pct > pd + 2.0:
                 problems.append(f"the share of differing pixels rose from its pin {pd:.1f}%")
 
     note = "FAIL — " + "; ".join(problems) if problems else ""
-    print(f"{name:<30} {iou:<8.3f} {m_stock:<8.1f} {m_patch:<10.3f} {pct:<7.2f} {note}")
+    print(f"{name:<30} {iou:<7.3f} {m_stock:<8.1f} {m_patch:<10.3f} "
+          f"{m_nomip:<9.3f} {pct:<7.2f} {note}")
     return 1 if problems else 0
 
 

@@ -402,9 +402,18 @@ does not follow:
   BRDFs, which is the shortcut this project measured at up to 30% wrong and
   chose not to take.
 
-So the first render is stock — the honest "does it agree with another renderer"
-number, recorded and pinned per model — and the second has the first two of
-those patched back to the appendix. **Against that one, `Triangle` is
+There is a fourth, and it was the biggest single cause in the whole table:
+**`geometryRoughness`**, which is not in glTF at all. three.js measures how fast
+the normal changes *across the screen* and adds that to the roughness, as a
+specular-antialiasing hack — large on a dense curved smooth metal, zero on a flat
+box. It was found last, by noticing that turning mipmaps off moved every textured
+model *except* `Suzanne`: patching it takes Suzanne from 12.27 to 1.53,
+`MetalRoughSpheres` from 10.8 to 0.40, `MorphStressTest` from 10.3 to 8.6. The
+F0 shortcut had been blamed for MetalRoughSpheres' 8.9; the truth is it is worth
+at most 0.4 there.
+
+So there are three reference renders per model: stock, patched to glTF's BRDF,
+and additionally with minification off. **Against that one, `Triangle` is
 byte-identical: every pixel, every channel.** `SimpleMeshes`, `BoxInterleaved`,
 `BoxVertexColors` and `Box` differ by a single least-significant bit on 0.1% to
 10% of their pixels, which is a float32 GPU and a float64 CPU rounding the same
@@ -596,8 +605,14 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   a tangent frame from the UVs. It also needs the tangent carried through the
   rasterizer, which is four more interpolated floats.
 
-- **Mipmaps.** `minFilter` is read and ignored, so a minified texture aliases.
-  It is the whole of the textured models' remaining colour residual.
+- **Mipmaps** — last, and for a reason. `minFilter` is read and ignored, so a
+  minified texture aliases. Implementing it **cannot make the comparison exact**:
+  `gl.generateMipmap`'s filter is implementation-defined, the level of detail
+  comes from screen-space derivatives, and the implementation here is a software
+  GL driver rather than a document anyone can follow. Matching libjpeg's integer
+  IDCT was possible because libjpeg *is* a document. So the reference is asked to
+  stop minifying instead (`?nomip=1`) and the resulting number is pinned; building
+  mipmaps is a question about picture quality, not about agreement.
 - **Primitive modes** other than triangles — `PrimitiveModeNormalsTest` has
   points and a line strip, skipped and counted, at IoU 0.606. It is the only row
   left below the silhouette floor.

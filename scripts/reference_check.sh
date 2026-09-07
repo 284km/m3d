@@ -146,8 +146,8 @@ shoot() { # url out
 
 fail=0
 compared=0
-printf '%-30s %-8s %-8s %-10s %-7s %s\n' model IoU 'MAE vs' 'MAE vs' 'px'   ''
-printf '%-30s %-8s %-8s %-10s %-7s %s\n' ''    ''    'stock'  'glTF BRDF' 'diff%' ''
+printf '%-30s %-7s %-8s %-10s %-9s %-7s %s\n' model IoU 'MAE vs' 'MAE vs' 'MAE +no' 'px'   ''
+printf '%-30s %-7s %-8s %-10s %-9s %-7s %s\n' ''    ''    'stock'  'glTF BRDF' 'minify' 'diff%' ''
 for d in test/data/gltf/*/; do
   m=$(basename "$d")
   f=$(ls "$d"glTF/*.gltf 2>/dev/null | head -1)
@@ -168,7 +168,34 @@ for d in test/data/gltf/*/; do
   url="http://127.0.0.1:$PORT/scripts/ref/page.html?file=/$f&size=$SIZE&ex=$1&ey=$2&ez=$3&tx=$4&ty=$5&tz=$6&th=$7&zn=$8&zf=$9"
   shoot "$url" "$T/$m.stock.png" || { echo "$m: FAIL — stock three.js never produced a finished frame"; fail=1; continue; }
   shoot "$url&gltfbrdf=1" "$T/$m.patched.png" || { echo "$m: FAIL — three.js patched to glTF's BRDF never produced a finished frame"; fail=1; continue; }
-  python3 scripts/ref/compare.py "$m" "$T/$m.mine.png" "$T/$m.stock.png" "$T/$m.patched.png" || fail=1
+  # A THIRD FRAME, WITH MINIFICATION OFF, for models that have a texture at all.
+  #
+  # three.js builds a mipmap chain and samples it trilinearly; m3d has none and
+  # samples the full-resolution image. That difference is the largest colour
+  # residual in the table and it CANNOT BE MATCHED EXACTLY -- `gl.generateMipmap`'s
+  # filter is implementation-defined, the level of detail comes from screen-space
+  # derivatives, and the implementation here is a software GL driver rather than a
+  # document anyone can follow. Matching libjpeg's integer IDCT was possible because
+  # libjpeg IS a document; matching swiftshader's mipmap chain is not.
+  #
+  # So the reference is asked to stop doing it, and the resulting number is what
+  # measures THE SAMPLING M3D ACTUALLY IMPLEMENTS. Whether to build mipmaps is then
+  # a question about picture quality, not about agreement.
+  #
+  # Passed only where the document mentions images, because the page treats "the
+  # switch found no textures" as fatal -- a switch that silently touched nothing
+  # would make the number look like an answer about mipmaps when it is an answer
+  # about a model with none.
+  if grep -q '"images"' "$f" 2>/dev/null; then
+    shoot "$url&gltfbrdf=1&nomip=1" "$T/$m.nomip.png" \
+      || { echo "$m: FAIL — three.js with minification off never produced a finished frame"; fail=1; continue; }
+    nomip="$T/$m.nomip.png"
+  else
+    # No textures, so there is nothing to minify and the two frames are the same
+    # question. Saying so beats inventing a third number.
+    nomip="$T/$m.patched.png"
+  fi
+  python3 scripts/ref/compare.py "$m" "$T/$m.mine.png" "$T/$m.stock.png" "$T/$m.patched.png" "$nomip" || fail=1
   compared=$((compared + 1))
 done
 
