@@ -74,7 +74,12 @@ let f6 = fn (x: float) -> str_of_float x;
 let _ = print ("camera eye " ++ f6 eye.x ++ " " ++ f6 eye.y ++ " " ++ f6 eye.z
                ++ " target " ++ f6 ctr.x ++ " " ++ f6 ctr.y ++ " " ++ f6 ctr.z
                ++ " tan_half_yfov " ++ f6 th ++ " znear " ++ f6 zn ++ " zfar " ++ f6 zf);
-let _ = print ("triangles " ++ str_of_int drawn ++ " size " ++ str_of_int size);
+// `primitives` and not `triangles`. The count is of things submitted to the
+// rasterizer, and since POINTS and the LINE modes landed that includes points and
+// line segments -- PrimitiveModeNormalsTest reports over a million of them and
+// only 7688 are triangles. A label that says triangles about a point is a false
+// claim in the program's own output.
+let _ = print ("primitives " ++ str_of_int drawn ++ " size " ++ str_of_int size);
 
 let _ = write_bytes out (bytes_of_vec (encode_rgb8 (Render.to_png_rgb t) size size));
 let _ = print ("wrote " ++ out);

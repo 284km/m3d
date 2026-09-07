@@ -345,3 +345,84 @@ module RasterS {
           row (y + 1) in
       row y0;
 }
+// ---------------------------------------------------------------------------
+// Points and lines
+// ---------------------------------------------------------------------------
+//
+// A THIRD ENTRY POINT, not a widening of the second. `RasterS.triangle` is pinned
+// by the coverage properties and by an exact-rational reference, and neither has
+// anything to say about a one-pixel dot -- so these are beside it and share the
+// depth test rather than reaching through it.
+//
+// THEY ARE UNLIT, and that is what the reference does rather than a shortcut:
+// three.js's GLTFLoader swaps a glTF material for a `PointsMaterial` or a
+// `LineBasicMaterial` for these modes, carrying over only `color` and `map`. Both
+// are unlit, so the normal is not consulted and the emissive factor is dropped.
+// Its own comment on the point size reads "glTF spec says points should be 1px".
+module RasterP {
+  // One pixel, depth-tested. `shade` takes nothing: a point has no normal to
+  // interpolate and no area to interpolate across.
+  let point = fn (t: target) -> fn (depth) -> fn (sx: float) -> fn (sy: float) ->
+              fn (z: float) -> fn (lit: v3) ->
+    let x = int_of_float (floor sx) in
+    let y = int_of_float (floor sy) in
+    if x < 0 || y < 0 || x >= t.w || y >= t.h then ()
+    else
+      let idx = y * t.w + x in
+      if z >= vec_get depth idx then ()
+      else
+        let o = idx * 4 in
+        let _ = vec_set depth idx z in
+        let _ = bytebuf_set t.color o (Srgb.encode lit.x) in
+        let _ = bytebuf_set t.color (o + 1) (Srgb.encode lit.y) in
+        let _ = bytebuf_set t.color (o + 2) (Srgb.encode lit.z) in
+        bytebuf_set t.color (o + 3) 255;
+
+  // A one-pixel line, Bresenham, with depth and colour carried along it.
+  //
+  // BRESENHAM RATHER THAN STEPPING A FLOAT, because a float step accumulates and
+  // a long line drifts off its own endpoint. The colour and 1/w are interpolated
+  // by the fraction of the LONG axis travelled, which is what makes the two ends
+  // land on their own values.
+  //
+  // Perspective-correct the same way the triangle is: the attribute is carried as
+  // attribute/w, interpolated, and divided by the interpolated 1/w.
+  let line = fn (t: target) -> fn (depth) ->
+             fn (ax: float) -> fn (ay: float) -> fn (az: float) -> fn (aw: float) -> fn (ca: v3) ->
+             fn (bx: float) -> fn (by: float) -> fn (bz: float) -> fn (bw: float) -> fn (cb: v3) ->
+    let x0 = int_of_float (floor ax) in
+    let y0 = int_of_float (floor ay) in
+    let x1 = int_of_float (floor bx) in
+    let y1 = int_of_float (floor by) in
+    let dx = if x1 > x0 then x1 - x0 else x0 - x1 in
+    let dy = if y1 > y0 then y1 - y0 else y0 - y1 in
+    let n = if dx > dy then dx else dy in
+    let sxs = if x1 > x0 then 1 else 0 - 1 in
+    let sys = if y1 > y0 then 1 else 0 - 1 in
+    let rec go = fn (k: int) -> fn (x: int) -> fn (y: int) -> fn (err: int) ->
+      if k > n then ()
+      else
+        let f = if n == 0 then 0.0 else float_of_int k / float_of_int n in
+        let iw = aw + (bw - aw) * f in
+        let z = az + (bz - az) * f in
+        let pc = fn (va: float) -> fn (vb: float) ->
+          if iw == 0.0 then va else (va * aw + (vb * bw - va * aw) * f) / iw in
+        let _ =
+          if x < 0 || y < 0 || x >= t.w || y >= t.h then ()
+          else
+            let idx = y * t.w + x in
+            if z >= vec_get depth idx then ()
+            else
+              let o = idx * 4 in
+              let _ = vec_set depth idx z in
+              let _ = bytebuf_set t.color o (Srgb.encode (pc ca.x cb.x)) in
+              let _ = bytebuf_set t.color (o + 1) (Srgb.encode (pc ca.y cb.y)) in
+              let _ = bytebuf_set t.color (o + 2) (Srgb.encode (pc ca.z cb.z)) in
+              bytebuf_set t.color (o + 3) 255 in
+        // The two-error form, so the step is integer and there is no accumulation.
+        let e2 = 2 * err in
+        let (nx, ne) = if e2 > 0 - dy then (x + sxs, err - dy) else (x, err) in
+        let (ny, ne2) = if e2 < dx then (y + sys, ne + dx) else (y, ne) in
+        go (k + 1) nx ny ne2 in
+    go 0 x0 y0 (dx - dy);
+}

@@ -585,6 +585,37 @@ order of `worldMatrix * inverseBindMatrix`. Reversing it leaves all seven
 properties passing, and moves `RecursiveSkeletons` to 0.731 and 6.5% against the
 reference. The corpus row is the only witness for that, and the pin file says so.
 
+## Points and lines
+
+`PrimitiveModeNormalsTest` went from IoU **0.606 to 0.980** and a colour error of
+5.49 to **0.39**. It was the last row below the silhouette floor, so **every row
+is above it now** and no row in `pinned.txt` carries a waiver reason.
+
+**They are unlit, and that is the reference's own answer rather than a shortcut.**
+three.js's GLTFLoader swaps a glTF material for a `PointsMaterial` or a
+`LineBasicMaterial` for these modes, carrying over only `color` and `map` — both
+are unlit, so the normal is never consulted and the emissive factor is *dropped*.
+That model's material has `emissiveFactor [0, 0.1, 0.1]` and its points and lines
+do not show it. A point is **one pixel**; three.js sets `sizeAttenuation = false`
+with the comment "glTF spec says points should be 1px".
+
+A third rasterizer entry point rather than a widening of the second, for the same
+reason `RasterS` was beside `Raster`: the coverage properties and the
+exact-rational reference have nothing to say about a one-pixel dot. Lines are
+Bresenham — a float step accumulates and a long line drifts off its own endpoint.
+
+**`TRIANGLE_STRIP` and `TRIANGLE_FAN` are refused by name.** They change how
+triangles are *assembled* from the indices and nothing in the corpus uses either,
+so they would be written blind. `LINES` and `LINE_LOOP` are implemented and have
+**no witness** either — but the drawing code is the strip's, which does, and the
+difference is three lines of index pairing. Recorded rather than presented as
+tested.
+
+Nine properties, and two of them had to be rewritten mid-flight: the depth tests
+were checked by *counting pixels*, and counting cannot see them — with no depth
+test the far point simply overwrites the near one at the same pixel and the count
+is still one. They read the colour now.
+
 ## What is not here yet
 
 Ranked by what the corpus table says, rather than by what seems interesting:
@@ -619,9 +650,6 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   IDCT was possible because libjpeg *is* a document. So the reference is asked to
   stop minifying instead (`?nomip=1`) and the resulting number is pinned; building
   mipmaps is a question about picture quality, not about agreement.
-- **Primitive modes** other than triangles — `PrimitiveModeNormalsTest` has
-  points and a line strip, skipped and counted, at IoU 0.606. It is the only row
-  left below the silhouette floor.
 - **Animation**, beyond the fact that every animated model renders its base pose
   and agrees with the reference there.
 - **Near-plane clipping**: a triangle with any vertex behind the eye is dropped

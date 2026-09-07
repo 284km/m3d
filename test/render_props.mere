@@ -759,5 +759,88 @@ let h_nm_derived = nm_at "1.0" false 1.0;
 let h_nm_none = nm_at "0.0" false 1.0;
 let _ = check "normalmap.without_tangents_the_map_is_left_alone" (h_nm_derived == h_nm_none);
 
+
+// --- points and lines --------------------------------------------------------
+// A third rasterizer entry point, so it gets its own properties rather than
+// borrowing the triangle's. These call it DIRECTLY: the questions are about one
+// pixel and one segment, and routing them through a glTF document would put the
+// loader between the question and the answer.
+let pl_frame = fn (paint) ->
+  let (t, dep) = Target.make 32 32 in
+  let _ = Target.clear t dep 0 0 0 in
+  let _ = paint t dep in
+  let rec go = fn (i: int) -> fn (n: int) ->
+    if i == 32 * 32 then n
+    else
+      let (r, g, b) = Target.get t (i % 32) (i / 32) in
+      go (i + 1) (n + (if r == 0 && g == 0 && b == 0 then 0 else 1)) in
+  go 0 0;
+let white = v3 { x = 1.0, y = 1.0, z = 1.0 };
+
+// A POINT IS ONE PIXEL. three.js sets sizeAttenuation to false for glTF points
+// with the comment "glTF spec says points should be 1px", so this is the
+// reference's own answer and not a simplification of it.
+let _ = check "point.is_exactly_one_pixel"
+  (pl_frame (fn (t) -> fn (d) -> RasterP.point t d 8.5 9.5 0.5 white) == 1);
+// And outside the frame it is no pixels rather than a fault.
+let _ = check "point.outside_the_frame_is_dropped"
+  (pl_frame (fn (t) -> fn (d) -> let _ = RasterP.point t d (0.0 - 5.0) 9.5 0.5 white in
+                                 RasterP.point t d 99.0 9.5 0.5 white) == 0);
+// A POINT RESPECTS DEPTH, and this READS THE COLOUR rather than counting pixels.
+// Counting cannot see it: with no depth test the far point OVERWRITES the near
+// one at the same pixel and the count is still one. Measured -- removing the
+// depth test passed a counting version of this check.
+let pl_pixel = fn (paint) ->
+  let (t, dep) = Target.make 32 32 in
+  let _ = Target.clear t dep 0 0 0 in
+  let _ = paint t dep in
+  let (r, g, b) = Target.get t 8 9 in
+  r;
+let red = v3 { x = 1.0, y = 0.0, z = 0.0 };
+let dim = v3 { x = 0.2, y = 0.0, z = 0.0 };
+// The NEAR point is bright and the far one dim, so which survives is legible in
+// one channel. Both orderings, because either alone passes for a renderer that
+// always keeps the first write or always keeps the last.
+let _ = check "point.the_near_one_wins_whichever_is_drawn_first"
+  (pl_pixel (fn (t) -> fn (d) -> let _ = RasterP.point t d 8.5 9.5 0.2 red in
+                                 RasterP.point t d 8.5 9.5 0.8 dim)
+   == pl_pixel (fn (t) -> fn (d) -> let _ = RasterP.point t d 8.5 9.5 0.8 dim in
+                                    RasterP.point t d 8.5 9.5 0.2 red));
+let _ = check "point.and_the_near_one_is_the_bright_one"
+  (pl_pixel (fn (t) -> fn (d) -> let _ = RasterP.point t d 8.5 9.5 0.8 dim in
+                                 RasterP.point t d 8.5 9.5 0.2 red) > 200);
+
+// A LINE REACHES BOTH ITS ENDPOINTS. A horizontal run of 10 pixels is 10 pixels:
+// Bresenham inclusive of both ends, which is what makes two segments of a strip
+// meet rather than leave a gap at every joint.
+let hline = fn (t) -> fn (d) ->
+  RasterP.line t d 2.5 5.5 0.5 1.0 white 11.5 5.5 0.5 1.0 white;
+let _ = check "line.spans_both_endpoints" (pl_frame hline == 10);
+// A diagonal is as long as its LONG axis, not the sum of the two -- a line that
+// stepped both axes every pixel would draw 20 here and look twice as thick.
+let _ = check "line.a_diagonal_is_as_long_as_its_long_axis"
+  (pl_frame (fn (t) -> fn (d) ->
+     RasterP.line t d 2.5 2.5 0.5 1.0 white 11.5 7.5 0.5 1.0 white) == 10);
+// A line is clipped, not wrapped: a segment leaving the frame draws the part
+// inside it and no pixel on the far edge.
+let _ = check "line.is_clipped_not_wrapped"
+  (pl_frame (fn (t) -> fn (d) ->
+     RasterP.line t d 28.5 5.5 0.5 1.0 white 40.5 5.5 0.5 1.0 white) == 4);
+// AND A LINE RESPECTS DEPTH, read as a colour for the same reason.
+let pl_line_pixel = fn (paint) ->
+  let (t, dep) = Target.make 32 32 in
+  let _ = Target.clear t dep 0 0 0 in
+  let _ = paint t dep in
+  let (r, g, b) = Target.get t 5 5 in
+  r;
+let _ = check "line.the_near_one_wins"
+  (pl_line_pixel (fn (t) -> fn (d) ->
+     let _ = RasterP.line t d 2.5 5.5 0.8 1.0 dim 11.5 5.5 0.8 1.0 dim in
+     RasterP.line t d 2.5 5.5 0.2 1.0 red 11.5 5.5 0.2 1.0 red) > 200);
+let _ = check "line.and_the_far_one_does_not_overwrite_it"
+  (pl_line_pixel (fn (t) -> fn (d) ->
+     let _ = RasterP.line t d 2.5 5.5 0.2 1.0 red 11.5 5.5 0.2 1.0 red in
+     RasterP.line t d 2.5 5.5 0.8 1.0 dim 11.5 5.5 0.8 1.0 dim) > 200);
+
 let n = vec_len fails;
 print (if n == 0 then "render_props: ok" else "render_props: " ++ str_of_int n ++ " FAILED")

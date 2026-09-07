@@ -91,7 +91,7 @@ for d in test/data/gltf/*/; do
       fail=1 ;;
   esac
   read_ok=$((read_ok + 1))
-  tri=$(echo "$log" | sed -n 's/^triangles \([0-9]*\).*/\1/p')
+  tri=$(echo "$log" | sed -n 's/^primitives \([0-9]*\).*/\1/p')
   # A file with no mesh at all draws nothing and that is the right answer. Synthetic is
   # an accessor test document: it has bufferViews and nodes and deliberately no geometry,
   # so requiring it to draw would be requiring the corpus to be something it is not.
@@ -145,7 +145,7 @@ PY
   # that model passed would have been fitting the threshold to the answer.
   [ "${brighter:-0}" -gt 0 ] && { lcol=yes; lit=$((lit + 1)); }
   printf '%-22s %-6s %-6s %-6s %s\n' "$m" yes "$dcol" "$lcol" \
-    "$tri tri, $cov px, $brighter brighter, max $bright vs $dark unlit"
+    "$tri prim, $cov px, $brighter brighter, max $bright vs $dark unlit"
 done
 
 nref=0

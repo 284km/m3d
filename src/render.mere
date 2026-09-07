@@ -633,10 +633,18 @@ module Render {
           match xs with
           | Nil -> ()
           | Cons (prim, rest) ->
-            // Only TRIANGLES. Any other mode is SKIPPED AND COUNTED rather than
-            // drawn wrongly; the corpus table reports it.
+            // POINTS, the three LINE modes, and TRIANGLES. TRIANGLE_STRIP and
+            // TRIANGLE_FAN change how triangles are ASSEMBLED from the indices,
+            // and nothing in the corpus uses either, so writing them would be
+            // guessing -- they are REFUSED BY NAME instead of skipped, which is
+            // what this used to do for every non-triangle mode.
             let _ =
-              if J.int_or prim "mode" 4 != 4 then ()
+              let pmode = J.int_or prim "mode" 4 in
+              if pmode == 5 || pmode == 6 then
+                fail ("gltf: primitive mode " ++ str_of_int pmode
+                      ++ (if pmode == 5 then " (TRIANGLE_STRIP)" else " (TRIANGLE_FAN)")
+                      ++ " is not implemented -- no model in this corpus uses one, so it "
+                      ++ "would be written blind")
               else
                 match attr d prim "POSITION" with
                 | None -> ()
@@ -1076,7 +1084,79 @@ module Render {
                             (sv cc wc (nrm_of kc) kc)
                             shader in
                       go (ti + 1) in
-                  go 0 in
+
+                  // POINTS AND LINES, UNLIT.
+                  //
+                  // three.js's GLTFLoader swaps the material for a
+                  // `PointsMaterial` or a `LineBasicMaterial` for these modes,
+                  // carrying over only `color` and `map`. Both are UNLIT, so the
+                  // normal is never consulted and the emissive factor is dropped
+                  // -- PrimitiveModeNormalsTest's material has
+                  // `emissiveFactor [0, 0.1, 0.1]` and its points and lines do not
+                  // show it. Its own comment on the point size reads "glTF spec
+                  // says points should be 1px".
+                  //
+                  // So the colour is baseColorFactor * COLOR_0 * baseColorTexture,
+                  // in LINEAR light, and `Srgb.encode` at the pixel is the only
+                  // curve applied -- exactly where the triangle path applies it.
+                  let thin_col = fn (k: int) ->
+                    let (cr, cg, cb) = vcol k in
+                    let (uu, vv) = vuv k in
+                    let (uu1, vv1) = vuv1 k in
+                    let tc = match btex with
+                             | None -> v4 { x = 1.0, y = 1.0, z = 1.0, w = 1.0 }
+                             | Some ts -> slot_sample ts true uu vv uu1 vv1 in
+                    v3 { x = mat.br * cr * tc.x, y = mat.bg * cg * tc.y,
+                         z = mat.bb * cb * tc.z } in
+                  let thin_v = fn (k: int) ->
+                    let c = M4.mul_v4 vp (V4.of_point (wpos k)) in
+                    let iw = if c.w == 0.0 then 0.0 else 1.0 / c.w in
+                    ((c.x * iw * 0.5 + 0.5) * fw, (0.5 - c.y * iw * 0.5) * fh,
+                     c.z * iw, iw, c.w) in
+
+                  // MODE 3 IS THE ONE WITH A WITNESS. The corpus has POINTS and
+                  // LINE_STRIP and nothing else thin, so LINES and LINE_LOOP are
+                  // written from the specification -- three lines of index pairing
+                  // over drawing code the strip already exercises. Recorded rather
+                  // than presented as tested.
+                  let rec pts = fn (i: int) ->
+                    if i >= vec_len idx then ()
+                    else
+                      let k = vec_get idx i in
+                      let (sx, sy, z, iw, w) = thin_v k in
+                      let _ = if w > 0.0 then
+                                let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in
+                                RasterP.point t depth sx sy z (thin_col k)
+                              else () in
+                      pts (i + 1) in
+                  let seg = fn (ka: int) -> fn (kb: int) ->
+                    let (axx, ayy, az, aw, aww) = thin_v ka in
+                    let (bxx, byy, bz, bw, bww) = thin_v kb in
+                    // NO NEAR-PLANE CLIPPING HERE EITHER, so a segment with an
+                    // endpoint at or behind the eye is dropped whole rather than
+                    // drawn to a projected point that means nothing.
+                    if aww <= 0.0 || bww <= 0.0 then ()
+                    else
+                      let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in
+                      RasterP.line t depth axx ayy az aw (thin_col ka)
+                                            bxx byy bz bw (thin_col kb) in
+                  let rec strip = fn (i: int) ->
+                    if i + 1 >= vec_len idx then ()
+                    else let _ = seg (vec_get idx i) (vec_get idx (i + 1)) in strip (i + 1) in
+                  let rec pairs = fn (i: int) ->
+                    if i + 1 >= vec_len idx then ()
+                    else let _ = seg (vec_get idx i) (vec_get idx (i + 1)) in pairs (i + 2) in
+
+                  if pmode == 0 then pts 0
+                  else if pmode == 1 then pairs 0
+                  else if pmode == 3 then strip 0
+                  else if pmode == 2 then
+                    // LINE_LOOP is a strip that closes.
+                    let _ = strip 0 in
+                    if vec_len idx >= 2
+                    then seg (vec_get idx (vec_len idx - 1)) (vec_get idx 0)
+                    else ()
+                  else go 0 in
             prims rest in
         prims (J.arr (J.req mesh "primitives"))) in
     (t, depth, vec_get drawn 0, eye, ctr, th, zn, zf);

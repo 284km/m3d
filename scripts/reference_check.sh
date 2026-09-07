@@ -161,8 +161,8 @@ for d in test/data/gltf/*/; do
   # answer is two renders on two backgrounds, which is not paid for yet.
   log=$("$T/m3d" "$f" --out "$T/$m.mine.png" --size "$SIZE" --bg 255,0,255 2>&1) || {
     echo "$m: m3d refused it — $(echo "$log" | tail -1)"; continue; }
-  tri=$(echo "$log" | sed -n 's/^triangles \([0-9]*\).*/\1/p')
-  [ "${tri:-0}" -gt 0 ] || { echo "$m: no triangles drawn, so there is nothing to compare"; continue; }
+  tri=$(echo "$log" | sed -n 's/^primitives \([0-9]*\).*/\1/p')
+  [ "${tri:-0}" -gt 0 ] || { echo "$m: nothing drawn, so there is nothing to compare"; continue; }
   set -- $(echo "$log" | sed -n 's/^camera eye \([^ ]*\) \([^ ]*\) \([^ ]*\) target \([^ ]*\) \([^ ]*\) \([^ ]*\) tan_half_yfov \([^ ]*\) znear \([^ ]*\) zfar \([^ ]*\)$/\1 \2 \3 \4 \5 \6 \7 \8 \9/p')
   [ $# -eq 9 ] || { echo "$m: FAIL — could not read the camera back out of m3d"; fail=1; continue; }
   url="http://127.0.0.1:$PORT/scripts/ref/page.html?file=/$f&size=$SIZE&ex=$1&ey=$2&ez=$3&tx=$4&ty=$5&tz=$6&th=$7&zn=$8&zf=$9"
