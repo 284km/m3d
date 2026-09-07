@@ -1,0 +1,357 @@
+// A glTF 2.0 reader: the container, the JSON, and the accessors.
+//
+// WHAT IT READS. Both containers -- a `.gltf` with its buffers in separate
+// files, and a `.glb` with them in a BIN chunk -- and that pair is the point
+// rather than a convenience. The two hold the same scene in two envelopes, so
+// `scripts/container_check.sh` loads each and requires identical numbers out
+// of both. THAT CHECK NEEDS NOTHING EXTERNAL: the only thing that differs is
+// where the bytes came from, so the two paths are each other's oracle, and a
+// mistake in the container handling is the one thing it can see that a
+// comparison against another implementation would attribute to something else.
+//
+// WHAT IT DOES NOT READ, said by name rather than left to be discovered:
+// glTF-Embedded (a `data:` URI needs base64, which this language has as an
+// example and not as a library), sparse accessors, and any `extensionsRequired`
+// -- the last is REFUSED with the extension named, because silently dropping a
+// required extension produces a picture that is wrong in a way nothing reports.
+import "json/json.mere";
+import "./bytes_le.mere";
+import "./linalg.mere";
+
+// ---------------------------------------------------------------------------
+// Reading a JSON document without pretending a missing field is a zero
+// ---------------------------------------------------------------------------
+module J {
+  let rec assoc = fn (ps) -> fn (k: str) ->
+    match ps with
+    | Nil -> None
+    | Cons (p, rest) -> if str_eq (fst p) k then Some (snd p) else assoc rest k;
+
+  // A field that is not there is `None`, not a default. glTF's defaults are
+  // per-field and several of them are not zero -- `byteOffset` defaults to 0
+  // but `scale` defaults to [1,1,1] and `mode` to 4 -- so the default belongs
+  // at the call site where it is known, not here.
+  let field = fn (v: Json.json) -> fn (k: str) ->
+    match v with
+    | Json.JObj ps -> assoc ps k
+    | _ -> None;
+
+  let rec nth = fn (xs) -> fn (i: int) ->
+    match xs with
+    | Nil -> None
+    | Cons (h, t) -> if i == 0 then Some h else nth t (i - 1);
+
+  let rec len = fn (xs) -> match xs with | Nil -> 0 | Cons (_, t) -> 1 + len t;
+
+  let arr = fn (v: Json.json) ->
+    match v with | Json.JArr xs -> xs | _ -> Nil;
+
+  let arr_len = fn (v: Json.json) -> len (arr v);
+  let at = fn (v: Json.json) -> fn (i: int) -> nth (arr v) i;
+
+  // The five readers. Each FAILS on the wrong shape rather than substituting
+  // something: a glTF whose `count` is a string is a broken document, and
+  // reading it as zero would draw an empty mesh and report success.
+  let int_ = fn (v: Json.json) ->
+    match v with
+    | Json.JNum n -> n
+    | _ -> fail "gltf: expected an integer";
+  let flt = fn (v: Json.json) ->
+    match v with
+    | Json.JNum n -> float_of_int n
+    | Json.JFloat f -> f
+    | _ -> fail "gltf: expected a number";
+  let str_ = fn (v: Json.json) ->
+    match v with | Json.JStr s -> s | _ -> fail "gltf: expected a string";
+  let bool_ = fn (v: Json.json) ->
+    match v with | Json.JBool b -> b | _ -> fail "gltf: expected a boolean";
+
+  // ... and the same five with the field lookup and the default folded in,
+  // because that is what every call site actually wants.
+  let int_or = fn (v: Json.json) -> fn (k: str) -> fn (d: int) ->
+    match field v k with | None -> d | Some x -> int_ x;
+  let flt_or = fn (v: Json.json) -> fn (k: str) -> fn (d: float) ->
+    match field v k with | None -> d | Some x -> flt x;
+  let str_or = fn (v: Json.json) -> fn (k: str) -> fn (d: str) ->
+    match field v k with | None -> d | Some x -> str_ x;
+  let bool_or = fn (v: Json.json) -> fn (k: str) -> fn (d: bool) ->
+    match field v k with | None -> d | Some x -> bool_ x;
+  let req = fn (v: Json.json) -> fn (k: str) ->
+    match field v k with
+    | None -> fail ("gltf: required field missing: " ++ k)
+    | Some x -> x;
+}
+
+// ---------------------------------------------------------------------------
+// The container
+// ---------------------------------------------------------------------------
+type doc = { j: Json.json, bin: bytes, base: str };
+
+module Glb {
+  let magic = LE.tag 103 108 84 70;      // "glTF"
+  let chunk_json = LE.tag 74 83 79 78;   // "JSON"
+  let chunk_bin = LE.tag 66 73 78 0;     // "BIN\0"
+
+  let is_glb = fn (b: bytes) -> bytes_len b >= 12 && LE.u32 b 0 == magic;
+
+  // 12-byte header, then length-tagged chunks. The JSON chunk comes first and
+  // the BIN chunk is optional; anything else is skipped, which is what the
+  // specification says to do with a chunk type you do not know.
+  let split = fn (b: bytes) ->
+    let total = bytes_len b in
+    let _ = if total < 12 then fail "glb: shorter than its header" else () in
+    let _ = if LE.u32 b 0 != magic then fail "glb: not a GLB (bad magic)" else () in
+    let ver = LE.u32 b 4 in
+    let _ = if ver != 2 then fail ("glb: version " ++ str_of_int ver ++ ", expected 2") else () in
+    let declared = LE.u32 b 8 in
+    // The header's length is checked and not trusted: a truncated download is
+    // the ordinary way this file arrives broken, and the alternative to saying
+    // so is reading past the end of a chunk.
+    let _ = if declared != total
+            then fail ("glb: header says " ++ str_of_int declared ++ " bytes, file has " ++ str_of_int total)
+            else () in
+    let rec scan = fn (off: int) -> fn (js: str) -> fn (bin: bytes) ->
+      if off + 8 > total then (js, bin)
+      else
+        let clen = LE.u32 b off in
+        let ctype = LE.u32 b (off + 4) in
+        let cstart = off + 8 in
+        let _ = if cstart + clen > total
+                then fail ("glb: chunk at " ++ str_of_int off ++ " runs past the end")
+                else () in
+        let js2 = if ctype == chunk_json then str_of_bytes (bytes_slice b cstart clen) else js in
+        let bin2 = if ctype == chunk_bin then bytes_slice b cstart clen else bin in
+        // A chunk's padding is INSIDE its length -- the specification requires a
+        // writer to pad and to count the padding -- so a chunkLength that is
+        // not a multiple of four is a malformed file and is said so. An earlier
+        // version rounded it up instead, which was both more permissive than
+        // the format and DEAD CODE: measured across every GLB vendored here,
+        // and required of every conformant one, chunkLength is already
+        // 4-aligned, so the rounding never ran. A branch that cannot fire looks
+        // like handling and is not.
+        let _ = if bit_and clen 3 != 0
+                then fail ("glb: chunk at " ++ str_of_int off ++ " has length "
+                           ++ str_of_int clen ++ ", which is not a multiple of four")
+                else () in
+        scan (cstart + clen) js2 bin2 in
+    let (js, bin) = scan 12 "" (bytes_of_hex "") in
+    let _ = if str_len js == 0 then fail "glb: no JSON chunk" else () in
+    (js, bin);
+}
+
+module Gltf {
+  // Everything before the last '/', so a buffer's relative uri resolves against
+  // the document rather than against wherever the program happens to be run.
+  let dirname = fn (path: str) ->
+    let rec back = fn (i: int) ->
+      if i < 0 then ""
+      else if str_eq (char_at path i) "/" then substring path 0 (i + 1)
+      else back (i - 1) in
+    back (str_len path - 1);
+
+  // A `.gltf` is JSON and a `.glb` starts with the four bytes `glTF`, so the
+  // container is decided by looking rather than by the file extension. A file
+  // that is neither is named as such: it would otherwise reach the JSON parser
+  // and come back as "unexpected 'g' at pos 0", which is true and useless -- a
+  // refusal has to say what it refused.
+  let load = fn (path: str) ->
+    let raw = read_bytes path in
+    if Glb.is_glb raw then
+      let (js, bin) = Glb.split raw in
+      doc { j = Json.parse_json js, bin = bin, base = dirname path }
+    else
+      let text = str_of_bytes raw in
+      let first = if str_len text == 0 then "" else char_at text 0 in
+      let looks_like_json = str_eq first "\{" || str_eq first " "
+                         || str_eq first "\n" || str_eq first "\t" || str_eq first "\r" in
+      if bytes_len raw >= 4 && not looks_like_json
+      then fail ("gltf: " ++ path ++ " is neither a GLB (its first four bytes are not `glTF`)"
+                 ++ " nor JSON (it starts with `" ++ first ++ "`)")
+      else doc { j = Json.parse_json text, bin = bytes_of_hex "", base = dirname path };
+
+  // A required extension is REFUSED, with its name. A viewer that ignores one
+  // draws a picture that is wrong in a way nothing else reports -- the geometry
+  // is there, the material is not what the file asked for, and it looks fine.
+  let check_supported = fn (d: doc) ->
+    match J.field d.j "extensionsRequired" with
+    | None -> ()
+    | Some v ->
+      let names = J.arr v in
+      if J.len names == 0 then ()
+      else
+        let rec join = fn (xs) ->
+          match xs with
+          | Nil -> ""
+          | Cons (h, Nil) -> J.str_ h
+          | Cons (h, t) -> J.str_ h ++ ", " ++ join t in
+        fail ("gltf: this file requires extensions that are not implemented: " ++ join names);
+
+  // The bytes of buffer `i`. Buffer 0 of a GLB has no uri and is the BIN chunk;
+  // everything else is a file beside the document. A `data:` URI is refused by
+  // name rather than mis-read as a filename.
+  let buffer = fn (d: doc) -> fn (i: int) ->
+    match J.at (J.req d.j "buffers") i with
+    | None -> fail ("gltf: no buffer " ++ str_of_int i)
+    | Some b ->
+      match J.field b "uri" with
+      | None ->
+        if bytes_len d.bin == 0 then fail "gltf: buffer has no uri and there is no BIN chunk"
+        else d.bin
+      | Some u ->
+        let uri = J.str_ u in
+        if str_len uri >= 5 && str_eq (substring uri 0 5) "data:"
+        then fail "gltf: a data: URI needs base64, which this reader does not have yet (glTF-Embedded is out of scope)"
+        else read_bytes (d.base ++ uri);
+}
+
+// ---------------------------------------------------------------------------
+// Accessors: turning a range of a buffer into numbers
+// ---------------------------------------------------------------------------
+module Acc {
+  // The six component types glTF names, by their GL enum.
+  let comp_size = fn (ct: int) ->
+    if ct == 5120 then 1        // BYTE
+    else if ct == 5121 then 1   // UNSIGNED_BYTE
+    else if ct == 5122 then 2   // SHORT
+    else if ct == 5123 then 2   // UNSIGNED_SHORT
+    else if ct == 5125 then 4   // UNSIGNED_INT
+    else if ct == 5126 then 4   // FLOAT
+    else fail ("gltf: unknown componentType " ++ str_of_int ct);
+
+  let n_comp = fn (kind: str) ->
+    if str_eq kind "SCALAR" then 1
+    else if str_eq kind "VEC2" then 2
+    else if str_eq kind "VEC3" then 3
+    else if str_eq kind "VEC4" then 4
+    else if str_eq kind "MAT2" then 4
+    else if str_eq kind "MAT3" then 9
+    else if str_eq kind "MAT4" then 16
+    else fail ("gltf: unknown accessor type " ++ kind);
+
+  // MATRICES ARE COLUMN-PADDED and this reader does not do the padding. The
+  // specification requires each column of a matrix accessor to start on a
+  // 4-byte boundary, so a MAT2 of bytes has two bytes of padding per column and
+  // a MAT3 of shorts has two. Only the cases where the columns are already
+  // aligned -- every MAT4, and any matrix of 4-byte components -- are read
+  // here; the rest are REFUSED BY NAME. Reading them as if they were packed
+  // would return numbers, and the numbers would be wrong.
+  let check_matrix_padding = fn (kind: str) -> fn (ct: int) ->
+    let is_mat = str_eq kind "MAT2" || str_eq kind "MAT3" || str_eq kind "MAT4" in
+    let cols = if str_eq kind "MAT2" then 2 else if str_eq kind "MAT3" then 3 else 4 in
+    if is_mat && bit_and (cols * comp_size ct) 3 != 0
+    then fail ("gltf: " ++ kind ++ " with componentType " ++ str_of_int ct
+               ++ " pads each column to four bytes, which this reader does not do")
+    else ();
+
+  // One component, as a double. `normalized` is applied here and nowhere else:
+  // the mapping is per component type and getting it wrong is invisible in the
+  // numbers but visible in the picture.
+  let read_comp = fn (b: bytes) -> fn (at: int) -> fn (ct: int) -> fn (norm: bool) ->
+    if ct == 5126 then LE.f32 b at
+    else if ct == 5121 then
+      let v = LE.u8 b at in
+      if norm then float_of_int v / 255.0 else float_of_int v
+    else if ct == 5120 then
+      let v = LE.i8 b at in
+      // The signed mappings clamp at -1: -128/127 is less than -1, and the
+      // specification says the extra value maps onto -1 rather than past it.
+      if norm then f_max (float_of_int v / 127.0) (0.0 - 1.0) else float_of_int v
+    else if ct == 5123 then
+      let v = LE.u16 b at in
+      if norm then float_of_int v / 65535.0 else float_of_int v
+    else if ct == 5122 then
+      let v = LE.i16 b at in
+      if norm then f_max (float_of_int v / 32767.0) (0.0 - 1.0) else float_of_int v
+    else if ct == 5125 then float_of_int (LE.u32 b at)
+    else fail ("gltf: unknown componentType " ++ str_of_int ct);
+
+  let read_int_comp = fn (b: bytes) -> fn (at: int) -> fn (ct: int) ->
+    if ct == 5121 then LE.u8 b at
+    else if ct == 5120 then LE.i8 b at
+    else if ct == 5123 then LE.u16 b at
+    else if ct == 5122 then LE.i16 b at
+    else if ct == 5125 then LE.u32 b at
+    else fail ("gltf: componentType " ++ str_of_int ct ++ " is not an integer type");
+
+  // Where element `k`, component `c` of accessor `a` lives, and in which
+  // buffer. `byteStride` is a property of the bufferView and spaces the
+  // ELEMENTS; components inside one element are always packed.
+  type span = { buf: bytes, start: int, stride: int, ct: int, nc: int, count: int, norm: bool };
+
+  let plan = fn (d: doc) -> fn (i: int) ->
+    let a = match J.at (J.req d.j "accessors") i with
+            | None -> fail ("gltf: no accessor " ++ str_of_int i)
+            | Some x -> x in
+    let _ = match J.field a "sparse" with
+            | None -> ()
+            | Some _ -> fail "gltf: sparse accessors are not implemented" in
+    let ct = J.int_ (J.req a "componentType") in
+    let kind = J.str_ (J.req a "type") in
+    let _ = check_matrix_padding kind ct in
+    let nc = n_comp kind in
+    let count = J.int_ (J.req a "count") in
+    let norm = J.bool_or a "normalized" false in
+    let packed = nc * comp_size ct in
+    match J.field a "bufferView" with
+    // An accessor with no bufferView reads as zeros -- the specification says
+    // so, and it is how a sparse accessor's base is written.
+    | None -> span { buf = bytes_of_hex "", start = 0, stride = 0,
+                     ct = ct, nc = nc, count = count, norm = norm }
+    | Some bvi ->
+      let bv = match J.at (J.req d.j "bufferViews") (J.int_ bvi) with
+               | None -> fail "gltf: accessor names a bufferView that is not there"
+               | Some x -> x in
+      let buf = Gltf.buffer d (J.int_or bv "buffer" 0) in
+      let start = J.int_or bv "byteOffset" 0 + J.int_or a "byteOffset" 0 in
+      let stride = J.int_or bv "byteStride" packed in
+      // Checked once here rather than per element: the read loop below is the
+      // hot one, and a bound test inside it would be the same test repeated.
+      let last = start + (count - 1) * stride + packed in
+      let _ = if count > 0 && last > bytes_len buf
+              then fail ("gltf: accessor " ++ str_of_int i ++ " runs " ++ str_of_int (last - bytes_len buf)
+                         ++ " bytes past the end of its buffer")
+              else () in
+      span { buf = buf, start = start, stride = stride,
+             ct = ct, nc = nc, count = count, norm = norm };
+
+  // `count * n_components` doubles, elements in order and components in order.
+  let floats = fn (d: doc) -> fn (i: int) ->
+    let p = plan d i in
+    let out = vec_new () in
+    let cs = if bytes_len p.buf == 0 then 0 else comp_size p.ct in
+    let rec elem = fn (k: int) ->
+      if k == p.count then ()
+      else
+        let base = p.start + k * p.stride in
+        let rec comp = fn (c: int) ->
+          if c == p.nc then ()
+          else
+            let _ = vec_push out (if bytes_len p.buf == 0 then 0.0
+                                  else read_comp p.buf (base + c * cs) p.ct p.norm) in
+            comp (c + 1) in
+        let _ = comp 0 in
+        elem (k + 1) in
+    let _ = elem 0 in
+    out;
+
+  // The same, as integers -- for indices and joint numbers, where turning them
+  // into doubles and back would be a conversion nobody asked for.
+  let ints = fn (d: doc) -> fn (i: int) ->
+    let p = plan d i in
+    let out = vec_new () in
+    let cs = if bytes_len p.buf == 0 then 0 else comp_size p.ct in
+    let rec elem = fn (k: int) ->
+      if k == p.count then ()
+      else
+        let base = p.start + k * p.stride in
+        let rec comp = fn (c: int) ->
+          if c == p.nc then ()
+          else
+            let _ = vec_push out (if bytes_len p.buf == 0 then 0
+                                  else read_int_comp p.buf (base + c * cs) p.ct) in
+            comp (c + 1) in
+        let _ = comp 0 in
+        elem (k + 1) in
+    let _ = elem 0 in
+    out;
+}

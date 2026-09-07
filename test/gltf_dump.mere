@@ -1,0 +1,83 @@
+// Every number a glTF document yields, as IEEE-754 bit patterns, for three
+// readers with three different jobs.
+//
+//   scripts/container_check.sh runs this over BOTH containers of the same model
+//   -- the .gltf with its buffers in files and the .glb with them in a chunk --
+//   and requires the output to be identical. NO ORACLE IS INVOLVED: the only
+//   thing that differs between the two is where the bytes came from, so they
+//   are each other's, and the check needs nothing installed.
+//
+//   It is also WEAKER THAN IT FIRST LOOKS, and this comment used to oversell it.
+//   Both containers go through the same accessor code, so anything wrong in
+//   that code is wrong identically in both and this check stays green. Measured
+//   by planting one: a reader that ignores `byteStride` misreads every
+//   interleaved model, and the two containers agree about the misreading
+//   perfectly. What is left to it is the container handling itself, and the
+//   fact that it costs nothing to run.
+//
+//   scripts/gltf_oracle.py reads the same file with its own code -- Python's
+//   `struct` against these hand-assembled little-endian reads, and its own GLB
+//   chunk walk -- and compares EXACTLY. It is the one that caught the stride.
+//
+//   scripts/check.sh also runs the four backends against each other on this,
+//   which catches a third thing again: a backend, rather than this program.
+//
+// Bit patterns and not digits, because a formatted double hides the low bits,
+// and normalized integer accessors divide -- 255ths and 32767ths are exactly
+// where a wrong divisor stays invisible in three decimal places.
+import "../src/gltf.mere";
+
+let path = match args () with
+  | Cons (a, _) -> a
+  | Nil -> fail "usage: gltf_dump <file.gltf|file.glb>";
+
+let d = Gltf.load path;
+let _ = Gltf.check_supported d;
+
+let p = fn (name: str) -> fn (x: float) ->
+  print (name ++ " " ++ str_of_int (float_bits_hi x) ++ " " ++ str_of_int (float_bits_lo x));
+
+// The document's shape first: a reader that got the counts wrong and the
+// numbers right is still wrong, and the numbers alone would not say so.
+let count_of = fn (k: str) ->
+  match J.field d.j k with | None -> 0 | Some v -> J.arr_len v;
+let _ = print ("shape accessors " ++ str_of_int (count_of "accessors")
+               ++ " bufferViews " ++ str_of_int (count_of "bufferViews")
+               ++ " buffers " ++ str_of_int (count_of "buffers")
+               ++ " meshes " ++ str_of_int (count_of "meshes")
+               ++ " nodes " ++ str_of_int (count_of "nodes")
+               ++ " materials " ++ str_of_int (count_of "materials"));
+
+let accs = match J.field d.j "accessors" with | None -> Json.JArr Nil | Some v -> v;
+let n = J.arr_len accs;
+
+let rec each = fn (i: int) ->
+  if i == n then ()
+  else
+    let a = match J.at accs i with | None -> fail "unreachable" | Some x -> x in
+    let ct = J.int_ (J.req a "componentType") in
+    let kind = J.str_ (J.req a "type") in
+    let cnt = J.int_ (J.req a "count") in
+    let norm = J.bool_or a "normalized" false in
+    let _ = print ("acc " ++ str_of_int i ++ " type " ++ kind ++ " comp " ++ str_of_int ct
+                   ++ " count " ++ str_of_int cnt ++ " normalized " ++ (if norm then "1" else "0")) in
+    // Integer component types are dumped BOTH ways: as the integers an index
+    // buffer wants, and as the doubles a normalized attribute becomes. The two
+    // paths through the reader are different code and a gate that ran only one
+    // of them would be checking half of it.
+    let _ =
+      if ct != 5126 then
+        let xs = Acc.ints d i in
+        let rec go = fn (k: int) ->
+          if k == vec_len xs then ()
+          else let _ = print ("  i" ++ str_of_int k ++ " " ++ str_of_int (vec_get xs k)) in go (k + 1) in
+        go 0
+      else () in
+    let fs = Acc.floats d i in
+    let rec go = fn (k: int) ->
+      if k == vec_len fs then ()
+      else let _ = p ("  f" ++ str_of_int k) (vec_get fs k) in go (k + 1) in
+    let _ = go 0 in
+    each (i + 1);
+let _ = each 0;
+print "end"

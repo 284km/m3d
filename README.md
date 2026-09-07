@@ -85,7 +85,77 @@ what is left is the address pattern — one stride of 3 against three strides of
 1. The measurement is here so that when a load builtin arrives, the before is
 on record.
 
+## Reading glTF
+
+`src/gltf.mere` reads both containers — a `.gltf` with its buffers in separate
+files, and a `.glb` with them in a BIN chunk — and turns any accessor into
+numbers: all six component types, all seven accessor types, `byteStride`,
+`normalized`, an accessor with no bufferView, and buffers beyond the first.
+
+`scripts/gltf_check.sh` holds it to four readers, and each is there because the
+others are blind to something:
+
+**The two containers against each other.** They hold the same accessor data, so
+the loader must produce identical numbers from both, and that check needs
+nothing installed. It is also the weakest of the four, which was measured
+rather than assumed: both containers run the same accessor code, so a reader
+that ignores `byteStride` misreads every interleaved model and the two agree
+about the misreading perfectly. What is left to it is the container handling.
+
+Its invariant is narrower than it first looks, too. BoxTextured's `.glb` has
+four bufferViews and its `.gltf` has three, because a GLB may carry an image
+inside the buffer where a `.gltf` references it as a file. The scene is the
+same; the document is not.
+
+**A second implementation, exactly.** `scripts/gltf_oracle.py` reads the same
+file with Python's `struct` and its own GLB walk. Both sides read the same four
+bytes of a float and divide the same exact integers, so the comparison is
+bit-exact and a tolerance would be hiding something. This is the one that
+catches a stride.
+
+**The Khronos validator.** The two readers above agree with each other and both
+read the same specification. Neither can say whether the *file* is legal glTF —
+which matters most for the synthetic model below, written by a script in this
+repository.
+
+**The malformed files are refused, by name.** Truncated, wrong header length,
+bad magic, version 1, and a chunk length that is not a multiple of four. A
+loader that reads a broken GLB and returns something is the failure that
+reaches a picture.
+
+### The corpus, and the hole in it
+
+Seven models from the Khronos sample set, both containers each where both
+exist, with a `PROVENANCE` recording URL, date and SHA-256. `curl` fetches
+them and not this project's own code: a vendoring tool that uses the subject to
+fetch the input its own gate will read is a shape worth not having.
+
+Measured across those seven: **every accessor is componentType 5123 or 5126,
+and not one is `normalized`.** Four of the six component types and the whole
+normalization path had no coverage, and the gates over that corpus were green
+about code they never ran. So `scripts/gen_synthetic_gltf.py` writes a model
+that uses all six, both settings of `normalized`, an interleaved view, a second
+buffer and every accessor type, with the values on the edges — including −128,
+whose normalized form clamps at −1 rather than reaching −128/127. The Khronos
+validator says that file is legal glTF, which is the part a differential test
+over a file we invented cannot establish.
+
+### Two bugs it found in the compiler
+
+Pointing this at the language turned up two, both fixed upstream in v0.1.446–447
+and both of the shape where `mere -c` emits happily and `clang` refuses:
+
+- `contrib/json` **could not parse a number with a decimal point.** glTF is
+  fractional throughout, so the format was simply unreadable. It now has a
+  second number constructor, `JFloat`, kept separate from `JNum` so that `12`
+  still round-trips as `12`.
+- A `type` declared inside a `module` produced **a dot in a C identifier** —
+  `closure_int_M.t` — in two separate places. Neither shows up unless the
+  function is used as a value.
+
 ## What is not here yet
 
-The glTF loader, the rasterizer, materials, the window, animation and skinning,
-and the GPU path. See `OPEN_QUESTIONS.md`.
+The rasterizer, materials, the window, animation and skinning, and the GPU
+path. Also, within the loader: sparse accessors, `data:` URIs (glTF-Embedded),
+and matrix accessors whose columns need 4-byte padding — all three **refused by
+name** rather than mis-read. See `OPEN_QUESTIONS.md`.

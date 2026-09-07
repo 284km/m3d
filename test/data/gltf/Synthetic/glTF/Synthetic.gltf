@@ -1,0 +1,280 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "m3d scripts/gen_synthetic_gltf.py"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "children": [
+    1,
+    2
+   ]
+  },
+  {
+   "matrix": [
+    1,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+    1.5,
+    -2.5,
+    3.5,
+    1
+   ]
+  },
+  {
+   "translation": [
+    1.0,
+    2.0,
+    3.0
+   ],
+   "rotation": [
+    0.2597,
+    0.5194,
+    0.7791,
+    0.2299
+   ],
+   "scale": [
+    2.0,
+    0.5,
+    1.0
+   ]
+  }
+ ],
+ "buffers": [
+  {
+   "uri": "synthetic0.bin",
+   "byteLength": 432
+  },
+  {
+   "uri": "synthetic1.bin",
+   "byteLength": 6
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 5
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 8,
+   "byteLength": 5
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 16,
+   "byteLength": 5
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 24,
+   "byteLength": 5
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 32,
+   "byteLength": 10
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 44,
+   "byteLength": 10
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 56,
+   "byteLength": 10
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 68,
+   "byteLength": 10
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 80,
+   "byteLength": 20
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 100,
+   "byteLength": 20
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 120,
+   "byteLength": 64,
+   "byteStride": 16
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 184,
+   "byteLength": 16
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 200,
+   "byteLength": 32
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 232,
+   "byteLength": 72
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 304,
+   "byteLength": 128
+  },
+  {
+   "buffer": 1,
+   "byteOffset": 0,
+   "byteLength": 6
+  }
+ ],
+ "accessors": [
+  {
+   "componentType": 5120,
+   "count": 5,
+   "type": "SCALAR",
+   "name": "i8",
+   "bufferView": 0
+  },
+  {
+   "componentType": 5120,
+   "count": 5,
+   "type": "SCALAR",
+   "normalized": true,
+   "name": "i8_norm",
+   "bufferView": 1
+  },
+  {
+   "componentType": 5121,
+   "count": 5,
+   "type": "SCALAR",
+   "name": "u8",
+   "bufferView": 2
+  },
+  {
+   "componentType": 5121,
+   "count": 5,
+   "type": "SCALAR",
+   "normalized": true,
+   "name": "u8_norm",
+   "bufferView": 3
+  },
+  {
+   "componentType": 5122,
+   "count": 5,
+   "type": "SCALAR",
+   "name": "i16",
+   "bufferView": 4
+  },
+  {
+   "componentType": 5122,
+   "count": 5,
+   "type": "SCALAR",
+   "normalized": true,
+   "name": "i16_norm",
+   "bufferView": 5
+  },
+  {
+   "componentType": 5123,
+   "count": 5,
+   "type": "SCALAR",
+   "name": "u16",
+   "bufferView": 6
+  },
+  {
+   "componentType": 5123,
+   "count": 5,
+   "type": "SCALAR",
+   "normalized": true,
+   "name": "u16_norm",
+   "bufferView": 7
+  },
+  {
+   "componentType": 5125,
+   "count": 5,
+   "type": "SCALAR",
+   "name": "u32",
+   "bufferView": 8
+  },
+  {
+   "componentType": 5126,
+   "count": 5,
+   "type": "SCALAR",
+   "name": "f32",
+   "bufferView": 9
+  },
+  {
+   "componentType": 5126,
+   "count": 4,
+   "type": "VEC3",
+   "name": "inter_pos",
+   "bufferView": 10
+  },
+  {
+   "componentType": 5121,
+   "count": 4,
+   "type": "VEC4",
+   "byteOffset": 12,
+   "normalized": true,
+   "name": "inter_col",
+   "bufferView": 10
+  },
+  {
+   "componentType": 5126,
+   "count": 2,
+   "type": "VEC2",
+   "name": "vec2",
+   "bufferView": 11
+  },
+  {
+   "componentType": 5126,
+   "count": 2,
+   "type": "MAT2",
+   "name": "mat2",
+   "bufferView": 12
+  },
+  {
+   "componentType": 5126,
+   "count": 2,
+   "type": "MAT3",
+   "name": "mat3",
+   "bufferView": 13
+  },
+  {
+   "componentType": 5126,
+   "count": 2,
+   "type": "MAT4",
+   "name": "mat4",
+   "bufferView": 14
+  },
+  {
+   "componentType": 5123,
+   "count": 3,
+   "type": "SCALAR",
+   "name": "second_buffer",
+   "bufferView": 15
+  }
+ ]
+}

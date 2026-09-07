@@ -1,0 +1,44 @@
+// Little-endian reads out of a `bytes`.
+//
+// glTF is little-endian throughout -- the GLB header, every chunk length, the
+// u16 and u32 index buffers, and every f32 of vertex data -- and `bytes_get`
+// reads one byte. So every multi-byte value in the format is assembled here,
+// which makes this the one place worth measuring: `scripts/le_measure.sh`
+// reports what the assembly costs against reading the same buffer a byte at a
+// time, and that number is the argument for or against a builtin.
+//
+// `bit_shr` IS ARITHMETIC on every backend, so a right shift of a negative
+// number propagates the sign. Nothing here shifts right, and the sign
+// extensions below are written as a subtract rather than as a shift pair for
+// that reason: `if x >= 0x8000 then x - 0x10000 else x` says what it means and
+// does not depend on the shift's flavour.
+module LE {
+  let u8 = fn (b: bytes) -> fn (i: int) -> bytes_get b i;
+
+  let i8 = fn (b: bytes) -> fn (i: int) ->
+    let x = bytes_get b i in
+    if x >= 128 then x - 256 else x;
+
+  let u16 = fn (b: bytes) -> fn (i: int) ->
+    bit_or (bytes_get b i) (bit_shl (bytes_get b (i + 1)) 8);
+
+  let i16 = fn (b: bytes) -> fn (i: int) ->
+    let x = bit_or (bytes_get b i) (bit_shl (bytes_get b (i + 1)) 8) in
+    if x >= 32768 then x - 65536 else x;
+
+  // Unsigned, and it stays unsigned: int is 64-bit on the C, LLVM and Wasm
+  // backends and 63-bit on the interpreter, so a value up to 2^32-1 fits
+  // everywhere with room to spare and needs no sign fix.
+  let u32 = fn (b: bytes) -> fn (i: int) ->
+    bit_or (bit_or (bytes_get b i) (bit_shl (bytes_get b (i + 1)) 8))
+           (bit_or (bit_shl (bytes_get b (i + 2)) 16) (bit_shl (bytes_get b (i + 3)) 24));
+
+  // The 32-bit pattern, then the backend's own float32-to-double widening --
+  // the same delegation `f32_bits` makes, so no rounding is written here.
+  let f32 = fn (b: bytes) -> fn (i: int) -> float_of_f32_bits (u32 b i);
+
+  // A four-character tag as an int, the way GLB writes its chunk types. Read
+  // as a u32 so a comparison is one integer compare rather than four.
+  let tag = fn (c0: int) -> fn (c1: int) -> fn (c2: int) -> fn (c3: int) ->
+    bit_or (bit_or c0 (bit_shl c1 8)) (bit_or (bit_shl c2 16) (bit_shl c3 24));
+}

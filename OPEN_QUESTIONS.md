@@ -27,6 +27,42 @@ instead of merely embarrassing.
   `f32x4_load` in the sentence saying there is no such builtin, so a grep for it would
   report this question as answered by the paragraph explaining that it is not.)
 
+## Q-6: is a little-endian read worth a builtin
+
+- **State**: open, measured, and the answer is **not yet** — recorded rather than acted on.
+- glTF is little-endian throughout, and `bytes_get` reads one byte, so every multi-byte
+  value in the format is four reads and three shifts in `src/bytes_le.mere`. The language
+  has no `bytes_get_u32le`. The question is whether that costs enough to add one.
+- **Measured** (`bench/le.mere` and a C reference, 2,000,000 values x 20 passes, C backend):
+
+  | | Mere | C, the same shifts | C, one unaligned load |
+  |---|---|---|---|
+  | assembling a u32 | 37 ms | 13 ms | **3.0 ms** |
+  | reading an f32 **as an accessor does** | **69 ms** | -- | 66 ms |
+
+- **The float row is the one that decides it.** A vertex buffer is float, and there Mere
+  is already at C's speed: the conversion and the arithmetic dominate, and the assembly
+  hides behind them. A builtin would buy nothing on the data that makes up the bulk of a
+  model.
+- The integer row is a real gap -- 12x against a single load -- and it is the index
+  buffer, which is a fraction of the size of the vertex data. A model would have to be
+  index-heavy in a way none in `test/data` is before that mattered.
+- **Revisit when**: a real model's load time is measured and the index read is a visible
+  share of it. Guessing that it will be is what this measurement is here to prevent.
+- **Verify**: `! "$MERE" -te 'bytes_get_u32le' >/dev/null 2>&1`
+
+## Q-7: glTF-Embedded (`data:` URIs) needs base64, which the language has as an example
+
+- **State**: open, deliberately out of scope for the loader's first slice.
+- A `data:application/octet-stream;base64,...` URI is one of glTF's three container
+  shapes. The loader **refuses it by name** rather than mis-reading it as a filename.
+- The language has base64 in `examples/base64_bytes.mere` -- over `bytes`, byte-identical
+  on all four backends -- and *not* in `contrib/`. Two contrib modules (`auth/jwt`,
+  `http/basic_auth`) already mention base64, so this would be a third consumer and the
+  argument for promoting it is close to made. That promotion is a change to the language
+  repository, not to this one.
+- **Verify**: `! ls "$MERE_SRC/contrib/encoding/base64.mere" >/dev/null 2>&1`
+
 ## Q-2: does `linalg` belong in the language's `contrib/`
 
 - **State**: open. It stays here until there is a second consumer.

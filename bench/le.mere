@@ -1,0 +1,67 @@
+// What the little-endian assembly costs, which is the question OPEN_QUESTIONS Q-6 asks:
+// is `bytes_get_u32le` worth adding to the language, or is four reads and three shifts
+// already cheap enough.
+//
+// Three loops over the same buffer, so the difference between them is the assembly and
+// not the traversal:
+//
+//   bytes   one `bytes_get` per byte, summed. The floor -- the same number of reads the
+//           u32 loop makes, with nothing built out of them.
+//   u32     four reads and three shifts per value, the integer half of the work.
+//   f32     the same, plus `float_of_f32_bits`, which is what an accessor actually does.
+//
+// A checksum from each, so a compiler that noticed one of the loops was dead would be
+// noticed back. They are deliberately different sums -- the point is the time, and three
+// identical answers would mean the three loops were not doing three different things.
+import "../src/bytes_le.mere";
+
+let n = match args () with | Cons (a, _) -> int_of_str a | Nil -> 2000000;
+let reps = 20;
+
+// A buffer of n float32s, built once. `bytes_of_hex` is the only way to get an
+// arbitrary `bytes` in this language, so the hex is built first and frozen.
+let hexdig = "0123456789abcdef";
+let buf =
+  let sb = strbuf_new () in
+  let rec fill = fn (i: int) -> fn (x: int) ->
+    if i == 4 * n then ()
+    else
+      let x2 = (1103515245 * x + 12345) % 2147483648 in
+      let b = x2 % 256 in
+      let _ = strbuf_push sb (char_at hexdig (b / 16)) in
+      let _ = strbuf_push sb (char_at hexdig (b % 16)) in
+      fill (i + 1) x2 in
+  let _ = fill 0 20260907 in
+  bytes_of_hex (strbuf_to_str sb);
+
+let rec sum_bytes = fn (i: int) -> fn (acc: int) ->
+  if i == 4 * n then acc else sum_bytes (i + 1) (acc + bytes_get buf i);
+let rec sum_u32 = fn (i: int) -> fn (acc: int) ->
+  if i == n then acc else sum_u32 (i + 1) (acc + bit_and (LE.u32 buf (4 * i)) 65535);
+let rec sum_f32 = fn (i: int) -> fn (acc: float) ->
+  if i == n then acc
+  else
+    let v = LE.f32 buf (4 * i) in
+    // NaNs and infinities are in there by construction (the bytes are random), and
+    // adding them would make the checksum useless as a liveness check.
+    sum_f32 (i + 1) (if v == v && f_abs v < 1e30 then acc + v else acc);
+
+let rec rep_b = fn (r: int) -> fn (a: int) -> if r == reps then a else rep_b (r + 1) (sum_bytes 0 a);
+let rec rep_u = fn (r: int) -> fn (a: int) -> if r == reps then a else rep_u (r + 1) (sum_u32 0 a);
+let rec rep_f = fn (r: int) -> fn (a: float) -> if r == reps then a else rep_f (r + 1) (sum_f32 0 a);
+
+let t0 = time ();
+let cb = rep_b 0 0;
+let t1 = time ();
+let cu = rep_u 0 0;
+let t2 = time ();
+let cf = rep_f 0 0.0;
+let t3 = time ();
+
+let _ = print ("n " ++ str_of_int n ++ " reps " ++ str_of_int reps
+               ++ " (" ++ str_of_int (4 * n) ++ " bytes per pass)");
+let _ = print ("checksums " ++ str_of_int cb ++ " " ++ str_of_int cu ++ " " ++ str_of_float cf);
+let _ = print ("bytes " ++ str_of_float (t1 - t0) ++ " s   (" ++ str_of_int (4 * n * reps) ++ " bytes_get)");
+let _ = print ("u32   " ++ str_of_float (t2 - t1) ++ " s   (the same reads, plus 3 shifts and 3 ors per value)");
+let _ = print ("f32   " ++ str_of_float (t3 - t2) ++ " s   (u32 plus float_of_f32_bits)");
+exit 0

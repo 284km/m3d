@@ -1,0 +1,18 @@
+import "../src/bytes_le.mere";
+let b = bytes_of_hex "01ff00800000803f0000c0bf7b000000ffffffff";
+let ck = fn (n: str) -> fn (a: int) -> fn (e: int) ->
+  if a == e then () else print ("MISMATCH " ++ n ++ " got " ++ str_of_int a ++ " want " ++ str_of_int e);
+let ckf = fn (n: str) -> fn (a: float) -> fn (e: float) ->
+  if float_bits_hi a == float_bits_hi e && float_bits_lo a == float_bits_lo e then ()
+  else print ("MISMATCH " ++ n ++ " got " ++ str_of_float a);
+let _ = ck "u8"  (LE.u8 b 1) 255;
+let _ = ck "i8+" (LE.i8 b 0) 1;
+let _ = ck "i8-" (LE.i8 b 1) (0 - 1);
+let _ = ck "u16" (LE.u16 b 2) 32768;
+let _ = ck "i16" (LE.i16 b 2) (0 - 32768);
+let _ = ck "u32" (LE.u32 b 12) 123;
+let _ = ck "u32max" (LE.u32 b 16) 4294967295;
+let _ = ckf "f32 1.0"  (LE.f32 b 4) 1.0;
+let _ = ckf "f32 -1.5" (LE.f32 b 8) (0.0 - 1.5);
+let _ = ck "tag glTF" (LE.tag 103 108 84 70) 1179937895;
+print "le_check: ok"

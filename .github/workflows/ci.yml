@@ -15,9 +15,10 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # Measured at about 30 seconds on a developer machine: four backends over two
-    # small programs, plus a Python pass. The limit is generous rather than tight
-    # because a hosted runner builds the compiler first.
+    # Measured at about 90 seconds on a developer machine: four backends over the
+    # linear-algebra programs, then the glTF corpus through three more readers.
+    # The limit is generous rather than tight because a hosted runner builds the
+    # compiler from source first.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +42,11 @@ jobs:
       # agreeing is a weaker statement than four.
       - name: Install wabt
         run: sudo apt-get update && sudo apt-get install -y wabt
+
+      # The Khronos validator is the only reader here that can say whether the
+      # files themselves are legal glTF; without it that column prints SKIP.
+      - name: Install the glTF validator
+        run: npm install --no-save gltf-validator
 
       - name: Gates
         env:
