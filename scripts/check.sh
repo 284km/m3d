@@ -28,4 +28,10 @@ sh "$ROOT/scripts/northstar_check.sh" || exit 1
 # green run is not evidence that this column ran. Its own line reports how many models
 # it compared.
 sh "$ROOT/scripts/reference_check.sh" || exit 1
+
+# The only gate that ends at a screen instead of a buffer: it opens a window, shows a
+# frame, READS THE WINDOW'S PIXELS BACK and compares. SKIPS ITSELF, by name, without SDL2
+# or a C compiler -- neither is a build dependency of a Mere program, and the window
+# externs are C-backend only.
+sh "$ROOT/scripts/screen_check.sh" || exit 1
 echo "check: ok"

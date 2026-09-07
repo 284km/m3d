@@ -27,6 +27,59 @@ grep -q 'JFloat' "$ROOT/.mere_modules/json/json.mere" \
 # PNG, and the DEFLATE it is built on. Two more Mere-written projects rather than a C
 # library: MERE_DOGFOOD points at the directory holding them (github.com/284km/<name>).
 DOG="${MERE_DOGFOOD:-$(dirname "$(dirname "$MERE_SRC")")/284km}"
+# THE WINDOW, and the canvas type it shows. Both are in the Mere repository's contrib,
+# and neither knows anything about glTF -- one opens a window and hands it pixels, the
+# other is a width, a height and a byte buffer.
+#
+# `canvas` is the same shape as this renderer's own `target`, so the bridge is one record
+# literal. That is not luck: both are "the pixels, and how many of them", which is the
+# only thing a window needs to be told.
+#
+# ONLY src/view.mere IMPORTS THESE. The window declares SDL2 externs and is C-backend
+# only, so pulling it into main.mere would end the four-backend comparison that
+# linalg_check runs -- the same rule mbrowse states as "the driver imports the renderer
+# and does not drag the window into it".
+for pkg in raster window; do
+  mkdir -p "$ROOT/.mere_modules/mere-$pkg"
+done
+cp "$MERE_SRC/contrib/raster/canvas.mere" "$ROOT/.mere_modules/mere-raster/canvas.mere"
+cp "$MERE_SRC/contrib/window/window.mere" "$ROOT/.mere_modules/mere-window/window.mere"
+# The readback is the whole reason this is checkable, so a copy without it is refused.
+grep -q 'let capture' "$ROOT/.mere_modules/mere-window/window.mere" \
+  || { echo "vendor: this copy of contrib/window has no readback, so the screen gate cannot exist" >&2; exit 1; }
+
+# A VENDORED MODULE'S IMPORTS NAME THE PACKAGE, NOT A SIBLING FILE. `contrib/window`
+# says `import "../raster/canvas.mere"`, which resolves inside the Mere repository's
+# contrib tree and nowhere else -- as a vendored copy it has to say
+# `mere-raster/canvas.mere`.
+#
+# Done in python because the obvious `sed -E` for it is one of the places BSD and GNU
+# differ, and ANYTHING LEFT OVER IS AN ERROR HERE rather than a parse failure at the
+# module's first use. mbrowse's version of this rewriter records being wrong twice, both
+# times by silently skipping a form it did not recognise.
+python3 - "$ROOT" <<'REWIRE'
+import os, re, sys
+root = sys.argv[1]
+for pkg in ("mere-raster", "mere-window"):
+    d = os.path.join(root, ".mere_modules", pkg)
+    for f in os.listdir(d):
+        if not f.endswith(".mere"):
+            continue
+        p = os.path.join(d, f)
+        s = open(p).read()
+        s2 = re.sub(r'import "(?!mere-)([a-z0-9_]+\.mere)"', r'import "%s/\1"' % pkg, s)
+        s2 = re.sub(r'import "\.\./([a-z0-9_]+)/([a-z0-9_]+\.mere)"',
+                    r'import "mere-\1/\2"', s2)
+        # At the START OF A LINE, because a path inside a usage comment is not an import.
+        left = [m for m in re.findall(r'(?m)^import "([^"]+)"', s2) if not m.startswith("mere-")]
+        if left:
+            raise SystemExit("vendor: %s/%s imports %s, which nothing rewrote -- the "
+                             "vendored copy would not resolve it" % (pkg, f, left))
+        if s2 != s:
+            open(p, "w").write(s2)
+REWIRE
+echo "vendored mere-raster/canvas.mere and mere-window/window.mere"
+
 # JPEG, which came out of mbrowse into a package of its own when this renderer asked for
 # it: six of the corpus's models carry JPEG textures. It reads a JPEG and knows nothing
 # about the web, and it now takes BYTES rather than a path -- a glTF image may be a range

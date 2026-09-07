@@ -1,0 +1,176 @@
+// view.mere — the renderer in a window.
+//
+//   m3d-view <file.gltf|file.glb> [--size N] [--time t] [--anim i] [--check]
+//
+// A SEPARATE ENTRY POINT FROM main.mere, and that is the point rather than an
+// accident. The window declares SDL2 externs and only the C backend emits them,
+// so importing it into main.mere would end the four-backend comparison that
+// linalg_check runs over every other file here. main.mere writes a PNG and stays
+// portable; this one opens a window and does not.
+//
+// `--check` renders one frame, shows it, READS THE WINDOW'S PIXELS BACK and
+// compares them byte for byte, then exits with a verdict instead of waiting for
+// anyone. That is what makes a window checkable without a person looking at a
+// screen, and `Window.capture` poisons the block before reading so that a
+// readback which does nothing at all cannot pass -- `show` wrote into that same
+// block, so without the poison it would hand back exactly what was written.
+import "./render.mere";
+import "mere-window/window.mere";
+import "mpng/encode.mere";
+
+let argv = args ();
+
+let find_flag = fn (l: str list) -> fn (name: str) ->
+  let rec go = fn (xs) ->
+    match xs with
+    | Nil -> None
+    | Cons (a, rest) ->
+      if a == name then (match rest with | Cons (v, _) -> Some v | Nil -> None)
+      else go rest in
+  go l;
+
+let has_flag = fn (l: str list) -> fn (name: str) ->
+  let rec go = fn (xs) ->
+    match xs with
+    | Nil -> false
+    | Cons (a, rest) -> if a == name then true else go rest in
+  go l;
+
+let path = match argv with | Cons (p, _) -> p | Nil -> "";
+let _ = if path == "" then fail "usage: m3d-view <file.gltf|file.glb> [--size 512] [--time 0] [--anim 0] [--check]" else ();
+
+let size = match find_flag argv "--size" with | None -> 512 | Some v -> int_of_str v;
+let time = match find_flag argv "--time" with | None -> 0.0 | Some v -> float_of_str v;
+let anim = match find_flag argv "--anim" with | None -> 0 | Some v -> int_of_str v;
+let check_only = has_flag argv "--check";
+let out = find_flag argv "--out";
+
+let d = Gltf.load path;
+let _ = Gltf.check_supported d;
+
+// The background the window composites against, and the one the renderer clears to,
+// are THE SAME NUMBER written two ways -- and MEASURED, changing one of them alone
+// changes no pixel at all. `Target.clear` writes alpha 255, so every pixel is opaque
+// and source-over is the identity. The agreement matters only for a frame that has
+// a transparent pixel in it, and then it matters immediately: poison P4 in
+// scripts/screen_check.sh makes one pixel transparent and the readback comes back
+// blended. Written here because "these two must agree" would otherwise read as a
+// claim this file can check, and it cannot on its own.
+let bg_r = 26;
+let bg_g = 26;
+let bg_b = 30;
+
+let (t, depth, drawn, eye, ctr, th, zn, zf) =
+  Render.one_frame_anim d size size true
+    (v3 { x = float_of_int bg_r, y = float_of_int bg_g, z = float_of_int bg_b })
+    time anim;
+
+let _ = print ("primitives " ++ str_of_int drawn ++ " size " ++ str_of_int size);
+
+// THE VERDICT IS BOTH A SENTENCE AND AN EXIT CODE. 0 said something was checked and
+// it held; 2 said nothing was checked and says why; 1 said the check ran and failed.
+// A gate that read only the text would call a crash-before-printing a pass, and one
+// that read only the code could not tell "no display" from "identical".
+//
+// A WINDOW THAT WILL NOT OPEN IS NOT A FAILURE. No display, no SDL, or a headless
+// machine are ordinary conditions -- `Window.open_` says so by returning an option
+// and this says so by name rather than aborting.
+let code =
+  match Window.open_ size size ("m3d — " ++ path) with
+  | None ->
+    let _ = print "m3d-view: SKIP — no window (no display, or SDL2 is not there), so nothing was shown" in
+    2
+  | Some win ->
+    let cv = canvas { w = t.w, h = t.h, px = t.color } in
+    let bg = bg_r * 65536 + bg_g * 256 + bg_b in
+    if not (Window.show win cv bg) then
+      let _ = Window.close win in
+      let _ = print "m3d-view: FAIL — the window refused the frame" in
+      1
+    else if check_only then
+      // THE RENDERER'S SIZE IS NOT THE WINDOW'S SIZE on a HiDPI display, and the
+      // readback comes back at the renderer's. Comparing a 256-wide readback with a
+      // 128-wide painting would report every pixel as differing and the real reason
+      // would be nowhere in the output, so the mismatch is refused BY NAME instead.
+      // `SDL_VIDEODRIVER=dummy` is how the gate avoids it: no display, and a
+      // renderer exactly the size asked for.
+      let (rw, rh) = Window.size win in
+      if rw != t.w || rh != t.h then
+        let _ = Window.close win in
+        let _ = print ("m3d-view: SKIP — the renderer is " ++ str_of_int rw ++ "x" ++ str_of_int rh
+               ++ " but the painting is " ++ str_of_int t.w ++ "x" ++ str_of_int t.h
+               ++ " (a HiDPI display scales it) — run with SDL_VIDEODRIVER=dummy") in
+        2
+      else
+      // THE READBACK, compared byte for byte against what was drawn.
+      match Window.capture win with
+      | None ->
+        let _ = Window.close win in
+        let _ = print "m3d-view: FAIL — the readback gave nothing" in
+        1
+      | Some got ->
+        let n = t.w * t.h in
+        let rec cmp = fn (i: int) -> fn (bad: int) -> fn (first: int) ->
+          if i >= n then (bad, first)
+          else
+            let o = i * 4 in
+            // RGB AND NOT ALPHA, deliberately. `Window.capture` documents that alpha
+            // comes back opaque whatever went in, so comparing it would compare a
+            // constant against the painter's alpha and call any legitimately
+            // transparent frame a failure. What alpha is FOR here is caught the other
+            // way round: leave a pixel transparent before the composite and its RGB
+            // comes back blended, which is poison P4.
+            let same = bytebuf_get got.px o == bytebuf_get t.color o
+                       && bytebuf_get got.px (o + 1) == bytebuf_get t.color (o + 1)
+                       && bytebuf_get got.px (o + 2) == bytebuf_get t.color (o + 2) in
+            if same then cmp (i + 1) bad first
+            else cmp (i + 1) (bad + 1) (if first < 0 then i else first) in
+        let (bad, first) = cmp 0 0 (0 - 1) in
+        let _ = Window.close win in
+        // WRITE OUT WHAT THE WINDOW SHOWED, not what the renderer painted. The two
+        // agree here only because the comparison above says so; writing the readback
+        // is what lets the gate then ask a SECOND, independent question — whether the
+        // window path and `m3d --out`'s file path are the same picture at all. They
+        // are different entry points, and nothing above compares them.
+        let _ =
+          match out with
+          | None -> ()
+          | Some o2 ->
+            let asrc = target { w = got.w, h = got.h, color = got.px } in
+            let _ = write_bytes o2
+                      (bytes_of_vec (encode_rgb8 (Render.to_png_rgb asrc) got.w got.h)) in
+            print ("wrote " ++ o2) in
+        if bad == 0 then
+          let _ = print ("m3d-view: ok — " ++ str_of_int n
+                         ++ " pixels read back identical to the painter's") in
+          0
+        else
+          let o = first * 4 in
+          let _ = print ("m3d-view: FAIL — " ++ str_of_int bad ++ " of " ++ str_of_int n
+                 ++ " pixels differ, first at (" ++ str_of_int (first % t.w) ++ ", "
+                 ++ str_of_int (first / t.w) ++ "): window "
+                 ++ str_of_int (bytebuf_get got.px o) ++ ","
+                 ++ str_of_int (bytebuf_get got.px (o + 1)) ++ ","
+                 ++ str_of_int (bytebuf_get got.px (o + 2)) ++ " painter "
+                 ++ str_of_int (bytebuf_get t.color o) ++ ","
+                 ++ str_of_int (bytebuf_get t.color (o + 1)) ++ ","
+                 ++ str_of_int (bytebuf_get t.color (o + 2))) in
+          1
+    else
+      // Wait for the window to be closed. Nothing moves yet -- orbit and zoom are
+      // the next slice -- so the loop only has to notice Quit and Escape.
+      let rec loop = fn (k: int) ->
+        if k > 100000000 then ()
+        else
+          // 16 ms, so an idle window is not a busy loop. Nothing moves yet — orbit is
+          // the next slice — so the only events that matter are Quit and Escape.
+          match Window.poll 16 with
+          | Quit -> ()
+          | KeyDown c -> if c == 27 then () else loop (k + 1)
+          | _ -> loop (k + 1) in
+      let _ = loop 0 in
+      let _ = Window.close win in
+      let _ = print "m3d-view: closed" in
+      0;
+
+exit code

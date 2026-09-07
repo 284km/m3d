@@ -13,9 +13,11 @@ textures and writes a PNG. Every gate below runs on every commit.
 ## Building
 
 Needs a built `mere` and a C compiler. Its Mere dependencies — `contrib/json`,
-[mpng](https://github.com/284km/mpng) and [mgz](https://github.com/284km/mgz) —
-are vendored under `.mere_modules/` and committed, so a checkout builds without
-fetching anything.
+[mjpeg](https://github.com/284km/mjpeg), [mpng](https://github.com/284km/mpng),
+[mgz](https://github.com/284km/mgz), and `contrib/raster` and `contrib/window` for
+the windowed viewer — are vendored under `.mere_modules/` and committed, so a
+checkout builds without fetching anything. Only the viewer needs SDL2, and only
+`scripts/screen_check.sh` needs it to run.
 
 ```
 mere -c src/main.mere > m3d.c && clang -O2 -w m3d.c -o m3d -lm
@@ -658,6 +660,77 @@ caught: the tangent scaling, and *which* animation is played — `InterpolationT
 nine target nine separate nodes, so applying all of them still gives each node
 the right value.
 
+## On a screen
+
+`src/main.mere` writes a PNG. `src/view.mere` opens a window and shows the same
+frame, using [`contrib/window`](https://github.com/merelang/mere) over SDL2:
+
+```
+mere -c src/view.mere > view.c
+clang -O2 -w view.c -o m3d-view -lm $(sdl2-config --cflags --libs)
+./m3d-view test/data/gltf/Duck/glTF/Duck.gltf --size 512
+```
+
+**It is a separate entry point, and that is the design rather than an accident.**
+The window declares four SDL2 `extern fn` lines and only the C backend emits them,
+so importing it into `main.mere` would end the four-backend comparison that
+`linalg_check` runs over every other file here. `main.mere` writes a file and stays
+portable; this one opens a window and does not. The bridge between them is one
+record literal — `mere-raster`'s canvas is `{ w, h, px }` and this renderer's target
+is `{ w, h, color }`, the same three fields under two names.
+
+### A window that can be checked without anybody looking at it
+
+`--check` renders one frame, shows it, **reads the window's pixels back**, compares
+them byte for byte and exits with a verdict. `scripts/screen_check.sh` runs that
+over eight models and asks a second question the first cannot:
+
+| the question | what is compared |
+|---|---|
+| does the window show what the renderer painted | the readback against the paint buffer |
+| is that the picture `m3d --out` writes | the readback, encoded as PNG, against the file, byte for byte |
+
+The second exists because these are two entry points and *nothing in the first
+compares them*. A window that faithfully shows a frame no other code path would
+have painted passes the first question and fails the project. All eight models are
+identical on both.
+
+**A readback is normally not evidence, and here it is.** `Window.show` writes the
+pixels into a block of memory and `Window.capture` reads that same block, so a
+capture that short-circuited would hand back exactly what was written and the
+comparison would pass while proving nothing at all. `contrib/window` fills the
+block with magenta before asking SDL for the pixels, so a readback that does not
+happen comes back as the poison — and replacing the readback with a no-op does
+report `4096 of 4096 pixels differ, window 255,0,255`.
+
+Eight poisons, four on the renderer and four on the gate. Two are worth the space:
+
+- **The composite background changed to red, and nothing happened.** Not a hole in
+  the gate: `Target.clear` writes alpha 255, so every pixel is opaque, source-over
+  is the identity, and *no pixel's colour depends on the background*. Nothing can
+  detect a change that changes nothing. Leaving one pixel transparent first makes
+  it visible immediately — so the two spellings of that colour do have to agree,
+  and the poison that polices it is the transparent pixel, not the colour.
+- **Poisoning the picture comparison found a defect in the gate's own reporting.**
+  Every model failed, so the count of passes was zero, so the vacuity guard fired
+  first and announced *"every model skipped, so this gate is vacuous"* about a run
+  in which nothing skipped and everything failed. Right verdict, wrong reason — and
+  the wrong reason is what somebody would go and investigate. Failures are now
+  reported before vacuity.
+
+The gate runs under `SDL_VIDEODRIVER=dummy`, which is what makes it runnable with
+no display — and is a real limit, recorded rather than assumed. It exercises SDL's
+software path, not a GPU, a compositor or a HiDPI scale factor. **The renderer's
+size is not the window's size on a HiDPI display** and the readback comes back at
+the renderer's; comparing a 256-wide readback with a 128-wide painting would report
+every pixel as differing with the real reason nowhere in the output, so `view.mere`
+refuses that mismatch **by name** instead. Whether a real display shows this
+correctly is not something this gate says.
+
+Nothing moves yet: the window shows one frame and waits for Quit or Escape. Orbit,
+pan and zoom are next, and zoom needs keys or a drag because `contrib/window` has
+no wheel event.
+
 ## What is not here yet
 
 Ranked by what the corpus table says, rather than by what seems interesting:
@@ -695,7 +768,8 @@ Ranked by what the corpus table says, rather than by what seems interesting:
 - **Near-plane clipping**: a triangle with any vertex behind the eye is dropped
   whole, which is right for every model in the corpus and wrong for a camera
   inside geometry.
-- **The window and the GPU path.**
+- **The GPU path.** Everything here is a software rasterizer. The window shows the
+  buffer it produced; nothing is drawn by a GPU.
 
 Within the loader: **`data:` URIs** (glTF-Embedded) and matrix accessors whose
 columns need 4-byte padding — both **refused by name** rather than mis-read.
