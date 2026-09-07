@@ -1,0 +1,157 @@
+// Textures: a decoded image, and how to read a colour out of it.
+//
+// A texture is RGBA8 and always four bytes a pixel, whatever the file was --
+// palette expanded, grey broadcast, alpha filled in. A sampler that had to know
+// the file's channel count would carry that knowledge into every call site.
+//
+// WHICH SLOT IS sRGB AND WHICH IS LINEAR IS A PROPERTY OF THE SLOT, NOT THE
+// FILE. glTF says baseColor and emissive are sRGB-encoded and that normal,
+// metallicRoughness and occlusion are not, and a PNG cannot tell you which it
+// is. Decoding a normal map through the transfer curve is the classic mistake
+// and produces lighting that is subtly wrong everywhere and obviously wrong
+// nowhere, so `Tex.sample_srgb` and `Tex.sample_linear` are separate names and
+// there is no default.
+//
+// Sampling is exact arithmetic: bilinear is three lerps, a lerp is two
+// multiplies and an add, and the sRGB decode is a table lookup. Nothing here
+// puts a pixel through `pow`, so the four-backend comparison survives it --
+// which was the open question when this file was planned.
+import "mpng/png.mere";
+import "./linalg.mere";
+import "./srgb.mere";
+
+type texture = { w: int, h: int, px: ByteBuf[R] };
+
+// Wrap modes, by glTF's own GL enums, so a sampler's JSON maps straight on.
+// 10497 REPEAT, 33071 CLAMP_TO_EDGE, 33648 MIRRORED_REPEAT.
+module Wrap {
+  let repeat_ = 10497;
+  let clamp_ = 33071;
+  let mirror_ = 33648;
+
+  // `%` in this language follows the sign of the dividend, so a negative
+  // coordinate would wrap to a negative index; the extra add is not decoration.
+  let apply = fn (mode: int) -> fn (i: int) -> fn (n: int) ->
+    if n <= 0 then 0
+    else if mode == clamp_ then (if i < 0 then 0 else if i >= n then n - 1 else i)
+    else if mode == mirror_ then
+      // Period 2n: forward through [0, n), then back. The reflection is
+      // 2n - 1 - k and not 2n - k, so the two ends of a mirrored pair are
+      // adjacent texels rather than the same one repeated.
+      let k = ((i % (2 * n)) + 2 * n) % (2 * n) in
+      if k < n then k else 2 * n - 1 - k
+    else ((i % n) + n) % n;
+}
+
+module Tex {
+  // A PNG as RGBA8. The channel expansion mirrors mpng's `rgb8` and adds the
+  // alpha that one drops, which is what a baseColor texture needs for MASK.
+  let of_png = fn (path: str) ->
+    let data = vec_of_bytes (read_bytes path) in
+    let hdr = read_header data in
+    if vec_len hdr == 0 then fail ("texture: not a PNG: " ++ path)
+    else
+      let w = vec_get hdr 0 in
+      let h = vec_get hdr 1 in
+      let depth = vec_get hdr 2 in
+      let colour = vec_get hdr 3 in
+      let bpp = pixel_bytes colour depth in
+      // A 16-bit sample is big-endian, so its high byte IS the 8-bit value.
+      let step = if depth == 16 then 2 else 1 in
+      let pixels = decode data in
+      let pal = palette data in
+      let out = bytebuf_new (w * h * 4) in
+      let rec go = fn (i: int) ->
+        if i == w * h then ()
+        else
+          let p = i * bpp in
+          let o = i * 4 in
+          let s0 = bytebuf_get pixels p in
+          let put = fn (r: int) -> fn (g: int) -> fn (b: int) -> fn (a: int) ->
+            let _ = bytebuf_set out o r in
+            let _ = bytebuf_set out (o + 1) g in
+            let _ = bytebuf_set out (o + 2) b in
+            bytebuf_set out (o + 3) a in
+          let _ =
+            if colour == 3 then
+              // An index past the end of PLTE is a broken file; black beats a
+              // crash, which is the choice mpng already made.
+              let e = s0 * 3 in
+              if e + 2 < vec_len pal
+              then put (vec_get pal e) (vec_get pal (e + 1)) (vec_get pal (e + 2)) 255
+              else put 0 0 0 255
+            else if colour == 0 then put s0 s0 s0 255
+            else if colour == 4 then put s0 s0 s0 (bytebuf_get pixels (p + step))
+            else if colour == 6 then
+              put s0 (bytebuf_get pixels (p + step)) (bytebuf_get pixels (p + step * 2))
+                  (bytebuf_get pixels (p + step * 3))
+            else put s0 (bytebuf_get pixels (p + step)) (bytebuf_get pixels (p + step * 2)) 255 in
+          go (i + 1) in
+      let _ = go 0 in
+      texture { w = w, h = h, px = out };
+
+  // One texel, wrapped. Returns the four bytes as they are stored -- no
+  // transfer curve, because whether one applies is the slot's business.
+  let texel = fn (t: texture) -> fn (wrap_s: int) -> fn (wrap_t: int) ->
+             fn (x: int) -> fn (y: int) ->
+    let xi = Wrap.apply wrap_s x t.w in
+    let yi = Wrap.apply wrap_t y t.h in
+    let o = (yi * t.w + xi) * 4 in
+    (bytebuf_get t.px o, bytebuf_get t.px (o + 1),
+     bytebuf_get t.px (o + 2), bytebuf_get t.px (o + 3));
+
+  // Nearest. The texel covering u is floor(u * w), which is why the half is
+  // NOT added here and is added in the bilinear one: nearest asks which texel
+  // contains the point, bilinear asks which centres surround it.
+  let nearest = fn (t: texture) -> fn (ws: int) -> fn (wt: int) ->
+                fn (u: float) -> fn (v: float) ->
+    texel t ws wt (int_of_float (floor (u * float_of_int t.w)))
+                  (int_of_float (floor (v * float_of_int t.h)));
+
+  let _lerp = fn (a: float) -> fn (b: float) -> fn (s: float) -> a + (b - a) * s;
+
+  // Bilinear over the four surrounding texel CENTRES. Texel (i, j)'s centre is
+  // at ((i + 0.5)/w, (j + 0.5)/h), so the sample point in texel units is
+  // u*w - 0.5 and the fraction is what is left of it.
+  //
+  // `floor` and not a cast: a cast truncates toward zero, so a coordinate just
+  // left of the origin would take the texel to its right and the seam would be
+  // one texel wide in a place nobody looks.
+  let bilinear_raw = fn (t: texture) -> fn (ws: int) -> fn (wt: int) ->
+                     fn (u: float) -> fn (v: float) -> fn (decode_ch) ->
+    let fx = u * float_of_int t.w - 0.5 in
+    let fy = v * float_of_int t.h - 0.5 in
+    let x0 = int_of_float (floor fx) in
+    let y0 = int_of_float (floor fy) in
+    let sx = fx - floor fx in
+    let sy = fy - floor fy in
+    let (r00, g00, b00, a00) = texel t ws wt x0 y0 in
+    let (r10, g10, b10, a10) = texel t ws wt (x0 + 1) y0 in
+    let (r01, g01, b01, a01) = texel t ws wt x0 (y0 + 1) in
+    let (r11, g11, b11, a11) = texel t ws wt (x0 + 1) (y0 + 1) in
+    // The colour channels go through whatever `decode_ch` is; ALPHA NEVER DOES.
+    // Alpha is a coverage fraction and was never on a transfer curve, and
+    // running it through one is a bug that shows up only at the edges of a
+    // cutout.
+    let mix4 = fn (c00: float) -> fn (c10: float) -> fn (c01: float) -> fn (c11: float) ->
+      _lerp (_lerp c00 c10 sx) (_lerp c01 c11 sx) sy in
+    let lin = fn (b: int) -> float_of_int b / 255.0 in
+    v4 { x = mix4 (decode_ch r00) (decode_ch r10) (decode_ch r01) (decode_ch r11),
+         y = mix4 (decode_ch g00) (decode_ch g10) (decode_ch g01) (decode_ch g11),
+         z = mix4 (decode_ch b00) (decode_ch b10) (decode_ch b01) (decode_ch b11),
+         w = mix4 (lin a00) (lin a10) (lin a01) (lin a11) };
+
+  // THE TRANSFER CURVE IS APPLIED BEFORE THE BLEND, not after. Averaging two
+  // sRGB bytes and decoding the average is a different number from decoding
+  // both and averaging -- the curve is not linear, which is the entire point of
+  // it -- and the visible result of getting it the wrong way round is that
+  // edges between light and dark go dark.
+  let sample_srgb = fn (t: texture) -> fn (ws: int) -> fn (wt: int) ->
+                    fn (u: float) -> fn (v: float) ->
+    bilinear_raw t ws wt u v Srgb.decode;
+
+  // For normal, metallicRoughness and occlusion, which are stored linearly.
+  let sample_linear = fn (t: texture) -> fn (ws: int) -> fn (wt: int) ->
+                      fn (u: float) -> fn (v: float) ->
+    bilinear_raw t ws wt u v (fn (b: int) -> float_of_int b / 255.0);
+}

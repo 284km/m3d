@@ -1,0 +1,67 @@
+// Every texel of every test image, and a grid of samples, for two readers.
+//
+//   scripts/check.sh runs this across the backends it can and requires the
+//   output to be identical.
+//
+//   scripts/tex_oracle.py decodes the same files with PIL -- a different PNG
+//   implementation entirely, in another language, sharing nothing with the Mere
+//   one but the specification -- and compares every texel EXACTLY. A PNG
+//   decoder is the one part of this project where an independent implementation
+//   is genuinely available, and it would be strange not to use it.
+//
+// The sample grid is checked the same way. Bilinear is three lerps and the sRGB
+// decode is a table lookup, so there is no rounding to disagree about and the
+// comparison is on bit patterns.
+import "../src/texture.mere";
+
+let names = Cons ("grey8", Cons ("greya8", Cons ("rgb8", Cons ("rgba8",
+            Cons ("pal8", Cons ("grey16", Nil))))));
+
+let bits = fn (x: float) -> str_of_int (float_bits_hi x) ++ " " ++ str_of_int (float_bits_lo x);
+
+let dump_one = fn (name: str) ->
+  let t = Tex.of_png ("test/data/png/" ++ name ++ ".png") in
+  let _ = print ("image " ++ name ++ " " ++ str_of_int t.w ++ " " ++ str_of_int t.h) in
+  // Every texel, unfiltered and unwrapped: the decoder's own answer.
+  let rec go = fn (i: int) ->
+    if i == t.w * t.h then ()
+    else
+      let (r, g, b, a) = Tex.texel t Wrap.clamp_ Wrap.clamp_ (i % t.w) (i / t.w) in
+      let _ = print ("t " ++ str_of_int i ++ " " ++ str_of_int r ++ " " ++ str_of_int g
+                     ++ " " ++ str_of_int b ++ " " ++ str_of_int a) in
+      go (i + 1) in
+  let _ = go 0 in
+  // The three wrap modes over a range that runs off both ends, so the sign
+  // handling and the reflection are both exercised rather than assumed.
+  let rec wr = fn (i: int) ->
+    if i > 10 then ()
+    else
+      let _ = print ("w " ++ str_of_int i
+                     ++ " " ++ str_of_int (Wrap.apply Wrap.repeat_ i t.w)
+                     ++ " " ++ str_of_int (Wrap.apply Wrap.clamp_ i t.w)
+                     ++ " " ++ str_of_int (Wrap.apply Wrap.mirror_ i t.w)) in
+      wr (i + 1) in
+  let _ = wr (0 - 10) in
+  // A sample grid that lands on texel centres, between them, and outside [0,1)
+  // on both sides. Both decodes, because which one a slot uses is a choice the
+  // renderer makes and getting it backwards is invisible in the numbers.
+  let rec sm = fn (k: int) ->
+    if k == 21 then ()
+    else
+      let u = (float_of_int k - 4.0) / 12.0 in
+      let v = (float_of_int (20 - k) - 4.0) / 12.0 in
+      let cs = Tex.sample_srgb t Wrap.repeat_ Wrap.mirror_ u v in
+      let cl = Tex.sample_linear t Wrap.mirror_ Wrap.repeat_ u v in
+      let _ = print ("s " ++ str_of_int k ++ " " ++ bits cs.x ++ " " ++ bits cs.y
+                     ++ " " ++ bits cs.z ++ " " ++ bits cs.w) in
+      let _ = print ("l " ++ str_of_int k ++ " " ++ bits cl.x ++ " " ++ bits cl.y
+                     ++ " " ++ bits cl.z ++ " " ++ bits cl.w) in
+      sm (k + 1) in
+  sm 0;
+
+let rec each = fn (xs) ->
+  match xs with
+  | Nil -> ()
+  | Cons (n, rest) -> let _ = dump_one n in each rest;
+let _ = each names;
+print "end"

@@ -23,4 +23,18 @@ echo "vendored json/json.mere"
 # number with a decimal point before v0.1.446, and glTF is unreadable without one.
 grep -q 'JFloat' "$ROOT/.mere_modules/json/json.mere" \
   || { echo "vendor: this copy of contrib/json has no JFloat — it predates v0.1.446 and cannot read glTF" >&2; exit 1; }
+
+# PNG, and the DEFLATE it is built on. Two more Mere-written projects rather than a C
+# library: MERE_DOGFOOD points at the directory holding them (github.com/284km/<name>).
+DOG="${MERE_DOGFOOD:-$(dirname "$(dirname "$MERE_SRC")")/284km}"
+if [ -f "$DOG/mpng/png.mere" ] && [ -f "$DOG/mgz/inflate.mere" ]; then
+  mkdir -p "$ROOT/.mere_modules/mpng" "$ROOT/.mere_modules/mgz"
+  cp "$DOG/mpng/png.mere" "$ROOT/.mere_modules/mpng/png.mere"
+  cp "$DOG/mgz/inflate.mere" "$ROOT/.mere_modules/mgz/inflate.mere"
+  echo "vendored mpng/png.mere and mgz/inflate.mere"
+else
+  echo "vendor: mpng or mgz not found under $DOG — set MERE_DOGFOOD" >&2
+  exit 1
+fi
+
 echo "vendor: ok"

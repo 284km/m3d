@@ -46,5 +46,20 @@ case "$out" in
   *) echo "$out" | grep MISMATCH | head -6; echo "shade_check: a BRDF property failed"; fail=1 ;;
 esac
 
+#   3. THE TEXTURES, against an independent PNG decoder. A PNG decoder is the one part of
+#      this project where a real second implementation is available off the shelf, so PIL
+#      decodes the same files and every texel is compared exactly. The wrap modes and the
+#      bilinear filter are followed there too -- a second reading of the same rules rather
+#      than a second implementation, which is what catches a sign or an off-by-one.
+#
+#      The images are generated (scripts/gen_test_png.py) because the corpus does not
+#      reach the code: measured, the two PNGs in the vendored glTF models are palette and
+#      RGB, so grey, grey-with-alpha, RGBA and the 16-bit path had no coverage at all.
+if command -v python3 >/dev/null 2>&1; then
+  res=$("$MERE" test/tex_dump.mere 2>&1 | python3 scripts/tex_oracle.py 2>&1)
+  echo "$res" | sed 's/^/  /' | head -6
+  case "$res" in *FAIL*) fail=1 ;; esac
+fi
+
 [ "$fail" = 0 ] && echo "PASS shade_check" || echo "FAIL shade_check"
 exit $fail

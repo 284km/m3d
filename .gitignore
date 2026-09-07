@@ -3,7 +3,11 @@ mere.lock
 *.ll
 *.wat
 *.wasm
-*.png
+# Rendered output, which goes to the working directory. NOT test/data/png, which is
+# committed input -- an earlier *.png here quietly excluded the generated test images and
+# they had to be forced in.
+/*.png
+out*.png
 *.ppm
 m3d
 node_modules/

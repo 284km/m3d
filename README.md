@@ -231,9 +231,42 @@ sweep property added since (the blend is linear in `metallic`, which the
 specification's form is by construction) rejects the shortcut, and *that* was
 checked by running it against the shortcut rather than assumed.
 
+## Textures
+
+`src/texture.mere` loads a PNG as RGBA8 — palette expanded, grey broadcast,
+alpha filled in — and samples it, nearest or bilinear, with glTF's three wrap
+modes. The PNG comes through [mpng](https://github.com/284km/mpng) and
+[mgz](https://github.com/284km/mgz), both written in Mere and vendored here, so
+the whole path from file to lit pixel is one language.
+
+**Which slot is sRGB and which is linear is a property of the slot, not the
+file.** glTF says baseColor and emissive are sRGB-encoded and that normal,
+metallicRoughness and occlusion are not, and a PNG cannot tell you which it is.
+So `Tex.sample_srgb` and `Tex.sample_linear` are separate names with no default:
+decoding a normal map through the transfer curve is subtly wrong everywhere and
+obviously wrong nowhere.
+
+Two things the code says because they are easy to get backwards. The transfer
+curve is applied **before** the blend, not after — the curve is not linear,
+which is the entire point of it, and averaging then decoding makes edges
+between light and dark go dark. And **alpha never goes through it**: alpha is a
+coverage fraction and was never on a curve.
+
+`scripts/tex_oracle.py` decodes the same files with **PIL** — a different PNG
+implementation, in another language — and compares every texel exactly. This is
+the one part of the project where a real second implementation is available off
+the shelf, and it would be strange not to use one.
+
+Same corpus hole as before, and measured the same way: the two PNGs in the
+vendored glTF models are **palette and RGB only**, so grey, grey-with-alpha,
+RGBA and the 16-bit path had no coverage. `scripts/gen_test_png.py` writes small
+images that reach them, with a **non-identity palette** so a decoder that used
+the index as the colour would fail rather than pass.
+
 ## What is not here yet
 
-Textures (PNG and JPEG decoding, sampling and wrap modes), the window,
-animation and skinning, and the GPU path. Also, within the loader: sparse accessors, `data:` URIs (glTF-Embedded),
+JPEG, the window, animation and skinning, and the GPU path. Like the
+rasterizer, the texture path is compared across two backends rather than four,
+because it writes into a `ByteBuf`. Also, within the loader: sparse accessors, `data:` URIs (glTF-Embedded),
 and matrix accessors whose columns need 4-byte padding — all three **refused by
 name** rather than mis-read. See `OPEN_QUESTIONS.md`.
