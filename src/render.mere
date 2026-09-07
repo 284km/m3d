@@ -277,6 +277,14 @@ module Render {
                   let vcount = vec_len pos / 3 in
                   let idx = indices d prim vcount in
                   let tri = vec_len idx / 3 in
+                  let uv = attr d prim "TEXCOORD_0" in
+                  let col0 = attr d prim "COLOR_0" in
+                  let col0_n = match J.field (J.req prim "attributes") "COLOR_0" with
+                               | None -> 3
+                               | Some a ->
+                                 let acc = match J.at (J.req d.j "accessors") (J.int_ a) with
+                                           | None -> fail "gltf: no such accessor" | Some x -> x in
+                                 Acc.n_comp (J.str_ (J.req acc "type")) in
                   // A vertex's world position, and its normal when the file has
                   // one. The normal is deliberately NOT defaulted here: glTF says
                   // a primitive with no NORMAL is FLAT SHADED, and a flat normal
@@ -293,11 +301,34 @@ module Render {
                       Some (V3.normalize (M4.mul_dir nrm_m
                         (v3 { x = vec_get nv (3 * k), y = vec_get nv (3 * k + 1),
                               z = vec_get nv (3 * k + 2) }))) in
-                  let shade_at = fn (wp: v3) -> fn (n: v3) ->
+                  let vuv = fn (k: int) ->
+                    match uv with
+                    | None -> (0.0, 0.0)
+                    | Some t2 -> (vec_get t2 (2 * k), vec_get t2 (2 * k + 1)) in
+                  // COLOR_0 is VEC3 or VEC4 and MULTIPLIES the base colour; the
+                  // stride differs between the two and reading a VEC4 as a VEC3
+                  // walks off by one vertex per vertex.
+                  let vcol = fn (k: int) ->
+                    match col0 with
+                    | None -> (1.0, 1.0, 1.0)
+                    | Some cv ->
+                      let o = col0_n * k in
+                      (vec_get cv o, vec_get cv (o + 1), vec_get cv (o + 2)) in
+                  // PER PIXEL. The shader is called at every covered pixel with
+                  // the interpolated, re-normalized normal -- so a highlight
+                  // lands where the surface points at the light rather than
+                  // where a vertex happens to be.
+                  let shader = fn (wp: v3) -> fn (n: v3) -> fn (u: float) -> fn (vv: float) ->
+                               fn (vc: v3) ->
+                    let mat2 = material { br = mat.br * vc.x, bg = mat.bg * vc.y,
+                                          bb = mat.bb * vc.z, ba = mat.ba,
+                                          metallic = mat.metallic, roughness = mat.roughness,
+                                          er = mat.er, eg = mat.eg, eb = mat.eb,
+                                          alpha_mode = mat.alpha_mode, cutoff = mat.cutoff } in
                     let vdir = V3.normalize (V3.sub eye wp) in
-                    V3.add (V3.add (Shade.direct mat n vdir light)
-                                   (Shade.ambient mat 0.15))
-                           (Shade.emissive mat) in
+                    V3.add (V3.add (Shade.direct mat2 n vdir light)
+                                   (Shade.ambient mat2 0.15))
+                           (Shade.emissive mat2) in
                   let rec go = fn (ti: int) ->
                     if ti == tri then ()
                     else
@@ -316,9 +347,6 @@ module Render {
                       let c0 = M4.mul_v4 vp (V4.of_point w0) in
                       let c1 = M4.mul_v4 vp (V4.of_point w1) in
                       let c2 = M4.mul_v4 vp (V4.of_point w2) in
-                      let l0 = shade_at w0 (nrm_of k0) in
-                      let l1 = shade_at w1 (nrm_of k1) in
-                      let l2 = shade_at w2 (nrm_of k2) in
                       // NO NEAR-PLANE CLIPPING YET: a triangle with any vertex
                       // at or behind the eye is dropped whole. That is wrong for
                       // a camera inside geometry and right for every model in
@@ -328,12 +356,18 @@ module Render {
                       let _ =
                         if not ok then ()
                         else
-                          let sv = fn (c: v4) -> fn (l: v3) ->
+                          let sv = fn (c: v4) -> fn (wp: v3) -> fn (n: v3) ->
+                                   fn (k: int) ->
                             let iw = 1.0 / c.w in
-                            rvert { x = (c.x * iw * 0.5 + 0.5) * fw,
-                                    y = (0.5 - c.y * iw * 0.5) * fh,
-                                    z = c.z * iw, iw = iw,
-                                    r = l.x, g = l.y, b = l.z } in
+                            let (uu, vv) = vuv k in
+                            let (cr, cg, cb) = vcol k in
+                            svert { sx = (c.x * iw * 0.5 + 0.5) * fw,
+                                    sy = (0.5 - c.y * iw * 0.5) * fh,
+                                    sz = c.z * iw, siw = iw,
+                                    wx = wp.x, wy = wp.y, wz = wp.z,
+                                    nx = n.x, ny = n.y, nz = n.z,
+                                    su = uu, sv = vv,
+                                    cr = cr, cg = cg, cb = cb } in
                           let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in
                           // THE LAST TWO ARE SWAPPED, AND THAT IS NOT A TYPO.
                           //
@@ -352,7 +386,11 @@ module Render {
                           // ambient only -- because the faces being drawn are the
                           // ones pointing away from the light. A silhouette is not
                           // evidence that the right triangles were drawn.
-                          Raster.triangle t depth true (sv c0 l0) (sv c2 l2) (sv c1 l1) in
+                          RasterS.triangle t depth true
+                            (sv c0 w0 (nrm_of k0) k0)
+                            (sv c2 w2 (nrm_of k2) k2)
+                            (sv c1 w1 (nrm_of k1) k1)
+                            shader in
                       go (ti + 1) in
                   go 0 in
             prims rest in

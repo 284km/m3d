@@ -300,15 +300,37 @@ metallic, so its ambient is zero, and the threshold that passes a lit metal also
 passes a black frame. Two models sat exactly on that line and the column said
 "no" about a renderer that was working.
 
+## Per-pixel shading
+
+The rasterizer has two entry points. `Raster.triangle` interpolates a colour;
+`RasterS.triangle` interpolates the *attributes* — world position, normal,
+texture coordinate, vertex colour — and calls a shader at every covered pixel,
+so a highlight lands where the surface points at the light rather than where a
+vertex happens to be. The interpolated normal is re-normalized, because
+interpolating three unit vectors gives a short one and a short normal darkens
+the middle of every triangle in a way that looks like faceting and is not.
+
+**A second entry point and not a replacement**, on purpose: everything in the
+first is pinned by an exact-rational reference and by the coverage properties,
+and rewriting it to carry eleven attributes would have put that behind a change
+rather than beside one. The coverage rule, the top-left test and the depth
+comparison are literally the same functions.
+
+**The north-star table cannot see this change at all.** Every model in the
+corpus is flat-faced, and when a triangle's three normals are equal the two
+paths agree exactly — the numbers were identical before and after. So the check
+is a property: one triangle, three normals fanned apart, drawn both ways. They
+differ by up to 47 levels out of 255 in the middle, and they agree *exactly*
+when the three normals are the same. Both halves are needed; the second is what
+stops the first from passing for a per-pixel path that is simply wrong.
+
 ## What is not here yet
 
-**Per-pixel shading.** Shading is per vertex, so a normal never reaches a pixel:
-a sphere shows its triangles at the silhouette and a specular highlight lands on
-a vertex or misses. That is the next slice, and it is also what the fourth
-column of the north-star table waits for — three.js reads the same files and the
-camera this program prints is exactly what it needs, so the instrument is ready
-and the subject is not. Comparing a per-vertex renderer against a per-pixel one
-would measure that difference and nothing else.
+The fourth column of the north-star table — agreement with a reference
+renderer. three.js reads the same files and the camera this program prints is
+exactly what it needs, so the instrument has been ready since the loader
+landed. What it needs now is a corpus with curved geometry in it, since a
+comparison over flat-faced boxes would not exercise much.
 
 Also owed: near-plane clipping (a triangle with any vertex behind the eye is
 dropped whole, which is right for every model in the corpus and wrong for a

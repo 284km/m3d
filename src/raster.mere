@@ -194,3 +194,110 @@ module Raster {
           row (y + 1) in
       row y0;
 }
+
+// ---------------------------------------------------------------------------
+// The shaded path: attributes to the pixel, and a shader called there.
+//
+// `Raster.triangle` above interpolates a COLOUR, which means a normal never
+// reaches a pixel -- a sphere shows its triangles at the silhouette and a
+// specular highlight lands on a vertex or misses. This one interpolates the
+// attributes instead and calls a function at each covered pixel.
+//
+// IT IS A SECOND ENTRY POINT AND NOT A REPLACEMENT, on purpose. Everything
+// above is pinned by test/raster_props.mere and by an exact-rational reference,
+// and rewriting it to carry eleven attributes would have put that behind a
+// change rather than beside one. The coverage rule, the top-left test and the
+// depth comparison are literally the same functions; only what is interpolated
+// differs.
+// ---------------------------------------------------------------------------
+
+// Screen position and 1/w, then the attributes a shader wants: where the point
+// is in the world (for the view vector), which way the surface faces, where it
+// lands in a texture, and the vertex colour glTF's COLOR_0 supplies.
+type svert = {
+  sx: float, sy: float, sz: float, siw: float,
+  wx: float, wy: float, wz: float,
+  nx: float, ny: float, nz: float,
+  su: float, sv: float,
+  cr: float, cg: float, cb: float
+};
+
+module RasterS {
+  // `shade` is called with the interpolated world position, the interpolated
+  // and RE-NORMALIZED normal, the texture coordinate and the vertex colour, and
+  // returns linear light.
+  //
+  // Re-normalized because interpolating three unit vectors does not give a unit
+  // vector -- it gives one that is short by however much they diverge, and a
+  // short normal makes a surface darker toward the middle of every triangle,
+  // which looks like faceting and is not.
+  let triangle = fn (t: target) -> fn (depth) -> fn (cull: bool) ->
+                 fn (a0: svert) -> fn (a1: svert) -> fn (a2: svert) -> fn (shade) ->
+    let area = Raster.edge a0.sx a0.sy a1.sx a1.sy a2.sx a2.sy in
+    if area == 0.0 then ()
+    else if cull && area < 0.0 then ()
+    else
+      let (a, b, c) = if area > 0.0 then (a0, a1, a2) else (a0, a2, a1) in
+      let area = if area > 0.0 then area else 0.0 - area in
+      let inv_area = 1.0 / area in
+      let x0 = int_of_float (f_max 0.0 (floor (f_min a.sx (f_min b.sx c.sx)))) in
+      let y0 = int_of_float (f_max 0.0 (floor (f_min a.sy (f_min b.sy c.sy)))) in
+      let x1 = int_of_float (f_min (float_of_int t.w) (ceil (f_max a.sx (f_max b.sx c.sx)))) in
+      let y1 = int_of_float (f_min (float_of_int t.h) (ceil (f_max a.sy (f_max b.sy c.sy)))) in
+      let tl0 = Raster.is_top_left b.sx b.sy c.sx c.sy in
+      let tl1 = Raster.is_top_left c.sx c.sy a.sx a.sy in
+      let tl2 = Raster.is_top_left a.sx a.sy b.sx b.sy in
+      let rec row = fn (y: int) ->
+        if y >= y1 then ()
+        else
+          let py = float_of_int y + 0.5 in
+          let rec col = fn (x: int) ->
+            if x >= x1 then ()
+            else
+              let px = float_of_int x + 0.5 in
+              let e0 = Raster.edge b.sx b.sy c.sx c.sy px py in
+              let e1 = Raster.edge c.sx c.sy a.sx a.sy px py in
+              let e2 = Raster.edge a.sx a.sy b.sx b.sy px py in
+              let _ =
+                if Raster.accept e0 tl0 && Raster.accept e1 tl1 && Raster.accept e2 tl2 then
+                  let w0 = e0 * inv_area in
+                  let w1 = e1 * inv_area in
+                  let w2 = e2 * inv_area in
+                  let z = w0 * a.sz + w1 * b.sz + w2 * c.sz in
+                  let idx = y * t.w + x in
+                  if z < vec_get depth idx then
+                    let iw = w0 * a.siw + w1 * b.siw + w2 * c.siw in
+                    let inv = 1.0 / iw in
+                    // Perspective-correct: every attribute is carried as
+                    // attribute/w, interpolated linearly in screen space, and
+                    // divided by the interpolated 1/w. Screen-linear
+                    // interpolation of an attribute is the wobbling-texture bug.
+                    let pc = fn (va: float) -> fn (vb: float) -> fn (vc: float) ->
+                      (w0 * va * a.siw + w1 * vb * b.siw + w2 * vc * c.siw) * inv in
+                    let wp = v3 { x = pc a.wx b.wx c.wx,
+                                  y = pc a.wy b.wy c.wy,
+                                  z = pc a.wz b.wz c.wz } in
+                    let n = V3.normalize (v3 { x = pc a.nx b.nx c.nx,
+                                               y = pc a.ny b.ny c.ny,
+                                               z = pc a.nz b.nz c.nz }) in
+                    let uu = pc a.su b.su c.su in
+                    let vv = pc a.sv b.sv c.sv in
+                    let vc = v3 { x = pc a.cr b.cr c.cr,
+                                  y = pc a.cg b.cg c.cg,
+                                  z = pc a.cb b.cb c.cb } in
+                    // Annotated because the closure is a parameter and its
+                    // result type has nothing to be inferred from at this call.
+                    let lit = (shade wp n uu vv vc : v3) in
+                    let o = idx * 4 in
+                    let _ = vec_set depth idx z in
+                    let _ = bytebuf_set t.color o (Srgb.encode lit.x) in
+                    let _ = bytebuf_set t.color (o + 1) (Srgb.encode lit.y) in
+                    let _ = bytebuf_set t.color (o + 2) (Srgb.encode lit.z) in
+                    bytebuf_set t.color (o + 3) 255
+                  else ()
+                else () in
+              col (x + 1) in
+          let _ = col x0 in
+          row (y + 1) in
+      row y0;
+}

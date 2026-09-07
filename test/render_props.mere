@@ -106,5 +106,109 @@ let _ = write_tri 0 2 1;
 let (n_back, r_back) = render_stats ();
 let _ = check "winding.back_face_is_culled" (n_back == 0);
 
+// --- per-pixel shading actually differs from per-vertex ----------------------
+// EVERY MODEL IN THE CORPUS IS FLAT-FACED, so the north-star table cannot see
+// this change at all: when a triangle's three normals are equal, interpolating
+// them and interpolating the colours they produce give the same answer, and the
+// numbers came out identical before and after. A property is the only thing
+// that can tell the two apart here.
+//
+// One large triangle, three DIFFERENT normals, and the same geometry drawn both
+// ways. Gouraud interpolates the three shaded colours; per-pixel interpolates
+// the three normals and shades at each pixel. Those are different functions --
+// shading is not linear in the normal -- so the middle of the triangle must
+// come out differently.
+let two_ways = fn () ->
+  let (t1, d1) = Target.make 32 32 in
+  let (t2, d2) = Target.make 32 32 in
+  let _ = Target.clear t1 d1 0 0 0 in
+  let _ = Target.clear t2 d2 0 0 0 in
+  let mat = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 0.0,
+                       roughness = 0.25, er = 0.0, eg = 0.0, eb = 0.0,
+                       alpha_mode = 0, cutoff = 0.5 } in
+  let li = dirlight { dx = 0.0, dy = 0.0, dz = 0.0 - 1.0, lr = 4.0, lg = 4.0, lb = 4.0 } in
+  let eye = v3 { x = 0.0, y = 0.0, z = 10.0 } in
+  // Normals fanned wide apart, so the interpolated one at the centre is a long
+  // way from any of them and a low roughness makes the difference loud.
+  let ns = fn (k: int) ->
+    if k == 0 then V3.normalize (v3 { x = 0.0 - 0.8, y = 0.0 - 0.5, z = 0.4 })
+    else if k == 1 then V3.normalize (v3 { x = 0.8, y = 0.0 - 0.5, z = 0.4 })
+    else V3.normalize (v3 { x = 0.0, y = 0.9, z = 0.4 }) in
+  let wp = fn (k: int) ->
+    if k == 0 then v3 { x = 0.0 - 1.0, y = 0.0 - 1.0, z = 0.0 }
+    else if k == 1 then v3 { x = 1.0, y = 0.0 - 1.0, z = 0.0 }
+    else v3 { x = 0.0, y = 1.0, z = 0.0 } in
+  let sx = fn (k: int) -> if k == 0 then 2.5 else if k == 1 then 29.5 else 16.0 in
+  let sy = fn (k: int) -> if k == 0 then 29.5 else if k == 1 then 29.5 else 2.5 in
+  let shade1 = fn (k: int) ->
+    let vd = V3.normalize (V3.sub eye (wp k)) in
+    V3.add (Shade.direct mat (ns k) vd li) (Shade.ambient mat 0.15) in
+  // Gouraud, through the colour-interpolating entry point.
+  let gv = fn (k: int) ->
+    let l = shade1 k in
+    rvert { x = sx k, y = sy k, z = 0.0, iw = 1.0, r = l.x, g = l.y, b = l.z } in
+  let _ = Raster.triangle t1 d1 false (gv 0) (gv 1) (gv 2) in
+  // Per pixel, through the attribute-carrying one.
+  let pv = fn (k: int) ->
+    let n = ns k in let w = wp k in
+    svert { sx = sx k, sy = sy k, sz = 0.0, siw = 1.0,
+            wx = w.x, wy = w.y, wz = w.z, nx = n.x, ny = n.y, nz = n.z,
+            su = 0.0, sv = 0.0, cr = 1.0, cg = 1.0, cb = 1.0 } in
+  let shader = fn (w: v3) -> fn (n: v3) -> fn (u: float) -> fn (v: float) -> fn (c: v3) ->
+    let vd = V3.normalize (V3.sub eye w) in
+    V3.add (Shade.direct mat n vd li) (Shade.ambient mat 0.15) in
+  let _ = RasterS.triangle t2 d2 false (pv 0) (pv 1) (pv 2) shader in
+  (t1, t2);
+
+let (tg, tp) = two_ways ();
+let (rg, gg, bg) = Target.get tg 16 18;
+let (rp, gp, bp) = Target.get tp 16 18;
+// Both drew something at the centre, or the comparison below is vacuous.
+let _ = check "shading.both_paths_drew" (rg > 0 && rp > 0);
+let _ = check "shading.per_pixel_differs_from_gouraud" (rg != rp);
+// And the difference is not a rounding wobble: a low-roughness highlight in the
+// middle of a fanned triangle is a visible amount apart.
+let _ = check "shading.the_difference_is_large" (
+  (if rg > rp then rg - rp else rp - rg) > 8);
+// The two agree EXACTLY when the three normals are the same, which is the case
+// every corpus model is. Without this the check above could pass for a per-pixel
+// path that was simply wrong.
+let same_normals = fn () ->
+  let (t1, d1) = Target.make 32 32 in
+  let (t2, d2) = Target.make 32 32 in
+  let _ = Target.clear t1 d1 0 0 0 in
+  let _ = Target.clear t2 d2 0 0 0 in
+  let mat = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 0.0,
+                       roughness = 0.25, er = 0.0, eg = 0.0, eb = 0.0,
+                       alpha_mode = 0, cutoff = 0.5 } in
+  let li = dirlight { dx = 0.0, dy = 0.0, dz = 0.0 - 1.0, lr = 4.0, lg = 4.0, lb = 4.0 } in
+  let eye = v3 { x = 0.0, y = 0.0, z = 10.0 } in
+  let n = v3 { x = 0.0, y = 0.0, z = 1.0 } in
+  let sx = fn (k: int) -> if k == 0 then 2.5 else if k == 1 then 29.5 else 16.0 in
+  let sy = fn (k: int) -> if k == 0 then 29.5 else if k == 1 then 29.5 else 2.5 in
+  // The same world position for all three, so the view vector is identical too
+  // and only the shading path differs.
+  let w = v3 { x = 0.0, y = 0.0, z = 0.0 } in
+  let vd = V3.normalize (V3.sub eye w) in
+  let l = V3.add (Shade.direct mat n vd li) (Shade.ambient mat 0.15) in
+  let gv = fn (k: int) -> rvert { x = sx k, y = sy k, z = 0.0, iw = 1.0,
+                                  r = l.x, g = l.y, b = l.z } in
+  let _ = Raster.triangle t1 d1 false (gv 0) (gv 1) (gv 2) in
+  let pv = fn (k: int) -> svert { sx = sx k, sy = sy k, sz = 0.0, siw = 1.0,
+                                  wx = w.x, wy = w.y, wz = w.z,
+                                  nx = n.x, ny = n.y, nz = n.z,
+                                  su = 0.0, sv = 0.0, cr = 1.0, cg = 1.0, cb = 1.0 } in
+  let shader = fn (ww: v3) -> fn (nn: v3) -> fn (u: float) -> fn (v: float) -> fn (c: v3) ->
+    V3.add (Shade.direct mat nn (V3.normalize (V3.sub eye ww)) li) (Shade.ambient mat 0.15) in
+  let _ = RasterS.triangle t2 d2 false (pv 0) (pv 1) (pv 2) shader in
+  let rec cmp = fn (i: int) -> fn (bad: int) ->
+    if i == 32 * 32 then bad
+    else
+      let (a, b, c) = Target.get t1 (i % 32) (i / 32) in
+      let (x, y, z) = Target.get t2 (i % 32) (i / 32) in
+      cmp (i + 1) (bad + (if a == x && b == y && c == z then 0 else 1)) in
+  cmp 0 0;
+let _ = check "shading.flat_normals_agree_exactly" (same_normals () == 0);
+
 let n = vec_len fails;
 print (if n == 0 then "render_props: ok" else "render_props: " ++ str_of_int n ++ " FAILED")
