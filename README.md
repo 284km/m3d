@@ -504,6 +504,32 @@ Magenta is not a proof — a magenta emissive surface would still fool it — an
 exact answer is two renders on two backgrounds, which is not paid for and is said
 so in the code.
 
+## Morph targets
+
+A target is a **displacement**, not an alternative shape: its `POSITION` is how
+far each vertex moves, not where it ends up. Reading them as absolute positions
+collapses a mesh toward the origin, which looks like a scale bug a long way from
+the material that caused it.
+
+The weights come from **the node if it has them and the mesh otherwise** — that
+order is the specification's, so that two nodes can instance one mesh at two
+poses. Nothing in the corpus uses the node form, which is exactly why there is a
+property for it: a rule written from a specification with no witness is a rule
+nobody has checked, and reversing the two passed every other property.
+
+`SimpleMorph` went from IoU **0.336 to 1.000** and `MorphPrimitivesTest` from a
+colour error of **23.9 to 0.56**. `AnimatedMorphCube` and `MorphStressTest` did
+not move at all, and that is the right answer — their weights are all zero at
+rest and their animations drive them, so a renderer that morphs correctly must
+leave them byte-identical. Both halves are checked: a zero weight changes
+nothing, *and* a full weight moves the vertex, because the first alone passes for
+a renderer that ignores morph targets entirely, which is what this one did.
+
+The property's thresholds were **measured before being asserted** — 118 pixels
+unmorphed, 118 at weight 0, 105 at weight 0.5, 93 at weight 1 — and the target
+displaces one vertex sideways rather than moving the whole mesh, because a change
+of shape is something the auto-camera cannot absorb by reframing.
+
 ## What is not here yet
 
 Ranked by what the corpus table says, rather than by what seems interesting:
@@ -522,8 +548,7 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   the five models that use one have no `TANGENT` — which is exactly what
   `NormalTangentTest` is for, and means generating a tangent frame from the UVs.
 - **Skinning** (six models; `RecursiveSkeletons` is at IoU 0.199, drawing its
-  bind pose where the reference draws the skin) and **morph targets** (four;
-  `SimpleMorph` at 0.336).
+  bind pose where the reference draws the skin).
 - **Mipmaps.** `minFilter` is read and ignored, so a minified texture aliases.
   It is the whole of the textured models' remaining colour residual.
 - **Primitive modes** other than triangles — `PrimitiveModeNormalsTest` has

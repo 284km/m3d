@@ -203,6 +203,83 @@ module Render {
     | None -> None
     | Some a -> Some (Acc.floats d (J.int_ a));
 
+  // MORPH TARGETS: the base attribute plus a weighted sum of DISPLACEMENTS.
+  //
+  // A target is not an alternative shape, it is a DELTA -- `POSITION` in a target
+  // is how far each vertex moves, not where it ends up. Treating them as absolute
+  // positions collapses the mesh toward the origin, which looks like a scale bug.
+  //
+  // THE WEIGHTS COME FROM THE NODE IF IT HAS THEM AND FROM THE MESH OTHERWISE,
+  // and that order is the specification's: a node's `weights` override the mesh's
+  // so that two nodes can instance one mesh at two poses. Nothing in this corpus
+  // uses the node form, which is exactly why it is written from the specification
+  // rather than from what happens to be needed.
+  //
+  // Returned as a fresh Vec only when something actually moves. `AnimatedMorphCube`
+  // and `MorphStressTest` carry targets and all-zero weights -- their animations
+  // drive them -- so at rest they must be BYTE-IDENTICAL to the unmorphed mesh,
+  // and the cheapest way to be sure of that is not to touch the array at all.
+  let morph_weights = fn (d: doc) -> fn (nd: Json.json) -> fn (mesh: Json.json) ->
+    let get = fn (o: Json.json) ->
+      match J.field o "weights" with
+      | None -> None
+      | Some a ->
+        let v = vec_new () in
+        let rec go = fn (i: int) ->
+          if i >= J.len (J.arr a) then v
+          else let _ = vec_push v (match J.at a i with | None -> 0.0 | Some x -> J.flt x) in
+               go (i + 1) in
+        Some (go 0) in
+    match get nd with | Some w -> Some w | None -> get mesh;
+
+  // `base` with each target's displacement added, scaled by its weight. `ncomp` is
+  // 3 for POSITION and NORMAL; a target's array is the same shape as the base's.
+  let morphed = fn (d: doc) -> fn (prim: Json.json) -> fn (name: str) ->
+                fn (ws) -> fn (base) ->
+    match J.field prim "targets" with
+    | None -> base
+    | Some ts ->
+      match ws with
+      | None -> base
+      | Some w ->
+        let n = J.len (J.arr ts) in
+        // Nothing moves, so nothing is copied.
+        let rec any = fn (i: int) ->
+          if i >= n then false
+          else if i < vec_len w && vec_get w i != 0.0 then true
+          else any (i + 1) in
+        if not (any 0) then base
+        else
+          let out = vec_new () in
+          let rec copy = fn (i: int) ->
+            if i >= vec_len base then () else let _ = vec_push out (vec_get base i) in copy (i + 1) in
+          let _ = copy 0 in
+          let rec tgt = fn (i: int) ->
+            if i >= n then out
+            else
+              let wi = if i < vec_len w then vec_get w i else 0.0 in
+              if wi == 0.0 then tgt (i + 1)
+              else
+                match J.at ts i with
+                | None -> tgt (i + 1)
+                | Some t ->
+                  match J.field t name with
+                  | None -> tgt (i + 1)
+                  | Some a ->
+                    let dv = Acc.floats d (J.int_ a) in
+                    let _ =
+                      if vec_len dv != vec_len base
+                      then fail ("gltf: morph target " ++ str_of_int i ++ "'s " ++ name
+                                 ++ " has " ++ str_of_int (vec_len dv) ++ " values where the base has "
+                                 ++ str_of_int (vec_len base))
+                      else () in
+                    let rec add = fn (k: int) ->
+                      if k >= vec_len dv then ()
+                      else let _ = vec_set out k (vec_get out k + wi * vec_get dv k) in add (k + 1) in
+                    let _ = add 0 in
+                    tgt (i + 1) in
+          tgt 0;
+
   // The indices, or 0..count-1 when the primitive has none. Making the
   // un-indexed case produce the same shape means the draw loop has one path
   // rather than two, and TriangleWithoutIndices is in the corpus precisely to
@@ -411,6 +488,7 @@ module Render {
       | Some mi ->
         let mesh = match J.at (J.req d.j "meshes") (J.int_ mi) with
                    | None -> fail "gltf: node names a mesh that is not there" | Some x -> x in
+        let mweights = morph_weights d nd mesh in
         let nrm_m = match M4x.normal_matrix world with | None -> M4.identity | Some x -> x in
         // A mirroring transform reverses the winding order (glTF 3.7.4). Decided
         // per node, once, from the global transform's determinant.
@@ -426,8 +504,15 @@ module Render {
               else
                 match attr d prim "POSITION" with
                 | None -> ()
-                | Some pos ->
-                  let nrm = attr d prim "NORMAL" in
+                | Some pos0 ->
+                  // MORPHED BEFORE ANYTHING ELSE TOUCHES THEM. Everything
+                  // downstream -- the face normal, the bounds, the projection --
+                  // has to see the moved vertex, so this is the first thing done
+                  // with the arrays and not a correction applied later.
+                  let pos = morphed d prim "POSITION" mweights pos0 in
+                  let nrm = match attr d prim "NORMAL" with
+                            | None -> None
+                            | Some n0 -> Some (morphed d prim "NORMAL" mweights n0) in
                   let mat = material_of d prim in
                   let occ_strength = occ_str d prim in
                   let (btex, mrtex, nmtex, octex, emtex) = mat_slots d prim in

@@ -31,7 +31,8 @@ let doc_of = fn (js: str) ->
 // `node_extra` and `mat_extra` are spliced into the node and the material, which
 // is how the mirroring scale and the doubleSided flag get in WITHOUT A SECOND
 // COPY of this JSON to keep in step with the first.
-let gltf_full = fn (node_extra: str) -> fn (mat_extra: str) -> fn (alpha: str) ->
+let gltf_at = fn (node_extra: str) -> fn (mat_extra: str) -> fn (alpha: str) ->
+             fn (prim_extra: str) -> fn (mesh_extra: str) ->
   "\{\"asset\":\{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[\{\"nodes\":[0]}],"
   ++ "\"nodes\":[\{\"mesh\":0" ++ node_extra ++ "}],"
   // NO `indices`: the winding is chosen by the order the three positions are
@@ -39,19 +40,29 @@ let gltf_full = fn (node_extra: str) -> fn (mat_extra: str) -> fn (alpha: str) -
   // bufferView -- which glTF says reads as ZEROS, a fact this file's own comment
   // stated while the JSON above went on referencing it. The triangle came out
   // (v0, v0, v0), degenerate, and nothing drew.
-  ++ "\"meshes\":[\{\"primitives\":[\{\"attributes\":\{\"POSITION\":0,\"NORMAL\":1},\"material\":0}]}],"
+  ++ "\"meshes\":[\{\"primitives\":[\{\"attributes\":\{\"POSITION\":0,\"NORMAL\":1},\"material\":0"
+  ++ prim_extra ++ "}]" ++ mesh_extra ++ "}],"
   ++ "\"materials\":[\{\"pbrMetallicRoughness\":\{\"baseColorFactor\":[1.0,1.0,1.0," ++ alpha
   ++ "],\"metallicFactor\":0.0,\"roughnessFactor\":1.0}"
   ++ mat_extra ++ "}],"
-  ++ "\"buffers\":[\{\"uri\":\"m3d_rp.bin\",\"byteLength\":72}],"
+  ++ "\"buffers\":[\{\"uri\":\"m3d_rp.bin\",\"byteLength\":108}],"
   ++ "\"bufferViews\":[\{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
-  ++ "\{\"buffer\":0,\"byteOffset\":36,\"byteLength\":36}],"
+  ++ "\{\"buffer\":0,\"byteOffset\":36,\"byteLength\":36},"
+  // The third view is the morph target's displacements, written by `write_tri_n`
+  // whether or not the document references them -- an unreferenced 36 bytes at the
+  // end of a buffer is legal glTF and costs nothing, and it means the two documents
+  // differ ONLY in their JSON.
+  ++ "\{\"buffer\":0,\"byteOffset\":72,\"byteLength\":36}],"
   ++ "\"accessors\":[\{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\","
   ++ "\"min\":[-1.0,-1.0,0.0],\"max\":[1.0,1.0,0.0]},"
-  ++ "\{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}]}";
+  ++ "\{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+  ++ "\{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\","
+  ++ "\"min\":[-1.0,-1.0,0.0],\"max\":[1.0,1.0,0.0]}]}";
 
+let gltf_full = fn (node_extra: str) -> fn (mat_extra: str) -> fn (alpha: str) ->
+  gltf_at node_extra mat_extra alpha "" "";
 let gltf_with = fn (node_extra: str) -> fn (mat_extra: str) ->
-  gltf_full node_extra mat_extra "1.0";
+  gltf_at node_extra mat_extra "1.0" "" "";
 
 // Rather than indices -- which would need a fourth bufferView and more hex --
 // the winding is chosen by writing the three positions in the order asked for.
@@ -79,6 +90,13 @@ let write_tri_n = fn (a: int) -> fn (b: int) -> fn (c: int) -> fn (nz: float) ->
     if k == 3 then ()
     else let _ = put 0.0 in let _ = put 0.0 in let _ = put nz in nrm (k + 1) in
   let _ = nrm 0 in
+  // THE MORPH TARGET'S DISPLACEMENTS, always written. v0 moves +0.5 in x and the
+  // other two do not move at all, which makes the morphed triangle NARROWER -- a
+  // change in SHAPE that the auto-camera cannot absorb by reframing, unlike a
+  // displacement that moves the whole mesh.
+  let dlt = fn (k: int) ->
+    let _ = put (if k == 0 then 0.5 else 0.0) in let _ = put 0.0 in put 0.0 in
+  let _ = dlt a in let _ = dlt b in let _ = dlt c in
   write_bytes "/tmp/m3d_rp.bin" (bytes_of_hex (strbuf_to_str sb));
 
 // The ordinary case: an outward normal pointing at a camera on the +z side.
@@ -359,6 +377,55 @@ let same_normals = fn () ->
       cmp (i + 1) (bad + (if a == x && b == y && c == z then 0 else 1)) in
   cmp 0 0;
 let _ = check "shading.flat_normals_agree_exactly" (same_normals () == 0);
+
+// --- morph targets are DISPLACEMENTS, and a weight blends them --------------
+// A target's `POSITION` is how far each vertex MOVES, not where it ends up.
+// Reading them as absolute positions collapses a mesh toward the origin, which
+// looks like a scale bug a long way from the material that caused it.
+//
+// The target here moves v0 by +0.5 in x and leaves the other two alone, so the
+// triangle gets NARROWER -- a change in SHAPE, which the auto-camera cannot
+// absorb by reframing the way it absorbs a displacement of the whole mesh.
+//
+// The numbers were MEASURED before being asserted: 118 pixels unmorphed, 118 at
+// weight 0, 105 at weight 0.5, 93 at weight 1.
+let mtgt = ",\"targets\":[\{\"POSITION\":2}]";
+let mw = fn (w: str) -> ",\"weights\":[" ++ w ++ "]";
+let at_w = fn (w: str) ->
+  let _ = write_file "/tmp/m3d_rp.gltf" (gltf_at "" "" "1.0" mtgt (mw w)) in
+  render_stats ();
+let _ = write_tri 0 1 2;
+let (n_no, r_no) = let _ = write_file "/tmp/m3d_rp.gltf" (gltf_with "" "") in render_stats ();
+let (n_w0, r_w0) = at_w "0.0";
+let (n_w1, r_w1) = at_w "1.0";
+let (n_wh, r_wh) = at_w "0.5";
+
+// A WEIGHT OF ZERO MUST CHANGE NOTHING. Two corpus models carry targets and
+// all-zero weights -- their animations drive them -- so at rest they have to be
+// identical to the unmorphed mesh, and this is that statement in one line.
+let _ = check "morph.a_zero_weight_changes_nothing" (n_w0 == n_no && r_w0 == r_no);
+// AND A FULL WEIGHT MUST MOVE IT. Without this the one above passes for a
+// renderer that ignores morph targets entirely, which is what this one did.
+let _ = check "morph.a_full_weight_moves_the_vertex" (n_w1 < n_no - 15);
+// A weight blends: half of it lands strictly between the two ends.
+let _ = check "morph.a_half_weight_lands_between" (n_wh > n_w1 && n_wh < n_no);
+// AND IT IS A DISPLACEMENT, NOT A POSITION. Read as an absolute position, v0
+// would sit at (0.5, 0, 0) -- nearly collinear with the other two -- and the
+// triangle would lose most of its area rather than a tenth of it. 93 pixels is
+// the displacement reading; the absolute one is around 30.
+let _ = check "morph.the_target_is_a_displacement" (n_w1 > 60);
+
+// A NODE'S WEIGHTS OVERRIDE ITS MESH'S, so that two nodes can instance one mesh
+// at two poses. Nothing in the corpus uses the node form -- which is why this is
+// here: the priority was written from the specification, and a rule with no
+// witness is a rule nobody has checked. Reversing the two passes every property
+// above, measured.
+//
+// The node says full weight and the mesh says none, so the morphed count is the
+// right answer and the unmorphed one is what taking the mesh's would give.
+let _ = write_file "/tmp/m3d_rp.gltf" (gltf_at (mw "1.0") "" "1.0" mtgt (mw "0.0"));
+let (n_nodew, r_nodew) = render_stats ();
+let _ = check "morph.a_nodes_weights_override_its_meshs" (n_nodew == n_w1);
 
 let n = vec_len fails;
 print (if n == 0 then "render_props: ok" else "render_props: " ++ str_of_int n ++ " FAILED")

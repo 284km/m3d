@@ -56,9 +56,14 @@
 #   MINIFICATION on every textured model (three.js builds mipmaps; this renderer samples
 #   the full-resolution image and aliases), NORMAL MAPPING on CompareNormal,
 #   NormalTangentTest, NormalTangentMirrorTest, TwoSidedPlane and Box With Spaces (the
-#   slot is resolved and sampled, and not yet applied), MORPH TARGETS on
-#   MorphPrimitivesTest and MorphStressTest, and the metallic sweep on MetalRoughSpheres,
-#   Cube, CompareMetallic and CompareRoughness.
+#   slot is resolved and sampled, and not yet applied), and the metallic sweep on
+#   MetalRoughSpheres, Cube, CompareMetallic and CompareRoughness.
+#
+#   MORPH TARGETS ARE IMPLEMENTED, and it shows: SimpleMorph went from IoU 0.336 to
+#   1.000, and MorphPrimitivesTest from a colour error of 23.9 to 0.56. AnimatedMorphCube
+#   and MorphStressTest did not move at all, which is the right answer -- their weights
+#   are all zero at rest and their animations drive them, so a renderer that morphs
+#   correctly must leave them exactly where they were.
 #
 #   The four Compare* and MorphPrimitivesTest rows are here at all because JPEG is: their
 #   textures are baseline JPEGs and the loader used to refuse them. CesiumMan and
@@ -84,7 +89,7 @@ Duck	                           0.999   2.2    0.613   24.90
 Fox	                            0.998   3.6    2.355   23.34
 InterpolationTest	              0.998   3.5    0.725   2.42
 MetalRoughSpheresNoTextures	    0.993   10.8   8.878   75.45
-MorphPrimitivesTest	            0.994   24.3   23.890  82.91
+MorphPrimitivesTest	            1.000   1.3    0.560   36.80
 MorphStressTest	                0.997   10.3   9.674   88.10
 MultipleScenes	                 1.000   37.3   0.002   0.18
 MultiUVTest	                    1.000   17.9   2.384   26.73
@@ -98,7 +103,7 @@ RiggedFigure	                   0.999   2.8    0.067   0.98
 RiggedSimple	                   1.000   2.0    0.052   12.76
 SimpleMaterial	                 0.999   2.3    0.000   0.00
 SimpleMeshes	                   0.999   36.9   0.001   0.09
-SimpleMorph	                    0.336   37.1   0.001   0.09    morph targets are not implemented, so this draws its base mesh
+SimpleMorph	                    1.000   37.5   0.001   0.11
 SimpleSkin	                     1.000   37.3   0.002   0.23
 SimpleSparseAccessor	           0.999   37.2   0.001   0.12
 SimpleTexture	                  1.000   3.4    2.473   72.49
