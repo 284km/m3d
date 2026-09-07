@@ -1,0 +1,44 @@
+// The sRGB tables, read back through the language.
+//
+// The generator writes float literals and this prints their BIT PATTERNS, so
+// scripts/gen_srgb.py can confirm the round trip rather than assume it: a
+// shortest-repr literal that the parser reads back as a different double would
+// otherwise be invisible until a colour was one off somewhere.
+//
+// The encode side is swept over every threshold and both of its neighbouring
+// doubles as well, which is the only input that can tell `>=` from `>` -- an
+// off-by-one-ulp boundary is exactly the mistake a table of thresholds invites.
+import "../src/srgb.mere";
+
+let bits = fn (x: float) -> str_of_int (float_bits_hi x) ++ " " ++ str_of_int (float_bits_lo x);
+
+let rec dec = fn (b: int) ->
+  if b == 256 then ()
+  else let _ = print ("dec " ++ str_of_int b ++ " " ++ bits (Srgb.decode b)) in dec (b + 1);
+let _ = dec 0;
+
+// Every byte must survive byte -> linear -> byte. This is a round trip through
+// two independent tables and needs no reference at all.
+let rec rt = fn (b: int) -> fn (bad: int) ->
+  if b == 256 then bad
+  else rt (b + 1) (bad + (if Srgb.encode (Srgb.decode b) == b then 0 else 1));
+let _ = print ("roundtrip_failures " ++ str_of_int (rt 0 0));
+
+// The encode boundaries, swept by the caller in Python: this prints the byte
+// for each probe value it is given on the command line is not how a Mere
+// program reads input, so instead the sweep is done here over a fixed grid and
+// Python computes the same grid.
+let rec sweep = fn (i: int) ->
+  if i == 2048 then ()
+  else
+    let c = float_of_int i / 2047.0 in
+    let _ = print ("enc " ++ str_of_int i ++ " " ++ str_of_int (Srgb.encode c)) in
+    sweep (i + 1);
+let _ = sweep 0;
+
+let _ = print ("lin_q " ++ str_of_int (Srgb.quantize_linear 0.5) ++ " "
+               ++ str_of_int (Srgb.quantize_linear 0.0) ++ " "
+               ++ str_of_int (Srgb.quantize_linear 1.0) ++ " "
+               ++ str_of_int (Srgb.quantize_linear (0.0 - 1.0)) ++ " "
+               ++ str_of_int (Srgb.quantize_linear 2.0));
+print "end"

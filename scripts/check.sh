@@ -12,4 +12,5 @@ export MERE
 sh "$ROOT/scripts/linalg_check.sh" || exit 1
 sh "$ROOT/scripts/gltf_check.sh" || exit 1
 sh "$ROOT/scripts/raster_check.sh" || exit 1
+sh "$ROOT/scripts/shade_check.sh" || exit 1
 echo "check: ok"

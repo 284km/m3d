@@ -126,18 +126,27 @@ instead of merely embarrassing.
   measurement nobody has taken.
 - **Verify**: none — a decision.
 
-## Q-4: where the exactness line goes when shading arrives
+## Q-4: where the exactness line goes when shading arrives — ANSWERED: nowhere
 
-- **State**: open, and the first thing M1c will have to settle.
-- Today the line is clean: everything a glTF file needs uses only the five
-  correctly-rounded operations, and the trigonometry is fenced off. Shading
-  breaks that — sRGB encoding is `pow(x, 1/2.4)` and the GGX distribution is
-  full of it — so the pixel path cannot be bit-exact across backends.
-- **Candidates**: (a) a 256-entry sRGB lookup table, so `pow` is called at
-  table-build time and the per-pixel path stays exact; (b) accept a
-  quantized-plus-or-minus-one tolerance on pixels and keep bit-exactness for
-  geometry only; (c) both, which is probably the answer.
-- **Verify**: none yet — there is no shading code to ask.
+- **State**: resolved (2026-09-07). The line did not have to move; shading is bit-exact on
+  every backend, which is not what this question assumed when it was written.
+- It assumed sRGB's power of 2.4 and the GGX lobe would put `pow` on the per-pixel path
+  and end the comparison. Neither does:
+  - **sRGB is between a byte and a float in both directions**, so it is two tables of
+    constants and a search. Decoding is 256 entries; encoding is 255 thresholds, each one
+    the smallest double the `pow` reference maps to that byte, found by bisecting the
+    reference so the table agrees with it by construction. `pow` is called once per entry
+    at generation time and never at run time. `scripts/gen_srgb.py`.
+  - **The BRDF has no transcendental in it** once Schlick's Fresnel is five multiplies
+    rather than `pow(x, 5)`. Everything else is `+ - * /` and `sqrt`, which IEEE-754
+    requires to be correctly rounded.
+- **Measured**: `test/shade_props.mere` and `test/srgb_dump.mere` are byte-identical
+  across the interpreter, C, LLVM and Wasm.
+- The candidates this entry listed — a lookup table, or a plus-or-minus-one tolerance on
+  pixels — were (a) and (b), and the answer is (a) alone, with (b) not needed.
+- **What would still move the line**: a `pow` in a texture filter or a tone map. Neither
+  exists yet, and the reason to write this down is that adding one would cost the
+  four-backend comparison and should be a decision rather than a side effect.
 
 ## Q-5: `V3.normalize` of a zero vector returns zero
 

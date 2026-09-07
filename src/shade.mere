@@ -1,0 +1,143 @@
+// Shading: glTF's metallic-roughness material, lit by directional lights.
+//
+// EXACT, AND THAT WAS NOT OBVIOUS. The plan for this file assumed shading would
+// end the bit-exact comparison between backends, because sRGB is a power of 2.4
+// and no library rounds `pow` the same way twice. It does not have to:
+//
+//   sRGB is between a BYTE and a float in both directions, so it is two tables
+//   of constants and a search -- see src/srgb.mere, which is generated.
+//
+//   The BRDF has no transcendental in it at all once Schlick's Fresnel is
+//   written as five multiplies rather than as `pow(x, 5)`. Everything else is
+//   +, -, *, / and sqrt, which IEEE-754 requires to be correctly rounded, so
+//   four backends agree to the bit.
+//
+// The one thing that would break it is a `pow` in a texture filter or a tone
+// map, and neither is here.
+//
+// The BRDF is the one glTF's specification writes out: Lambert for the diffuse
+// lobe, Cook-Torrance with a GGX distribution and the height-correlated Smith
+// visibility term for the specular one. `scripts/shade_oracle.py` follows that
+// specification's own pseudocode rather than this file, so the two are a
+// comparison of readings and not a copy.
+import "./linalg.mere";
+import "./srgb.mere";
+
+// baseColor is LINEAR here. A factor from a glTF file already is; a texel is
+// not and must come through `Srgb.decode` first, which is the one conversion a
+// renderer gets wrong silently.
+type material = {
+  br: float, bg: float, bb: float, ba: float,
+  metallic: float, roughness: float,
+  er: float, eg: float, eb: float,
+  // 0 = OPAQUE, 1 = MASK, 2 = BLEND. MASK compares against `cutoff` and is the
+  // only one that changes coverage rather than colour.
+  alpha_mode: int, cutoff: float
+};
+
+type dirlight = { dx: float, dy: float, dz: float, lr: float, lg: float, lb: float };
+
+module Shade {
+  let pi = 3.141592653589793;
+
+  let clamp01 = fn (x: float) -> if x < 0.0 then 0.0 else if x > 1.0 then 1.0 else x;
+
+  // Schlick's Fresnel. FIVE MULTIPLIES and not `pow(x, 5)`: the result is the
+  // same to the bit on any machine that has IEEE multiplication, where pow is
+  // whatever the platform's libm decided, and that difference is the whole
+  // reason this file can be compared across backends.
+  let pow5 = fn (x: float) -> let x2 = x * x in x2 * x2 * x;
+
+  // Named rather than inlined into `direct`, because its two endpoints are
+  // exact and therefore testable: at normal incidence (voh = 1) it is f0, and
+  // at grazing (voh = 0) it is exactly 1 whatever f0 was. Trying to observe
+  // that through a rendered colour instead does not work -- the cosine falloff
+  // takes the output to zero at the same time the Fresnel goes to one.
+  let fresnel = fn (f0: float) -> fn (voh: float) -> f0 + (1.0 - f0) * pow5 (1.0 - voh);
+
+  // The GGX normal distribution. The denominator is squared rather than raised,
+  // for the same reason.
+  let d_ggx = fn (noh: float) -> fn (a2: float) ->
+    let d = noh * noh * (a2 - 1.0) + 1.0 in
+    a2 / (pi * d * d);
+
+  // Height-correlated Smith visibility, which is the specification's V and
+  // already carries the 1/(4 NoL NoV) the Cook-Torrance denominator would.
+  let v_smith = fn (nol: float) -> fn (nov: float) -> fn (a2: float) ->
+    let gv = nol * sqrt (nov * nov * (1.0 - a2) + a2) in
+    let gl = nov * sqrt (nol * nol * (1.0 - a2) + a2) in
+    let s = gv + gl in
+    if s <= 0.0 then 0.0 else 0.5 / s;
+
+  // One directional light on one point. `n`, `v` and the light's direction are
+  // unit vectors; `v` points from the surface toward the eye and the light's
+  // direction is the direction it TRAVELS, so the vector toward it is its
+  // negation -- the sign that is wrong in half the renderers ever written.
+  let direct = fn (m: material) -> fn (n: v3) -> fn (vv: v3) -> fn (li: dirlight) ->
+    let l = V3.normalize (v3 { x = 0.0 - li.dx, y = 0.0 - li.dy, z = 0.0 - li.dz }) in
+    let nol = clamp01 (V3.dot n l) in
+    if nol <= 0.0 then v3 { x = 0.0, y = 0.0, z = 0.0 }
+    else
+      let h = V3.normalize (V3.add l vv) in
+      let nov = clamp01 (V3.dot n vv) in
+      let noh = clamp01 (V3.dot n h) in
+      let voh = clamp01 (V3.dot vv h) in
+      let rough = clamp01 m.roughness in
+      let metal = clamp01 m.metallic in
+      let a = rough * rough in
+      let a2 = a * a in
+      let spec = d_ggx noh a2 * v_smith nol nov a2 in
+
+      // THE SPECIFICATION'S FORMULATION, and not the usual shortcut.
+      //
+      // glTF's appendix defines the material as a mix of TWO complete BRDFs --
+      // a dielectric one and a metallic one -- blended by `metallic`:
+      //
+      //   dielectric = mix(diffuse, specular, F(0.04))
+      //   metal      = specular * F(baseColor)
+      //   material   = mix(dielectric, metal, metallic)
+      //
+      // The shortcut this file used first interpolates F0 toward the base
+      // colour and fades the diffuse lobe out, which is what most real-time
+      // renderers do. IT AGREES AT metallic = 0 AND metallic = 1 AND NOWHERE
+      // ELSE: measured against the specification's form, up to 30% apart at
+      // metallic = 0.5 and 95% at the extremes of roughness and angle. Every
+      // property in test/shade_props.mere passed on the shortcut, because they
+      // are all statements about the two endpoints -- which is what a property
+      // set looks like when it has a gap exactly the shape of the mistake.
+      //
+      // The corpus cares: MetalRoughSpheres sweeps metallic across a grid.
+      let fd = fresnel 0.04 voh in
+      let dif = 1.0 / pi in
+      let dr = (1.0 - fd) * dif * m.br + fd * spec in
+      let dg = (1.0 - fd) * dif * m.bg + fd * spec in
+      let db = (1.0 - fd) * dif * m.bb + fd * spec in
+      let mr = spec * fresnel m.br voh in
+      let mg = spec * fresnel m.bg voh in
+      let mb = spec * fresnel m.bb voh in
+      v3 { x = ((1.0 - metal) * dr + metal * mr) * nol * li.lr,
+           y = ((1.0 - metal) * dg + metal * mg) * nol * li.lg,
+           z = ((1.0 - metal) * db + metal * mb) * nol * li.lb };
+
+  // Ambient stands in for everything this renderer does not trace. It is a
+  // constant times the diffuse albedo and is NOT physical; it is here so that a
+  // surface facing away from the only light is dark rather than black, and it
+  // is named so nobody mistakes it for image-based lighting.
+  let ambient = fn (m: material) -> fn (k: float) ->
+    let kd = 1.0 - clamp01 m.metallic in
+    v3 { x = m.br * kd * k, y = m.bg * kd * k, z = m.bb * kd * k };
+
+  let emissive = fn (m: material) -> v3 { x = m.er, y = m.eg, z = m.eb };
+
+  // MASK is the only alpha mode that changes whether a pixel is drawn at all.
+  // OPAQUE ignores alpha entirely -- which is the specification, and not the
+  // same as treating it as 1.
+  let passes_alpha = fn (m: material) -> fn (alpha: float) ->
+    if m.alpha_mode == 1 then alpha >= m.cutoff else true;
+
+  // Linear light to eight bits, through the transfer curve. The three channels
+  // go through `Srgb.encode` and nothing else does: a metallic factor or a
+  // roughness written to a debug buffer must use `Srgb.quantize_linear`.
+  let to_srgb8 = fn (c: v3) ->
+    (Srgb.encode c.x, Srgb.encode c.y, Srgb.encode c.z);
+}

@@ -65,7 +65,7 @@ else
 fi
 
 # ---- 1. the four backends, exactly ----------------------------------------------------
-for prog in test/linalg_dump.mere test/linalg_props.mere test/raster_dump.mere test/raster_props.mere; do
+for prog in test/linalg_dump.mere test/linalg_props.mere test/raster_dump.mere test/raster_props.mere test/shade_props.mere test/srgb_dump.mere; do
   name=$(basename "$prog" .mere)
   ref=$(run_interp "$prog") || { echo "linalg_check: $name did not run on interp"; echo "$ref"; fail=1; continue; }
   n=1

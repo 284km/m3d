@@ -193,8 +193,47 @@ Wasm backends, so the rasterizer is compared across the interpreter and C where
 the linear algebra is compared across four. The gate prints the refusal rather
 than passing over it; see `OPEN_QUESTIONS.md` Q-9.
 
+## Shading, and why it is still exact
+
+`src/shade.mere` is glTF's metallic-roughness material under directional
+lights: Lambert for the diffuse lobe, Cook-Torrance with a GGX distribution and
+the height-correlated Smith visibility term for the specular one.
+
+**The plan for this file assumed shading would end the bit-exact comparison
+between backends**, because sRGB is a power of 2.4 and nobody rounds `pow` the
+same way twice. It does not have to:
+
+- **sRGB is between a byte and a float in both directions.** Decoding is 256
+  constants and an index; encoding is 255 thresholds and a search, each
+  threshold being the smallest double the `pow` reference maps to that byte,
+  found by bisecting the reference so the table agrees with it *by
+  construction*. `pow` runs once per entry in `scripts/gen_srgb.py` and never
+  at run time. (The tempting closed form — `decode((b - 0.5)/255)` — disagrees
+  on 7 values in 200,000, because `enc(dec(x))` is not exactly `x`.)
+- **The BRDF has no transcendental in it** once Schlick's Fresnel is five
+  multiplies rather than `pow(x, 5)`.
+
+Measured: the shading and sRGB tests are byte-identical across the
+interpreter, C, LLVM and Wasm.
+
+### The gap the properties had
+
+`test/shade_props.mere` checks reciprocity — swap the light and the eye, get
+the same value — which is true of a real BRDF and false of most ways of getting
+the Fresnel or visibility term wrong. It also checks the Fresnel endpoints, the
+absence of a diffuse lobe on a metal, and that energy does not explode.
+
+Every one of those passed on an implementation that was **up to 30% wrong**.
+The material was the usual lerp-F0 shortcut instead of the specification's mix
+of two complete BRDFs, and those two agree at `metallic = 0` and `metallic = 1`
+and nowhere between — which is exactly where every property was looking. The
+sweep property added since (the blend is linear in `metallic`, which the
+specification's form is by construction) rejects the shortcut, and *that* was
+checked by running it against the shortcut rather than assumed.
+
 ## What is not here yet
 
-Materials and shading, the window, animation and skinning, and the GPU path. Also, within the loader: sparse accessors, `data:` URIs (glTF-Embedded),
+Textures (PNG and JPEG decoding, sampling and wrap modes), the window,
+animation and skinning, and the GPU path. Also, within the loader: sparse accessors, `data:` URIs (glTF-Embedded),
 and matrix accessors whose columns need 4-byte padding — all three **refused by
 name** rather than mis-read. See `OPEN_QUESTIONS.md`.

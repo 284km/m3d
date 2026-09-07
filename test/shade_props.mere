@@ -1,0 +1,151 @@
+// Properties of the BRDF, which need no reference.
+//
+// The strongest is RECIPROCITY: a physically-based BRDF gives the same value
+// when the light and the eye are swapped. It is a fact about the answer, it
+// holds for the real thing and fails for most of the ways of getting the
+// Fresnel or the visibility term wrong, and no comparison against another
+// implementation establishes it -- two copies of the same wrong term are
+// perfectly reciprocal with each other and not with physics.
+import "../src/shade.mere";
+
+let fails = vec_new ();
+let check = fn (name: str) -> fn (ok: bool) ->
+  if ok then () else let _ = vec_push fails name in print ("MISMATCH " ++ name);
+let near = fn (name: str) -> fn (tol: float) -> fn (a: float) -> fn (b: float) ->
+  check name (f_abs (a - b) <= tol);
+
+let mat = fn (metal: float) -> fn (rough: float) ->
+  material { br = 0.8, bg = 0.5, bb = 0.2, ba = 1.0, metallic = metal, roughness = rough,
+             er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5 };
+let white = fn (dx: float) -> fn (dy: float) -> fn (dz: float) ->
+  dirlight { dx = dx, dy = dy, dz = dz, lr = 1.0, lg = 1.0, lb = 1.0 };
+let n = v3 { x = 0.0, y = 0.0, z = 1.0 };
+
+// --- reciprocity -----------------------------------------------------------
+// `direct` returns f(l, v) * NoL, so dividing each side by its own NoL leaves
+// the BRDF, and those two must agree.
+let recip = fn (name: str) -> fn (metal: float) -> fn (rough: float) ->
+            fn (l: v3) -> fn (vv: v3) ->
+  let m = mat metal rough in
+  let a = Shade.direct m n vv (white (0.0 - l.x) (0.0 - l.y) (0.0 - l.z)) in
+  let b = Shade.direct m n l (white (0.0 - vv.x) (0.0 - vv.y) (0.0 - vv.z)) in
+  let nol = V3.dot n l in
+  let nov = V3.dot n vv in
+  let _ = near (name ++ ".r") 1e-12 (a.x / nol) (b.x / nov) in
+  let _ = near (name ++ ".g") 1e-12 (a.y / nol) (b.y / nov) in
+  near (name ++ ".b") 1e-12 (a.z / nol) (b.z / nov);
+
+let l1 = V3.normalize (v3 { x = 0.3, y = 0.4, z = 0.866 });
+let v1 = V3.normalize (v3 { x = 0.0 - 0.5, y = 0.2, z = 0.84 });
+let l2 = V3.normalize (v3 { x = 0.7, y = 0.0 - 0.1, z = 0.7 });
+let v2 = V3.normalize (v3 { x = 0.1, y = 0.6, z = 0.79 });
+let _ = recip "recip.dielectric_rough" 0.0 0.6 l1 v1;
+let _ = recip "recip.metal_smooth" 1.0 0.15 l1 v1;
+let _ = recip "recip.metal_rough" 1.0 0.9 l2 v2;
+let _ = recip "recip.half_metal" 0.5 0.35 l2 v1;
+
+// --- a light below the horizon contributes nothing --------------------------
+let below = Shade.direct (mat 0.0 0.5) n (v3 { x = 0.0, y = 0.0, z = 1.0 }) (white 0.0 0.0 1.0);
+let _ = check "horizon.no_light_from_behind" (below.x == 0.0 && below.y == 0.0 && below.z == 0.0);
+
+// --- a metal has no diffuse lobe --------------------------------------------
+// A ROUGH, BRIGHT material, so the diffuse lobe is what dominates: turning
+// metallic on must take most of the light away, because a metal reflects only
+// specularly. (The first version of this used a BLACK metal and asserted it
+// still reflected, which is false in glTF's model and rightly failed: a metal's
+// F0 IS its base colour, so a black metal absorbs everything. The test was
+// wrong, not the shader.)
+let bright = fn (metal: float) ->
+  material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = metal, roughness = 1.0,
+             er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5 };
+let straight = v3 { x = 0.0, y = 0.0, z = 1.0 };
+let dielec = (Shade.direct (bright 0.0) n straight (white 0.0 0.0 (0.0 - 1.0))).x;
+let metalv = (Shade.direct (bright 1.0) n straight (white 0.0 0.0 (0.0 - 1.0))).x;
+let _ = check "metal.loses_the_diffuse_lobe" (metalv < dielec * 0.5);
+let _ = check "metal.still_reflects_something" (metalv > 0.0);
+// And a BLACK metal reflects nothing at all, which is the same rule read the
+// other way: F0 is the base colour.
+let blackmetal = material { br = 0.0, bg = 0.0, bb = 0.0, ba = 1.0, metallic = 1.0,
+                            roughness = 0.3, er = 0.0, eg = 0.0, eb = 0.0,
+                            alpha_mode = 0, cutoff = 0.5 };
+let bmv = (Shade.direct blackmetal n straight (white 0.0 0.0 (0.0 - 1.0))).x;
+let _ = check "metal.black_metal_absorbs" (bmv == 0.0);
+
+// --- Fresnel at its two exact endpoints --------------------------------------
+// Observed through the function and not through a rendered colour: at grazing
+// the Fresnel goes to one while the cosine falloff takes the output to zero, so
+// a pixel cannot show it. (The first version tried, and built a geometry where
+// the light and the eye coincided so VoH was 1 everywhere -- it was measuring
+// nothing.)
+let _ = near "fresnel.normal_incidence_is_f0" 0.0 (Shade.fresnel 0.04 1.0) 0.04;
+let _ = near "fresnel.grazing_is_one" 0.0 (Shade.fresnel 0.04 0.0) 1.0;
+let _ = near "fresnel.grazing_is_one_for_any_f0" 0.0 (Shade.fresnel 0.9 0.0) 1.0;
+let _ = check "fresnel.monotone"
+          (Shade.fresnel 0.04 0.9 < Shade.fresnel 0.04 0.5
+           && Shade.fresnel 0.04 0.5 < Shade.fresnel 0.04 0.1);
+
+// --- roughness spreads the highlight ----------------------------------------
+// At the mirror direction a smoother material must be brighter, and away from
+// it a rougher one must be. Two comparisons and not one: only the pair
+// distinguishes "spreads" from "is dimmer everywhere".
+let peak_r = fn (rough: float) ->
+  let m = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 1.0, roughness = rough,
+                     er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5 } in
+  (Shade.direct m n (v3 { x = 0.0, y = 0.0, z = 1.0 }) (white 0.0 0.0 (0.0 - 1.0))).x;
+let off_r = fn (rough: float) ->
+  let m = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 1.0, roughness = rough,
+                     er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5 } in
+  let e = V3.normalize (v3 { x = 0.6, y = 0.0, z = 0.8 }) in
+  (Shade.direct m n e (white 0.0 0.0 (0.0 - 1.0))).x;
+let _ = check "rough.smoother_is_brighter_at_the_peak" (peak_r 0.05 > peak_r 0.5);
+let _ = check "rough.rougher_is_brighter_off_peak" (off_r 0.5 > off_r 0.05);
+
+// --- no energy explosion -----------------------------------------------------
+// A white diffuse surface under a unit light must not return more than it got.
+// This is not a full furnace test -- that integrates over the hemisphere -- but
+// it catches a missing 1/pi, which is the usual way a renderer glows.
+let wm = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 0.0, roughness = 1.0,
+                    er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5 };
+let lit = Shade.direct wm n (v3 { x = 0.0, y = 0.0, z = 1.0 }) (white 0.0 0.0 (0.0 - 1.0));
+let _ = check "energy.diffuse_under_unit_light_is_under_one" (lit.x < 1.0);
+let _ = check "energy.diffuse_is_about_one_over_pi" (lit.x > 0.25 && lit.x < 0.45);
+
+// --- alpha modes -------------------------------------------------------------
+let mk_alpha = fn (mode: int) -> fn (cut: float) ->
+  material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 0.0, roughness = 0.5,
+             er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = mode, cutoff = cut };
+// OPAQUE ignores alpha entirely, which is the specification and is not the same
+// as treating it as 1: a texture with alpha 0 still draws.
+let _ = check "alpha.opaque_ignores_it" (Shade.passes_alpha (mk_alpha 0 0.5) 0.0);
+let _ = check "alpha.mask_below_cutoff" (not (Shade.passes_alpha (mk_alpha 1 0.5) 0.4));
+let _ = check "alpha.mask_at_cutoff_passes" (Shade.passes_alpha (mk_alpha 1 0.5) 0.5);
+let _ = check "alpha.blend_does_not_cut" (Shade.passes_alpha (mk_alpha 2 0.5) 0.01);
+
+// --- sRGB is a curve and not a scale -----------------------------------------
+// Half the light is not half the byte; if it were, the transfer function would
+// be doing nothing and every texture would be too dark.
+let _ = check "srgb.is_not_linear" (Srgb.encode 0.5 != 128);
+let _ = check "srgb.midgrey_is_188" (Srgb.encode 0.5 == 188);
+let _ = check "srgb.decode_encode_ends" (Srgb.encode 0.0 == 0 && Srgb.encode 1.0 == 255);
+
+// --- and the metallic sweep, which is where the endpoints do not help --------
+// Every property above is a statement about metallic = 0 or metallic = 1, and
+// this file passed for a formulation that was 30% wrong in between. The blend
+// is linear in `metallic` BY CONSTRUCTION in the specification's form, so the
+// midpoint is exactly the average of the ends -- which the shortcut is not, and
+// which is checkable here without a reference.
+let sweep_mid = fn (name: str) -> fn (rough: float) -> fn (base: float) ->
+  let mk = fn (metal: float) ->
+    material { br = base, bg = base, bb = base, ba = 1.0, metallic = metal, roughness = rough,
+               er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5 } in
+  let e = V3.normalize (v3 { x = 0.4, y = 0.1, z = 0.9 }) in
+  let li = white (0.0 - l1.x) (0.0 - l1.y) (0.0 - l1.z) in
+  let at = fn (metal: float) -> (Shade.direct (mk metal) n e li).x in
+  let _ = near (name ++ ".mid_is_the_average") 1e-12 (at 0.5) ((at 0.0 + at 1.0) * 0.5) in
+  let _ = near (name ++ ".quarter") 1e-12 (at 0.25) (at 0.0 * 0.75 + at 1.0 * 0.25) in
+  near (name ++ ".three_quarters") 1e-12 (at 0.75) (at 0.0 * 0.25 + at 1.0 * 0.75);
+let _ = sweep_mid "metallic.linear_smooth" 0.15 0.9;
+let _ = sweep_mid "metallic.linear_rough" 0.8 0.4;
+
+let nf = vec_len fails;
+print (if nf == 0 then "shade_props: ok" else "shade_props: " ++ str_of_int nf ++ " FAILED")
