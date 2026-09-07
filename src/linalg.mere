@@ -126,6 +126,39 @@ module Q {
     if l2 == 0.0 then identity
     else let k = 1.0 / sqrt l2 in
       quat { x = a.x * k, y = a.y * k, z = a.z * k, w = a.w * k };
+  // SPHERICAL linear interpolation, which is what glTF means by LINEAR for a
+  // rotation -- and it is not a lerp. A lerp between two quaternions moves along
+  // a chord rather than the arc: the path is wrong AND the angular speed varies,
+  // fastest at the ends and slowest in the middle. For a short arc the two are
+  // numerically close, which is exactly why a test has to use a wide one.
+  //
+  // THE SHORTEST PATH IS CHOSEN, by negating one input when their dot product is
+  // negative. A quaternion and its negation are the same rotation, so without
+  // this a pair that happens to be stored with opposite signs interpolates the
+  // long way round -- three quarters of a turn instead of a quarter.
+  //
+  // Below a threshold the arc is short enough that the sine formula loses
+  // precision, and a normalized lerp is both stable and indistinguishable there.
+  let slerp = fn (a: quat) -> fn (b: quat) -> fn (t: float) ->
+    let d0 = dot a b in
+    let (b2, d) = if d0 < 0.0
+                  then (quat { x = 0.0 - b.x, y = 0.0 - b.y,
+                               z = 0.0 - b.z, w = 0.0 - b.w }, 0.0 - d0)
+                  else (b, d0) in
+    if d > 0.9995 then
+      normalize (quat { x = a.x + (b2.x - a.x) * t, y = a.y + (b2.y - a.y) * t,
+                        z = a.z + (b2.z - a.z) * t, w = a.w + (b2.w - a.w) * t })
+    else
+      // `acos` is not a builtin here, and `atan2` gives it exactly: the angle
+      // whose cosine is d and whose sine is sqrt(1 - d*d) -- which this needs
+      // anyway, so the identity costs nothing.
+      let sn = sqrt (1.0 - d * d) in
+      let th = atan2 sn d in
+      let wa = sin ((1.0 - t) * th) / sn in
+      let wb = sin (t * th) / sn in
+      quat { x = a.x * wa + b2.x * wb, y = a.y * wa + b2.y * wb,
+             z = a.z * wa + b2.z * wb, w = a.w * wa + b2.w * wb };
+
   // Hamilton product: `mul a b` is a applied after b, matching M4.mul.
   let mul = fn (a: quat) -> fn (b: quat) ->
     quat { x = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,

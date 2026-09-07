@@ -6,6 +6,7 @@
 // disk.
 //
 //   m3d <file.gltf|file.glb> [--out <file.png>] [--size <pixels>] [--bg R,G,B]
+//       [--time <seconds>] [--anim <index>]
 //
 // It prints the camera it computed. Most glTF sample models carry no camera, so
 // a viewer has to invent one from the scene's bounds -- and two viewers will
@@ -33,7 +34,7 @@ let rec first_positional = fn (xs) ->
     else Some a;
 
 let path = match first_positional argv with
-  | None -> fail "usage: m3d <file.gltf|file.glb> [--out out.png] [--size 512] [--bg 26,26,30]"
+  | None -> fail "usage: m3d <file.gltf|file.glb> [--out out.png] [--size 512] [--bg 26,26,30] [--time 0]"
   | Some p -> p;
 let out = match find_flag argv "--out" with | None -> "out.png" | Some v -> v;
 let size = match find_flag argv "--size" with | None -> 512 | Some v -> int_of_str v;
@@ -64,7 +65,19 @@ let bg = match find_flag argv "--bg" with
              v3 { x = float_of_int (int_of_str r), y = float_of_int (int_of_str g),
                   z = float_of_int (int_of_str b) }
            | _ -> fail "m3d: --bg wants three numbers, as R,G,B";
-let (t, depth, drawn, eye, ctr, th, zn, zf) = Render.one_frame_bg d size size want_light bg;
+// `--time t` in SECONDS, default 0. Every animation in the document is evaluated
+// at that instant -- not the first one: InterpolationTest has nine, each on its
+// own node, and it exists to show three interpolations across three paths side by
+// side.
+let time = match find_flag argv "--time" with
+           | None -> 0.0
+           | Some v -> float_of_str v;
+// `--anim N` picks WHICH animation, default 0. See the note on `anim_state_of`:
+// "all at once" is not a well-defined answer, because a document's animations can
+// be alternatives that drive the same bones.
+let anim = match find_flag argv "--anim" with | None -> 0 | Some v -> int_of_str v;
+let (t, depth, drawn, eye, ctr, th, zn, zf) =
+  Render.one_frame_anim d size size want_light bg time anim;
 
 // The camera, in the form a reference renderer wants: a position, a target, the
 // tangent of the half-angle (not the angle -- the tangent is what the

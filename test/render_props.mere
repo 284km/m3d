@@ -842,5 +842,182 @@ let _ = check "line.and_the_far_one_does_not_overwrite_it"
      let _ = RasterP.line t d 2.5 5.5 0.2 1.0 red 11.5 5.5 0.2 1.0 red in
      RasterP.line t d 2.5 5.5 0.8 1.0 dim 11.5 5.5 0.8 1.0 dim) > 200);
 
+
+// --- animation ---------------------------------------------------------------
+// SLERP IS TESTED DIRECTLY AND AT AN OFF-CENTRE TIME, and both halves of that
+// matter.
+//
+// glTF's LINEAR on a rotation is spherical: a lerp moves along a chord, so the
+// path is wrong and the angular speed varies. But NORMALIZED LERP AND SLERP AGREE
+// EXACTLY AT t = 0.5 -- both give the bisector of the arc -- so a test at the
+// midpoint cannot tell them apart no matter how wide the arc. It has to be
+// off-centre.
+//
+// The arc is 120 degrees about x: q0 is the identity and q1 is 120 degrees, so
+// slerp at 0.25 is exactly 30 degrees and the answer is computable.
+let qx = fn (deg: float) ->
+  let h = deg * 3.141592653589793 / 360.0 in
+  quat { x = sin h, y = 0.0, z = 0.0, w = cos h };
+let qnear = fn (a: quat) -> fn (b: quat) ->
+  let d = Q.dot a b in
+  (if d < 0.0 then 0.0 - d else d) > 0.999999;
+let _ = check "slerp.quarter_of_a_120_degree_arc_is_30_degrees"
+  (qnear (Q.slerp (qx 0.0) (qx 120.0) 0.25) (qx 30.0));
+let _ = check "slerp.and_three_quarters_is_90"
+  (qnear (Q.slerp (qx 0.0) (qx 120.0) 0.75) (qx 90.0));
+// A normalized lerp would give neither: at t = 0.25 of a 120-degree arc it lands
+// near 20.1 degrees rather than 30. This is the check that separates them, and it
+// is why the two above are not at the midpoint.
+let _ = check "slerp.is_not_a_normalized_lerp"
+  (not (qnear (Q.slerp (qx 0.0) (qx 120.0) 0.25) (qx 20.1)));
+// THE SHORTEST PATH. A quaternion and its negation are the same rotation, so a
+// pair stored with opposite signs must interpolate the same way -- otherwise it
+// goes the long way round, three quarters of a turn instead of a quarter.
+let qneg = fn (a: quat) -> quat { x = 0.0 - a.x, y = 0.0 - a.y, z = 0.0 - a.z, w = 0.0 - a.w };
+let _ = check "slerp.takes_the_shortest_path"
+  (qnear (Q.slerp (qx 0.0) (qneg (qx 120.0)) 0.25) (Q.slerp (qx 0.0) (qx 120.0) 0.25));
+// And the ends are the ends.
+let _ = check "slerp.ends_are_the_inputs"
+  (qnear (Q.slerp (qx 0.0) (qx 120.0) 0.0) (qx 0.0)
+   && qnear (Q.slerp (qx 0.0) (qx 120.0) 1.0) (qx 120.0));
+
+// THE THREE INTERPOLATIONS ARE THREE DIFFERENT ANSWERS, on the model built to
+// say so. InterpolationTest bounces a node between y = 6.8 and y = 10.8 with
+// keyframes every half second, and at t = 0.125 -- a QUARTER of the way into the
+// first span -- STEP holds 6.8, LINEAR gives 7.8 and CUBICSPLINE gives 7.425.
+//
+// A quarter and not a half: with the file's zero tangents the cubic reduces to a
+// smoothstep, and a smoothstep and a ramp AGREE AT THE MIDPOINT. Testing there
+// would let CUBICSPLINE be implemented as LINEAR.
+let it_at = fn (tt: float) -> fn (ai: int) ->
+  let d = Gltf.load "test/data/gltf/InterpolationTest/glTF/InterpolationTest.gltf" in
+  let (ts, rs, ss, mask, _wo, _wc, _wv) = Scene.anim_state_of d tt ai in
+  // anim 6 is STEP translation on node 6, 8 is LINEAR on node 8, 7 is CUBICSPLINE
+  // on node 7 -- each animation drives exactly one node, so the y it wrote is the
+  // whole answer.
+  let ny = fn (ni: int) -> (vec_get ts ni : v3).y in
+  (ny 6, ny 7, ny 8);
+let (step_y, _c7, _l8) = it_at 0.125 6;
+let (_s6, cub_y, _l8b) = it_at 0.125 7;
+let (_s6b, _c7b, lin_y) = it_at 0.125 8;
+// NOT `close`: the compiler warns that it collides with libc, and a top-level
+// name that shadows one is a codegen error rather than a style issue.
+let near_ = fn (a: float) -> fn (b: float) -> (if a > b then a - b else b - a) < 0.01;
+let _ = check "anim.step_holds_the_earlier_keyframe" (near_ step_y 6.8);
+let _ = check "anim.linear_ramps" (near_ lin_y 7.8);
+let _ = check "anim.cubicspline_is_not_linear" (near_ cub_y 7.425);
+// OUTSIDE THE RANGE THE ENDS HOLD. Extrapolating a cubic past its last tangent
+// flies off, and three.js's Interpolant clamps.
+let (s_before, c_before, l_before) = let (a, b, c) = it_at (0.0 - 5.0) 8 in (a, b, c);
+let (s_after, c_after, l_after) = let (a, b, c) = it_at 99.0 8 in (a, b, c);
+// THE CUBIC TANGENTS ARE SCALED BY THE TIME DELTA, and the corpus cannot say so:
+// InterpolationTest's CUBICSPLINE tangents are ALL ZERO, so multiplying them by
+// anything is invisible. Measured -- dropping the scaling passed every check
+// above.
+//
+// AND td MUST NOT BE 1, or the scaling is still invisible. Two keyframes two
+// seconds apart, both vertices zero, an out-tangent of 2 and an in-tangent of 0:
+// at the midpoint s1 is 0.125, so the answer is 0.125 * 2 * td = 0.5 with the
+// scaling and 0.25 without it.
+let cs_bin = fn () ->
+  let sb = strbuf_new () in
+  let hexd = "0123456789abcdef" in
+  let putf = fn (x: float) ->
+    let bb = f32_bits x in
+    let rec go = fn (k: int) ->
+      if k == 4 then ()
+      else
+        let v = bit_and (bit_shr bb (8 * k)) 255 in
+        let _ = strbuf_push sb (char_at hexd (v / 16)) in
+        let _ = strbuf_push sb (char_at hexd (v % 16)) in
+        go (k + 1) in
+    go 0 in
+  // input: two keyframes, 0 and 2 seconds.
+  let _ = putf 0.0 in let _ = putf 2.0 in
+  // output: [inTangent, vertex, outTangent] per keyframe, VEC3.
+  //   key 0: in (0,0,0)  vertex (0,0,0)  out (2,0,0)
+  //   key 1: in (0,0,0)  vertex (0,0,0)  out (0,0,0)
+  let v3f = fn (a: float) -> let _ = putf a in let _ = putf 0.0 in putf 0.0 in
+  let _ = v3f 0.0 in let _ = v3f 0.0 in let _ = v3f 2.0 in
+  let _ = v3f 0.0 in let _ = v3f 0.0 in let _ = v3f 0.0 in
+  write_bytes "/tmp/m3d_cs.bin" (bytes_of_hex (strbuf_to_str sb));
+
+let cs_gltf =
+  "\{\"asset\":\{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[\{\"nodes\":[0]}],"
+  ++ "\"nodes\":[\{\"translation\":[0.0,0.0,0.0]}],"
+  ++ "\"animations\":[\{\"samplers\":[\{\"input\":0,\"output\":1,"
+  ++ "\"interpolation\":\"CUBICSPLINE\"}],"
+  ++ "\"channels\":[\{\"sampler\":0,\"target\":\{\"node\":0,\"path\":\"translation\"}}]}],"
+  ++ "\"buffers\":[\{\"uri\":\"m3d_cs.bin\",\"byteLength\":80}],"
+  ++ "\"bufferViews\":[\{\"buffer\":0,\"byteOffset\":0,\"byteLength\":8},"
+  ++ "\{\"buffer\":0,\"byteOffset\":8,\"byteLength\":72}],"
+  ++ "\"accessors\":[\{\"bufferView\":0,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\","
+  ++ "\"min\":[0.0],\"max\":[2.0]},"
+  ++ "\{\"bufferView\":1,\"componentType\":5126,\"count\":6,\"type\":\"VEC3\"}]}";
+
+let cs_x = fn (tt: float) ->
+  let _ = cs_bin () in
+  let _ = write_file "/tmp/m3d_cs.gltf" cs_gltf in
+  let d = Gltf.load "/tmp/m3d_cs.gltf" in
+  let (ts, rs, ss, mask, _wo, _wc, _wv) = Scene.anim_state_of d tt 0 in
+  (vec_get ts 0 : v3).x;
+let _ = check "anim.cubic_tangents_are_scaled_by_the_time_delta" (near_ (cs_x 1.0) 0.5);
+// And the ends still land on their vertices, which are zero here -- so the 0.5
+// above is the tangents doing it and not an offset.
+let _ = check "anim.and_the_cubic_still_hits_its_keyframes"
+  (near_ (cs_x 0.0) 0.0 && near_ (cs_x 2.0) 0.0);
+
+// WHICH ANIMATION IS PLAYED IS A CHOICE, and the corpus cannot check it:
+// InterpolationTest's nine target NINE DIFFERENT NODES, so applying all of them
+// still gives each node the right value. Measured -- ignoring the index passed
+// every check above. Fox is the model where it matters, and it matters by 18.5.
+//
+// Two STEP animations on ONE node, moving it to 3 and to 7. Whichever is asked
+// for is the answer, and "all" would be one of them by accident of order.
+let two_bin = fn () ->
+  let sb = strbuf_new () in
+  let hexd = "0123456789abcdef" in
+  let putf = fn (x: float) ->
+    let bb = f32_bits x in
+    let rec go = fn (k: int) ->
+      if k == 4 then ()
+      else
+        let v = bit_and (bit_shr bb (8 * k)) 255 in
+        let _ = strbuf_push sb (char_at hexd (v / 16)) in
+        let _ = strbuf_push sb (char_at hexd (v % 16)) in
+        go (k + 1) in
+    go 0 in
+  let _ = putf 0.0 in                                    // one keyframe at t=0
+  let _ = putf 3.0 in let _ = putf 0.0 in let _ = putf 0.0 in   // anim 0 -> x=3
+  let _ = putf 7.0 in let _ = putf 0.0 in let _ = putf 0.0 in   // anim 1 -> x=7
+  write_bytes "/tmp/m3d_two.bin" (bytes_of_hex (strbuf_to_str sb));
+let two_gltf =
+  let samp = fn (o: int) ->
+    "\{\"input\":0,\"output\":" ++ str_of_int o ++ ",\"interpolation\":\"STEP\"}" in
+  let chan = "\"channels\":[\{\"sampler\":0,\"target\":\{\"node\":0,\"path\":\"translation\"}}]" in
+  "\{\"asset\":\{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[\{\"nodes\":[0]}],"
+  ++ "\"nodes\":[\{\"translation\":[0.0,0.0,0.0]}],"
+  ++ "\"animations\":[\{\"samplers\":[" ++ samp 1 ++ "]," ++ chan ++ "},"
+  ++ "\{\"samplers\":[" ++ samp 2 ++ "]," ++ chan ++ "}],"
+  ++ "\"buffers\":[\{\"uri\":\"m3d_two.bin\",\"byteLength\":28}],"
+  ++ "\"bufferViews\":[\{\"buffer\":0,\"byteOffset\":0,\"byteLength\":4},"
+  ++ "\{\"buffer\":0,\"byteOffset\":4,\"byteLength\":12},"
+  ++ "\{\"buffer\":0,\"byteOffset\":16,\"byteLength\":12}],"
+  ++ "\"accessors\":[\{\"bufferView\":0,\"componentType\":5126,\"count\":1,\"type\":\"SCALAR\","
+  ++ "\"min\":[0.0],\"max\":[0.0]},"
+  ++ "\{\"bufferView\":1,\"componentType\":5126,\"count\":1,\"type\":\"VEC3\"},"
+  ++ "\{\"bufferView\":2,\"componentType\":5126,\"count\":1,\"type\":\"VEC3\"}]}";
+let two_x = fn (ai: int) ->
+  let _ = two_bin () in
+  let _ = write_file "/tmp/m3d_two.gltf" two_gltf in
+  let d = Gltf.load "/tmp/m3d_two.gltf" in
+  let (ts, rs, ss, mask, _wo, _wc, _wv) = Scene.anim_state_of d 0.0 ai in
+  (vec_get ts 0 : v3).x;
+let _ = check "anim.the_chosen_animation_is_the_one_applied"
+  (near_ (two_x 0) 3.0 && near_ (two_x 1) 7.0);
+
+let _ = check "anim.before_the_first_key_holds" (near_ l_before 6.8);
+let _ = check "anim.after_the_last_key_holds" (near_ l_after 6.8);
+
 let n = vec_len fails;
 print (if n == 0 then "render_props: ok" else "render_props: " ++ str_of_int n ++ " FAILED")

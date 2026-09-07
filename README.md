@@ -616,6 +616,48 @@ were checked by *counting pixels*, and counting cannot see them — with no dept
 test the far point simply overwrites the near one at the same pixel and the count
 is still one. They read the colour now.
 
+## Animation
+
+`m3d <file> --time 0.4` evaluates an animation at one instant. STEP, LINEAR and
+CUBICSPLINE, on translation, rotation, scale and morph weights.
+
+At t=0.4 every animated model agrees with three.js to under **0.15**: `Fox`
+0.141, `RecursiveSkeletons` 0.108, `RiggedSimple` 0.076, `RiggedFigure` 0.063,
+`InterpolationTest` 0.040, `BoxAnimated` 0.028, `SimpleSkin` 0.001.
+
+**LINEAR on a rotation is spherical.** A lerp moves along a chord, so the path is
+wrong *and* the angular speed varies. But normalized-lerp and slerp **agree
+exactly at t=0.5** — both give the bisector — so a test at the midpoint cannot
+tell them apart at any arc width. The property is at a quarter of a 120° arc,
+where the answer is exactly 30°.
+
+**The tangents are scaled by the time delta**, and the corpus cannot say so:
+`InterpolationTest`'s CUBICSPLINE tangents are all zero, so multiplying them by
+anything is invisible. There is a purpose-built two-keyframe document for it —
+and its keyframes are **two seconds apart**, because with `td = 1` the scaling is
+still invisible.
+
+**Which animation is played is a choice, not "all of them".** glTF doesn't say,
+and "all" is not well-defined: `Fox` carries three — Survey, Walk, Run — that
+drive the same bones, and they're alternatives rather than layers. three.js's
+mixer *blends* concurrent clips, dividing by total weight, so three at once give
+an average; applying them in order lets the last win. Neither is wrong and
+they're not each other — **Fox measured 18.5 that way**, against under 0.11 for
+everything else. So `--anim N` defaults to 0 and the reference is given the same
+index. Fox is 0.141 now.
+
+**And making the reference play a clip is what forced morph-weight animation.**
+`SimpleMorph`'s mesh says `[0.5, 0.5]` and its animation says `[1.0, 0.0]` at
+t=0. The moment the page was told to play the clip, the two renderers were
+showing different shapes — IoU 0.336 — and *m3d's frame had not changed by a
+byte*. An animated `weights` channel overrides the node's, which overrides the
+mesh's.
+
+Seven poisons, all reverted. Two needed new witnesses built before they could be
+caught: the tangent scaling, and *which* animation is played — `InterpolationTest`'s
+nine target nine separate nodes, so applying all of them still gives each node
+the right value.
+
 ## What is not here yet
 
 Ranked by what the corpus table says, rather than by what seems interesting:
@@ -650,8 +692,6 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   IDCT was possible because libjpeg *is* a document. So the reference is asked to
   stop minifying instead (`?nomip=1`) and the resulting number is pinned; building
   mipmaps is a question about picture quality, not about agreement.
-- **Animation**, beyond the fact that every animated model renders its base pose
-  and agrees with the reference there.
 - **Near-plane clipping**: a triangle with any vertex behind the eye is dropped
   whole, which is right for every model in the corpus and wrong for a camera
   inside geometry.

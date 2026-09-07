@@ -58,6 +58,37 @@ module Scene {
                 quat { x = g 0, y = g 1, z = g 2, w = g 3 } in
       M4x.trs t r s;
 
+  // The node's local transform, WITH ANY ANIMATION APPLIED. The mask decides per
+  // channel: an animated translation replaces the node's, and an unanimated one
+  // keeps it. Deciding per NODE instead would make a rotation-only animation zero
+  // the node's translation.
+  let local_at = fn (nd: Json.json) -> fn (ni: int) -> fn (st) ->
+    let (ats, ars, ass, mask, _wo, _wc, _wv) = st in
+    let m = if ni >= 0 && ni < vec_len mask then vec_get mask ni else 0 in
+    if m == 0 then local nd
+    else
+      // A node carrying `matrix` cannot be animated -- glTF forbids it -- so
+      // reaching here with one is a broken file rather than a case to handle.
+      let _ = match J.field nd "matrix" with
+              | None -> ()
+              | Some _ -> fail ("gltf: node " ++ str_of_int ni ++ " has a `matrix` and is "
+                                ++ "animated, which glTF does not allow") in
+      let base = fn (k: str) -> fn (dv: float) ->
+        match J.field nd k with
+        | None -> v3 { x = dv, y = dv, z = dv }
+        | Some a ->
+          let g = fn (i: int) -> match J.at a i with | None -> dv | Some x -> J.flt x in
+          v3 { x = g 0, y = g 1, z = g 2 } in
+      let t = if bit_and m 1 != 0 then (vec_get ats ni : v3) else base "translation" 0.0 in
+      let s = if bit_and m 4 != 0 then (vec_get ass ni : v3) else base "scale" 1.0 in
+      let r = if bit_and m 2 != 0 then (vec_get ars ni : quat)
+              else match J.field nd "rotation" with
+                   | None -> Q.identity
+                   | Some a ->
+                     let g = fn (i: int) -> match J.at a i with | None -> 0.0 | Some x -> J.flt x in
+                     quat { x = g 0, y = g 1, z = g 2, w = g 3 } in
+      M4x.trs t r s;
+
   let nodes = fn (d: doc) -> match J.field d.j "nodes" with | None -> Json.JArr Nil | Some v -> v;
 
   // The roots of the default scene, or every node if there are no scenes --
@@ -90,13 +121,220 @@ module Scene {
   // validator refuses a file where it is not -- which is a check this project
   // already runs over its corpus, so duplicating it here would be duplicating
   // it rather than adding anything.
-  let walk = fn (d: doc) -> fn (f) ->
+  // ---------------------------------------------------------------------------
+  // Animation, evaluated at one instant
+  // ---------------------------------------------------------------------------
+  //
+  // A node's animated translation, rotation and scale, in three arrays indexed by
+  // NODE, plus a mask saying which of the three an animation actually drives. A
+  // channel that is not animated must keep the node's own value, and a mask is how
+  // "not animated" is told from "animated to zero" -- a scale of zero is a real
+  // thing a file can ask for.
+  //
+  // EVERY ANIMATION IS APPLIED, not the first. `InterpolationTest` has NINE, each
+  // targeting a different node, and it exists to show three interpolations across
+  // three paths side by side; playing one would show a ninth of it.
+  //
+  // A node with a `matrix` cannot be animated -- glTF forbids the combination --
+  // so these only ever override TRS.
+  // ONE ANIMATION, CHOSEN, and not all of them at once.
+  //
+  // glTF does not say which animation a viewer should play, and "all" is not a
+  // well-defined answer: Fox carries three -- Survey, Walk and Run -- that drive
+  // THE SAME BONES, and they are alternatives rather than layers. three.js's
+  // AnimationMixer BLENDS concurrent clips, dividing by their total weight, so
+  // three at once give an average of the three; applying them in order instead
+  // lets the last one win. Neither is wrong and they are not each other: Fox
+  // measured 18.5 against the reference that way, where every other animated
+  // model was under 0.11.
+  //
+  // So the choice is a parameter with a default of zero, and the reference is
+  // given the same index. InterpolationTest's nine animations target nine
+  // separate nodes and would be safe to run together, but a rule that is safe
+  // for one model and ambiguous for another is not a rule.
+  let s0_of = fn (s2: float) -> 1.0 - s2;
+
+  let anim_state_of = fn (d: doc) -> fn (time: float) -> fn (which: int) ->
+    let n = J.len (J.arr (nodes d)) in
+    let ts = vec_new () in
+    let rs = vec_new () in
+    let ss = vec_new () in
+    let mask = vec_new () in
+    // ANIMATED MORPH WEIGHTS, which a `weights` channel drives. Variable length
+    // per node -- a node's count is its mesh's target count -- so they live in one
+    // flat array with an offset and a count per node. -1 for "this node's weights
+    // are not animated", which is not the same as "animated to zero": a mesh's own
+    // `weights` must survive the first and be overridden by the second.
+    let woff = vec_new () in
+    let wcnt = vec_new () in
+    let wval = vec_new () in
+    let rec fill = fn (i: int) ->
+      if i >= n then ()
+      else
+        let _ = vec_push ts (v3 { x = 0.0, y = 0.0, z = 0.0 }) in
+        let _ = vec_push rs Q.identity in
+        let _ = vec_push ss (v3 { x = 1.0, y = 1.0, z = 1.0 }) in
+        let _ = vec_push mask 0 in
+        let _ = vec_push woff (0 - 1) in
+        let _ = vec_push wcnt 0 in
+        fill (i + 1) in
+    let _ = fill 0 in
+    let _ =
+      match J.field d.j "animations" with
+      | None -> ()
+      | Some av ->
+        let anims = J.arr av in
+        let nan = J.len anims in
+        let _ = if which >= nan
+                then fail ("gltf: animation " ++ str_of_int which ++ " was asked for and the "
+                           ++ "document has " ++ str_of_int nan)
+                else () in
+        let rec each = fn (xs) -> fn (ai: int) ->
+          match xs with
+          | Nil -> ()
+          | Cons (a, rest) ->
+            if ai != which then each rest (ai + 1) else
+            let sampv = J.arr (J.req a "samplers") in
+            let rec chans = fn (cs) ->
+              match cs with
+              | Nil -> ()
+              | Cons (ch, crest) ->
+                let _ =
+                  let tgt = J.req ch "target" in
+                  match J.field tgt "node" with
+                  | None -> ()
+                  | Some nj ->
+                    let ni = J.int_ nj in
+                    let path = J.str_ (J.req tgt "path") in
+                    let sp = match J.at (J.req a "samplers") (J.int_ (J.req ch "sampler")) with
+                             | None -> fail "gltf: a channel names a sampler that is not there"
+                             | Some x -> x in
+                    let interp = J.str_or sp "interpolation" "LINEAR" in
+                    let tin = Acc.floats d (J.int_ (J.req sp "input")) in
+                    let out = Acc.floats d (J.int_ (J.req sp "output")) in
+                    let nk = vec_len tin in
+                    if nk == 0 || ni < 0 || ni >= n then ()
+                    else
+                      // OUTSIDE THE RANGE THE ENDS HOLD. Before the first key and
+                      // after the last, the value is that key's -- three.js's
+                      // Interpolant clamps and so does this. Extrapolating a cubic
+                      // spline past its last tangent flies off.
+                      let (k0, k1, f) =
+                        if time <= vec_get tin 0 then (0, 0, 0.0)
+                        else if time >= vec_get tin (nk - 1) then (nk - 1, nk - 1, 0.0)
+                        else
+                          let rec find = fn (i: int) ->
+                            if i + 1 >= nk then (nk - 1, nk - 1, 0.0)
+                            else if time < vec_get tin (i + 1) then
+                              let t0 = vec_get tin i in
+                              let t1 = vec_get tin (i + 1) in
+                              let td = t1 - t0 in
+                              (i, i + 1, if td == 0.0 then 0.0 else (time - t0) / td)
+                            else find (i + 1) in
+                          find 0 in
+                      let td = if k1 == k0 then 0.0 else vec_get tin k1 - vec_get tin k0 in
+                      if str_eq path "weights" then
+                        // HOW MANY WEIGHTS is the output's length divided by the
+                        // keyframe count -- and by three more for CUBICSPLINE,
+                        // whose groups are [inTangent, vertex, outTangent]. There
+                        // is no other place to learn it: the accessor is SCALAR.
+                        let stepw = if str_eq interp "CUBICSPLINE" then 3 else 1 in
+                        let nw = vec_len out / (nk * stepw) in
+                        if nw <= 0 then ()
+                        else
+                          let base = vec_len wval in
+                          let gw = fn (k: int) -> fn (c: int) ->
+                            vec_get out ((k * nw + c) * stepw
+                                         + (if stepw == 3 then 1 else 0)) in
+                          let tgw = fn (k: int) -> fn (c: int) -> fn (which: int) ->
+                            vec_get out ((k * nw + c) * 3 + which) in
+                          let rec put = fn (c: int) ->
+                            if c >= nw then ()
+                            else
+                              let v =
+                                if str_eq interp "STEP" then gw k0 c
+                                else if str_eq interp "CUBICSPLINE" then
+                                  let p = f in
+                                  let pp = p * p in
+                                  let ppp = pp * p in
+                                  let s2 = 0.0 - 2.0 * ppp + 3.0 * pp in
+                                  let s3 = ppp - pp in
+                                  s0_of s2 * gw k0 c + (s3 - pp + p) * (tgw k0 c 2 * td)
+                                  + s2 * gw k1 c + s3 * (tgw k1 c 0 * td)
+                                else gw k0 c + (gw k1 c - gw k0 c) * f in
+                              let _ = vec_push wval v in
+                              put (c + 1) in
+                          let _ = put 0 in
+                          let _ = vec_set woff ni base in
+                          vec_set wcnt ni nw
+                      else
+                      let ncomp = if str_eq path "rotation" then 4 else 3 in
+                      let step = if str_eq interp "CUBICSPLINE" then 3 else 1 in
+                      // For CUBICSPLINE the output holds three values a keyframe --
+                      // [inTangent, vertex, outTangent] -- so the VERTEX sits one
+                      // stride into the group. Reading the group's first value
+                      // instead gives the in-tangent, which is a plausible-looking
+                      // wrong animation.
+                      let g = fn (k: int) -> fn (c: int) ->
+                        vec_get out (k * ncomp * step + (if step == 3 then ncomp else 0) + c) in
+                      let tg = fn (k: int) -> fn (c: int) -> fn (which: int) ->
+                        vec_get out (k * ncomp * 3 + which * ncomp + c) in
+                      let comp = fn (c: int) ->
+                        if str_eq interp "STEP" then g k0 c
+                        else if str_eq interp "CUBICSPLINE" then
+                          let p = f in
+                          let pp = p * p in
+                          let ppp = pp * p in
+                          let s2 = 0.0 - 2.0 * ppp + 3.0 * pp in
+                          let s3 = ppp - pp in
+                          let s0 = 1.0 - s2 in
+                          let s1 = s3 - pp + p in
+                          // THE TANGENTS ARE SCALED BY THE TIME DELTA. Without it
+                          // the curve is right in shape and wrong in slope, which
+                          // reads as an animation that overshoots or lags.
+                          let m0 = tg k0 c 2 * td in
+                          let m1 = tg k1 c 0 * td in
+                          s0 * g k0 c + s1 * m0 + s2 * g k1 c + s3 * m1
+                        else g k0 c + (g k1 c - g k0 c) * f in
+                      if str_eq path "rotation" then
+                        let q =
+                          if str_eq interp "STEP" then
+                            quat { x = g k0 0, y = g k0 1, z = g k0 2, w = g k0 3 }
+                          else if str_eq interp "CUBICSPLINE" then
+                            // The spline runs componentwise and the result is then
+                            // NORMALIZED, which is what glTF requires and what
+                            // three.js's quaternion variant does.
+                            Q.normalize (quat { x = comp 0, y = comp 1,
+                                                z = comp 2, w = comp 3 })
+                          else
+                            // LINEAR ON A ROTATION IS SLERP, not a lerp. See Q.slerp.
+                            Q.slerp (quat { x = g k0 0, y = g k0 1, z = g k0 2, w = g k0 3 })
+                                    (quat { x = g k1 0, y = g k1 1, z = g k1 2, w = g k1 3 })
+                                    f in
+                        let _ = vec_set rs ni q in
+                        vec_set mask ni (bit_or (vec_get mask ni) 2)
+                      else if str_eq path "translation" then
+                        let _ = vec_set ts ni (v3 { x = comp 0, y = comp 1, z = comp 2 }) in
+                        vec_set mask ni (bit_or (vec_get mask ni) 1)
+                      else if str_eq path "scale" then
+                        let _ = vec_set ss ni (v3 { x = comp 0, y = comp 1, z = comp 2 }) in
+                        vec_set mask ni (bit_or (vec_get mask ni) 4)
+                      else () in
+                chans crest in
+            let _ = chans (J.arr (J.req a "channels")) in
+            each rest (ai + 1) in
+        each anims 0 in
+    (ts, rs, ss, mask, woff, wcnt, wval);
+
+  let anim_state = fn (d: doc) -> fn (time: float) -> anim_state_of d time 0;
+
+  let walk_at = fn (d: doc) -> fn (st) -> fn (f) ->
     let ns = nodes d in
     let rec visit = fn (i: int) -> fn (parent: mat4) ->
       match J.at ns i with
       | None -> ()
       | Some nd ->
-        let w = M4.mul parent (local nd) in
+        let w = M4.mul parent (local_at nd i st) in
         let _ = f i nd w in
         let rec kids = fn (xs) ->
           match xs with
@@ -108,6 +346,16 @@ module Scene {
       if k == vec_len rs then ()
       else let _ = visit (vec_get rs k) M4.identity in go (k + 1) in
     go 0;
+
+  // The still scene, which is what everything with no time to speak of wants.
+  //
+  // Built by asking for AN ANIMATION THAT DOES NOT EXIST rather than by making
+  // empty arrays: an empty `vec_new ()` inside a tuple leaves the C backend with
+  // no element type to resolve, and index -1 matches no animation, so the arrays
+  // come out correctly sized and typed with every mask at zero -- which is what
+  // makes each lookup fall through to the node's own transform.
+  let still = fn (d: doc) -> anim_state_of d 0.0 (0 - 1);
+  let walk = fn (d: doc) -> fn (f) -> walk_at d (still d) f;
 
   // EVERY NODE'S WORLD MATRIX, INDEXED BY NODE.
   //
@@ -121,14 +369,16 @@ module Scene {
   // means -- glTF says a node not in the scene graph is not part of the scene --
   // and a joint pointing at one would be a broken file, which the skin reader
   // refuses by name rather than silently skinning against the identity.
-  let world_matrices = fn (d: doc) ->
+  let world_matrices_at = fn (d: doc) -> fn (st) ->
     let n = J.len (J.arr (nodes d)) in
     let out = vec_new () in
     let rec fill = fn (i: int) ->
       if i >= n then () else let _ = vec_push out M4.identity in fill (i + 1) in
     let _ = fill 0 in
-    let _ = walk d (fn (i: int) -> fn (nd: Json.json) -> fn (w: mat4) -> vec_set out i w) in
+    let _ = walk_at d st (fn (i: int) -> fn (nd: Json.json) -> fn (w: mat4) -> vec_set out i w) in
     out;
+
+  let world_matrices = fn (d: doc) -> world_matrices_at d (still d);
 }
 
 module Frame {
@@ -137,7 +387,7 @@ module Frame {
   // REQUIRES them on POSITION, so this is not a shortcut -- transformed by the
   // node's matrix. All eight corners, because a rotation turns a box into a box
   // with different corners and taking only two of them shrinks it.
-  let bounds = fn (d: doc) ->
+  let bounds_at = fn (d: doc) -> fn (st) ->
     let lo = vec_new () in let hi = vec_new () in
     let _ = vec_push lo 1e30 in let _ = vec_push lo 1e30 in let _ = vec_push lo 1e30 in
     let _ = vec_push hi (0.0 - 1e30) in let _ = vec_push hi (0.0 - 1e30) in let _ = vec_push hi (0.0 - 1e30) in
@@ -146,7 +396,7 @@ module Frame {
         let _ = if val < vec_get lo k then vec_set lo k val else () in
         if val > vec_get hi k then vec_set hi k val else () in
       let _ = ax 0 p.x in let _ = ax 1 p.y in ax 2 p.z in
-    let _ = Scene.walk d (fn (i: int) -> fn (nd: Json.json) -> fn (w: mat4) ->
+    let _ = Scene.walk_at d st (fn (i: int) -> fn (nd: Json.json) -> fn (w: mat4) ->
       match J.field nd "mesh" with
       | None -> ()
       | Some mi ->
@@ -190,8 +440,10 @@ module Frame {
   // A camera that fits the scene, from a fixed direction. Deterministic, and
   // printed by main.mere so a reference renderer can be handed the same one
   // rather than asked to invent the same one.
-  let auto_camera = fn (d: doc) -> fn (aspect: float) ->
-    let (lo, hi) = bounds d in
+  let bounds = fn (d: doc) -> bounds_at d (Scene.still d);
+
+  let auto_camera_at = fn (d: doc) -> fn (aspect: float) -> fn (st) ->
+    let (lo, hi) = bounds_at d st in
     let c = V3.scale (V3.add lo hi) 0.5 in
     let r = V3.length (V3.scale (V3.sub hi lo) 0.5) in
     let r = if r <= 0.0 then 1.0 else r in
@@ -214,6 +466,9 @@ module Frame {
     (eye, c, tan_half, znear, zfar,
      M4.mul (M4x.perspective_from_tan tan_half aspect znear zfar)
             (M4x.look_at eye c (v3 { x = 0.0, y = 1.0, z = 0.0 })));
+
+  let auto_camera = fn (d: doc) -> fn (aspect: float) ->
+    auto_camera_at d aspect (Scene.still d);
 }
 
 module Render {
@@ -347,6 +602,27 @@ module Render {
                go (i + 1) in
         Some (go 0) in
     match get nd with | Some w -> Some w | None -> get mesh;
+
+  // THE ANIMATION WINS OVER BOTH, and the order is the specification's: an
+  // animated `weights` channel overrides the node's, which overrides the mesh's.
+  //
+  // This was the whole of SimpleMorph's disagreement. Its mesh says [0.5, 0.5]
+  // and its animation says [1.0, 0.0] at t = 0, so the moment the reference was
+  // told to play the clip, the two renderers were showing different shapes --
+  // IoU 0.336 -- and m3d's frame had not changed by a byte. Making the reference
+  // play an animation is what made THIS necessary.
+  let morph_weights_at = fn (d: doc) -> fn (ni: int) -> fn (nd: Json.json) ->
+                         fn (mesh: Json.json) -> fn (st) ->
+    let (_t, _r, _s, _m, woff, wcnt, wval) = st in
+    if ni >= 0 && ni < vec_len woff && vec_get woff ni >= 0 then
+      let base = vec_get woff ni in
+      let cnt = vec_get wcnt ni in
+      let v = vec_new () in
+      let rec go = fn (i: int) ->
+        if i >= cnt then v
+        else let _ = vec_push v (vec_get wval (base + i)) in go (i + 1) in
+      Some (go 0)
+    else morph_weights d nd mesh;
 
   // `base` with each target's displacement added, scaled by its weight. `ncomp` is
   // 3 for POSITION and NORMAL; a target's array is the same shape as the base's.
@@ -601,30 +877,35 @@ module Render {
   // the only exact answer is to render twice on two backgrounds and take the
   // pixels that stay put. That costs a second render on both sides and is not
   // paid for yet; this is written down rather than assumed away.
-  let one_frame_bg = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
-                     fn (bg: v3) ->
+  let one_frame_anim = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+                       fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
     let (t, depth) = Target.make w h in
     let _ = Target.clear t depth (int_of_float bg.x) (int_of_float bg.y) (int_of_float bg.z) in
-    let (eye, ctr, th, zn, zf, vp) = Frame.auto_camera d (float_of_int w / float_of_int h) in
+    // THE ANIMATION IS EVALUATED ONCE, BEFORE THE CAMERA. The camera is framed
+    // from the scene's bounds, and at time t those are the ANIMATED bounds -- so
+    // computing it first would frame the still pose and let the moving model walk
+    // out of shot.
+    let ast = Scene.anim_state_of d time anim in
+    let (eye, ctr, th, zn, zf, vp) = Frame.auto_camera_at d (float_of_int w / float_of_int h) ast in
     let k = if lit then 3.0 else 0.0 in
     let light = dirlight { dx = 0.0 - 0.4, dy = 0.0 - 0.7, dz = 0.0 - 0.6, lr = k, lg = k, lb = k } in
     let fw = float_of_int w in
     let fh = float_of_int h in
     let drawn = vec_new () in
     let _ = vec_push drawn 0 in
-    let _ = Scene.walk d (fn (ni: int) -> fn (nd: Json.json) -> fn (world: mat4) ->
+    let _ = Scene.walk_at d ast (fn (ni: int) -> fn (nd: Json.json) -> fn (world: mat4) ->
       match J.field nd "mesh" with
       | None -> ()
       | Some mi ->
         let mesh = match J.at (J.req d.j "meshes") (J.int_ mi) with
                    | None -> fail "gltf: node names a mesh that is not there" | Some x -> x in
-        let mweights = morph_weights d nd mesh in
+        let mweights = morph_weights_at d ni nd mesh ast in
         // A SKINNED NODE'S OWN TRANSFORM IS REPLACED, NOT COMBINED. The joint
         // matrices already carry the vertex all the way to world space, so
         // `world` must not be applied on top of them -- see `joint_matrices`.
         let skin = match J.field nd "skin" with
                    | None -> None
-                   | Some si -> Some (joint_matrices d (Scene.world_matrices d) (J.int_ si)) in
+                   | Some si -> Some (joint_matrices d (Scene.world_matrices_at d ast) (J.int_ si)) in
         let nrm_m = match M4x.normal_matrix world with | None -> M4.identity | Some x -> x in
         // A mirroring transform reverses the winding order (glTF 3.7.4). Decided
         // per node, once, from the global transform's determinant.
@@ -1162,6 +1443,10 @@ module Render {
     (t, depth, vec_get drawn 0, eye, ctr, th, zn, zf);
 
   let dflt_bg = v3 { x = 26.0, y = 26.0, z = 30.0 };
+  let one_frame_at = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+                     fn (bg: v3) -> fn (time: float) -> one_frame_anim d w h lit bg time 0;
+  let one_frame_bg = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+                     fn (bg: v3) -> one_frame_at d w h lit bg 0.0;
   let one_frame_opt = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
     one_frame_bg d w h lit dflt_bg;
   let one_frame = fn (d: doc) -> fn (w: int) -> fn (h: int) -> one_frame_opt d w h true;

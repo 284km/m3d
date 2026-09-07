@@ -162,6 +162,39 @@ new GLTFLoader().load(q.get('file'), (g) => {
     if (n === 0) { document.title = 'ERR nomip found no textures'; throw new Error('nomip'); }
   }
   scene.add(g.scene);
+
+  // ?time=t -- EVERY CLIP PLAYED AND THE MIXER SET TO ONE INSTANT.
+  //
+  // Every clip, not the first: InterpolationTest carries NINE animations, each
+  // targeting its own node, and it exists to show three interpolations across
+  // three paths side by side. Playing one would show a ninth of it, and the
+  // comparison would be against a model nobody meant.
+  //
+  // `setTime` rather than `update(dt)`, because a delta accumulates and two
+  // renderers stepping the same total in different numbers of steps do not land
+  // on the same instant.
+  const at = parseFloat(q.get('time') || '0');
+  // ONE CLIP, the one asked for. Playing several at once is not the same thing in
+  // the two renderers: three.js's mixer BLENDS concurrent clips, dividing by
+  // their total weight, so three give an average of the three. Fox carries three
+  // that drive the same bones and measured 18.5 that way, against under 0.11 for
+  // every other animated model.
+  const ai = parseInt(q.get('anim') || '0', 10);
+  if (g.animations && g.animations.length > 0) {
+    if (ai >= g.animations.length) {
+      document.title = 'ERR anim ' + ai + ' of ' + g.animations.length;
+      throw new Error('anim');
+    }
+    const mixer = new THREE.AnimationMixer(g.scene);
+    mixer.clipAction(g.animations[ai]).play();
+    mixer.setTime(at);
+  } else if (at !== 0) {
+    // A time asked of a document with no animation is a question about nothing,
+    // and answering it silently would make the number look like an answer.
+    document.title = 'ERR --time on a document with no animations';
+    throw new Error('time');
+  }
+
   renderer.render(scene, cam);
   document.getElementById('done').style.background = 'rgb(0,255,13)';
   document.title = 'RENDERED';
