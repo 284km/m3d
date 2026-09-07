@@ -829,6 +829,27 @@ module Render {
                     let n =
                       match nmtex with
                       | None -> n0
+                      // ONLY WHERE THE FILE SUPPLIES TANGENTS.
+                      //
+                      // The derived path below is written, and it is verified only
+                      // against ITSELF: the property in test/render_props.mere shows
+                      // that on a quad with axis-aligned UVs the derived frame
+                      // equals the SUPPLIED one -- m3d against m3d, which is
+                      // self-consistency and not an oracle.
+                      //
+                      // Against the oracle it is worse on all three corpus models
+                      // that need it: NormalTangentTest 4.26 to 4.66, CompareNormal
+                      // 5.72 to 8.10, Box With Spaces 0.26 to 0.41. So it stays off.
+                      //
+                      // THERE MAY BE NO SINGLE RIGHT ANSWER HERE. glTF says to use
+                      // MikkTSpace when TANGENT is absent; three.js uses per-pixel
+                      // SCREEN-SPACE DERIVATIVES; this computes per-triangle affine
+                      // gradients. Three algorithms, and agreement between any two
+                      // of them is not conformance to the third. Establishing which
+                      // to aim at needs an instrument that sees THE FRAME rather
+                      // than the picture -- the picture is a lossy view of it, and
+                      // two rounds of adjusting a sign against a corpus-wide mean
+                      // moved three numbers in three directions.
                       | Some ts -> if not has_tangent then n0 else
                         let c = slot_sample ts false u vv u1 vv1 in
                         let mx = (c.x * 2.0 - 1.0) * nm_scale in
@@ -983,9 +1004,9 @@ module Render {
                           // transform of a look-at camera is a rotation and a
                           // translation, both of which those survive.
                           let ex1 = sx_of cb2 - sx_of ca in
-                          let ey1 = sy_of cb2 - sy_of ca in
+                          let ey1 = sy_of ca - sy_of cb2 in
                           let ex2 = sx_of cc - sx_of ca in
-                          let ey2 = sy_of cc - sy_of ca in
+                          let ey2 = sy_of ca - sy_of cc in
                           let sdet = ex1 * ey2 - ex2 * ey1 in
                           let (fa, fb) =
                             match tang with
@@ -1025,9 +1046,19 @@ module Render {
                             // With tangents these are the vertex's own frame; the
                             // derived pair is constant across the triangle, and a
                             // constant survives interpolation as itself.
+                            // THE FRAME FLIPS WITH THE FACE, not just the normal.
+                            //
+                            // A back face's normal is negated above (`nsign`), and
+                            // three.js negates tbn[0] AND tbn[1] there too. Flipping
+                            // only the normal leaves a frame no longer right-handed
+                            // with it, so a double-sided surface gets its normal map
+                            // applied backwards on the far side. Three of the five
+                            // normal-mapped models are double-sided, including
+                            // NormalTangentTest.
                             let (fav, fbv) = match vtan k n with
-                                             | Some (tg, bt) -> (tg, bt)
-                                             | None -> (fa, fb) in
+                                             | Some (tg, bt) ->
+                                               (V3.scale tg nsign, V3.scale bt nsign)
+                                             | None -> (V3.scale fa nsign, V3.scale fb nsign) in
                             svert { sx = (c.x * iw * 0.5 + 0.5) * fw,
                                     sy = (0.5 - c.y * iw * 0.5) * fh,
                                     sz = c.z * iw, siw = iw,

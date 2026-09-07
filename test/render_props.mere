@@ -743,5 +743,21 @@ let _ = check "normalmap.the_tangent_w_flips_the_bitangent" (h_nm_neg != h_nm_on
 // leaves all four checks above passing and breaks this one.
 let _ = check "normalmap.equals_baking_that_normal_into_the_geometry" (nm_baked () == h_nm_on);
 
+// WITHOUT TANGENT THE MAP IS NOT APPLIED, and that is a decision rather than an
+// omission. The code to derive a frame from the texture coordinates is in
+// render.mere and it is turned off: it agrees with the SUPPLIED frame on this
+// quad -- which is m3d against m3d, self-consistency and not an oracle -- and it
+// disagrees more with three.js on all three corpus models that need it.
+//
+// glTF names MikkTSpace for this case, three.js uses per-pixel screen-space
+// derivatives, and that code computes per-triangle affine gradients: three
+// algorithms, and agreement between two of them is not conformance to the third.
+//
+// This property pins the decision, so switching the path on has to come with a
+// deliberate edit here rather than happening quietly.
+let h_nm_derived = nm_at "1.0" false 1.0;
+let h_nm_none = nm_at "0.0" false 1.0;
+let _ = check "normalmap.without_tangents_the_map_is_left_alone" (h_nm_derived == h_nm_none);
+
 let n = vec_len fails;
 print (if n == 0 then "render_props: ok" else "render_props: " ++ str_of_int n ++ " FAILED")
