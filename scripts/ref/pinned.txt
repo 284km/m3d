@@ -1,4 +1,4 @@
-# Pinned agreement with three.js, at 192x192, over the 43 corpus models both renderers
+# Pinned agreement with three.js, at 192x192, over the 47 corpus models both renderers
 # draw. `scripts/reference_check.sh` renders each with m3d and twice with three.js --
 # stock, and patched to glTF's normative BRDF (?gltfbrdf=1) -- and holds these numbers.
 #
@@ -54,9 +54,16 @@
 #
 #   The rows in the tens of percent are what is still owed, and each has a name:
 #   MINIFICATION on every textured model (three.js builds mipmaps; this renderer samples
-#   the full-resolution image and aliases), NORMAL MAPPING on NormalTangentTest,
-#   NormalTangentMirrorTest and TwoSidedPlane (the slot is resolved and sampled, and not
-#   yet applied), and the metallic sweep on MetalRoughSpheres and Cube.
+#   the full-resolution image and aliases), NORMAL MAPPING on CompareNormal,
+#   NormalTangentTest, NormalTangentMirrorTest, TwoSidedPlane and Box With Spaces (the
+#   slot is resolved and sampled, and not yet applied), MORPH TARGETS on
+#   MorphPrimitivesTest and MorphStressTest, and the metallic sweep on MetalRoughSpheres,
+#   Cube, CompareMetallic and CompareRoughness.
+#
+#   The four Compare* and MorphPrimitivesTest rows are here at all because JPEG is: their
+#   textures are baseline JPEGs and the loader used to refuse them. CesiumMan and
+#   CesiumMilkTruck are still refused -- their textures are PROGRESSIVE JPEGs, which is a
+#   different and much larger feature.
 #
 AnimatedCube	                   1.000   8.6    8.794   99.64
 AnimatedMorphCube	              1.000   2.7    0.005   0.03
@@ -69,11 +76,15 @@ BoxTextured	                    1.000   4.8    3.136   25.03
 BoxTexturedNonPowerOfTwo	       1.000   4.6    2.871   23.71
 BoxVertexColors	                1.000   17.3   0.027   6.39
 Cameras	                        0.999   49.7   0.001   0.05
+CompareMetallic	                0.999   9.8    8.893   71.29
+CompareNormal	                  0.999   4.0    2.899   68.06
+CompareRoughness	               0.999   7.0    6.973   60.13
 Cube	                           1.000   8.7    8.883   99.66
 Duck	                           0.999   2.2    0.613   24.90
 Fox	                            0.998   3.6    2.355   23.34
 InterpolationTest	              0.998   3.5    0.725   2.42
 MetalRoughSpheresNoTextures	    0.993   10.8   8.878   75.45
+MorphPrimitivesTest	            0.994   24.3   23.890  82.91
 MorphStressTest	                0.997   10.3   9.674   88.10
 MultipleScenes	                 1.000   37.3   0.002   0.18
 MultiUVTest	                    1.000   17.9   2.384   26.73

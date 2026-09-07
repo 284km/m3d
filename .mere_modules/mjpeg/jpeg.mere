@@ -1,0 +1,660 @@
+// Baseline JPEG: the headers first, and the pixels after.
+//
+// The order is the font's order and for the same reason. A wrong header produces a PLAUSIBLE picture
+// — the right size in the wrong colours, or the right colours at half the resolution — and a gate
+// that only compares pixels cannot say which of the two halves is wrong. Everything a header holds
+// has exactly one answer, so it can be compared exactly, and it is worth knowing that it is right
+// before anything harder is attempted.
+//
+//   SOI  the file starts
+//   APPn a chunk to step over, and stepping over it correctly is most of reading a JPEG
+//   DQT  the quantisation tables, stored in ZIGZAG order
+//   SOF0 the frame: size, and each component's sampling factors and which table it uses
+//   DHT  the Huffman tables
+//   DRI  the restart interval
+//   SOS  the scan, after which the bytes are entropy-coded and no longer markers
+//   EOI  the file ends
+
+// A canonical Huffman table, in the form the decoder wants rather than the form the file has. The file
+// gives how many codes there are of each length and then the symbols in order; that is enough, because
+// the codes themselves are implied — canonical Huffman assigns them in order, shortest first. Keeping
+// `mincode`/`maxcode`/`valptr` per length turns decoding into "shift in bits until the value fits in
+// this length's range", which is one comparison per bit and no tree.
+type htab = { cls: int, hid: int, mincode: int Vec, maxcode: int Vec, valptr: int Vec, syms: int Vec };
+
+// One component as the scan sees it: where its samples go, and how wide that is in blocks.
+type scomp = { ci: int, hs: int, vs: int, bw: int, plane: int Vec };
+
+// A frame's shape, which is all of SOF0 plus what DQT said.
+type jcomp = { id: int, hs: int, vs: int, tq: int };
+
+type jhead = {
+  w: int, h: int, ncomp: int,
+  comps: jcomp list,
+  // Index and 64 values, in NATURAL order — de-zigzagged on the way in, because that is the order
+  // every later step wants and because doing it here makes the zigzag table something the header gate
+  // can see. A zigzag read backwards produces a picture, which is the kind of wrong that survives.
+  qt: (int * int list) list,
+  // Parsed but NOT compared by the gate: Pillow does not expose the restart interval, and a second
+  // reading of the same bytes written here would be this repository agreeing with itself. The file
+  // that carries one still earns its place — everything AFTER the DRI is compared, so a segment
+  // stepped over wrongly shows up as the rest of the header being read from the wrong offset.
+  restart: int,
+  hts: htab list,
+  // The scan header: which components, and which DC and AC table each uses. Not the same list as
+  // `comps` and not necessarily in the same order — a frame says what the image HAS, a scan says what
+  // this pass is coding, and baseline files where the two agree are the common case and not the rule.
+  sos: (int * int * int) list,
+  scan: int
+};
+
+module Jpeg {
+  let u8 = fn (d: bytes) -> fn (i: int) ->
+    if i < 0 || i >= bytes_len d then 0 else bytes_get d i;
+
+  let u16 = fn (d: bytes) -> fn (i: int) -> u8 d i * 256 + u8 d (i + 1);
+
+  // Where each of the 64 coefficients belongs. The file stores a block along the diagonals, because
+  // that puts the coefficients that are usually zero at the end where a run-length can eat them; the
+  // decoder wants them in rows.
+  let zigzag =
+    Cons (0, Cons (1, Cons (8, Cons (16, Cons (9, Cons (2, Cons (3, Cons (10,
+    Cons (17, Cons (24, Cons (32, Cons (25, Cons (18, Cons (11, Cons (4, Cons (5,
+    Cons (12, Cons (19, Cons (26, Cons (33, Cons (40, Cons (48, Cons (41, Cons (34,
+    Cons (27, Cons (20, Cons (13, Cons (6, Cons (7, Cons (14, Cons (21, Cons (28,
+    Cons (35, Cons (42, Cons (49, Cons (56, Cons (57, Cons (50, Cons (43, Cons (36,
+    Cons (29, Cons (22, Cons (15, Cons (23, Cons (30, Cons (37, Cons (44, Cons (51,
+    Cons (58, Cons (59, Cons (52, Cons (45, Cons (38, Cons (31, Cons (39, Cons (46,
+    Cons (53, Cons (60, Cons (61, Cons (54, Cons (47, Cons (55, Cons (62, Cons (63,
+    Nil))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))));
+
+  let _nth = fn (l: int list) -> fn (i: int) ->
+    let rec go = fn (r: int list) -> fn (k: int) ->
+      match r with Nil -> 0 | Cons (v, rest) -> if k == 0 then v else go rest (k - 1) in
+    go l i;
+
+  let _nth3 = fn (l: (int * int * int) list) -> fn (i: int) ->
+    let rec go = fn (r: (int * int * int) list) -> fn (k: int) ->
+      match r with Nil -> (0, 0, 0) | Cons (v, rest) -> if k == 0 then v else go rest (k - 1) in
+    go l i;
+
+  // The 64 values a DQT holds, put back into row order.
+  let _dezigzag = fn (d: bytes) -> fn (at: int) -> fn (wide: bool) ->
+    let v = fn (k: int) -> if wide then u16 d (at + k * 2) else u8 d (at + k) in
+    let rec go = fn (i: int) -> fn (acc: int list) ->
+      if i >= 64 then list_rev acc
+      else
+        // For each NATURAL position, which zigzag slot holds it. Walking the other way round — for
+        // each stored value, where it goes — needs a scatter, and a list has no scatter.
+        //
+        // `find 0`, and the 0 is the search's START and not the thing being searched for. Passing `i`
+        // there looks right and reads right and is a different function: it begins the walk at the
+        // answer's own index, so it finds nothing whose slot is behind it and quietly returns the
+        // fallback. Half the table came out as the value of slot zero.
+        let rec find = fn (k: int) -> if k >= 64 then 0
+                                      else if _nth zigzag k == i then k else find (k + 1) in
+        go (i + 1) (Cons (v (find 0), acc)) in
+    go 0 Nil;
+
+  let _pow2 = fn (k: int) ->
+    let rec go = fn (i: int) -> fn (a: int) -> if i >= k then a else go (i + 1) (a * 2) in go 0 1;
+
+  // Floor division, for a positive divisor. Mere's `/` truncates toward zero, and every shift in a
+  // JPEG decoder is an arithmetic shift — which floors. On the colour conversion the two differ for
+  // every negative chroma, which is half the picture.
+  let _fdiv = fn (a: int) -> fn (b: int) ->
+    let q = a / b in if a - q * b < 0 then q - 1 else q;
+
+  let _clamp = fn (x: int) -> if x < 0 then 0 else if x > 255 then 255 else x;
+
+  let _zeros = fn (n: int) ->
+    let v = vec_new () in
+    let rec go = fn (i: int) -> if i >= n then v else let _ = vec_push v 0 in go (i + 1) in go 0;
+
+  let _build_htab = fn (d: bytes) -> fn (at: int) -> fn (cls: int) -> fn (hid: int) ->
+    // `at` is the first of the sixteen counts.
+    let mincode = _zeros 17 in let maxcode = _zeros 17 in let valptr = _zeros 17 in
+    let rec total = fn (l: int) -> fn (a: int) -> if l > 16 then a else total (l + 1) (a + u8 d (at + l - 1)) in
+    let n = total 1 0 in
+    let syms = vec_new () in
+    let rec push = fn (k: int) -> if k >= n then 0 else let _ = vec_push syms (u8 d (at + 16 + k)) in push (k + 1) in
+    let _ = push 0 in
+    let rec go = fn (l: int) -> fn (code: int) -> fn (k: int) ->
+      if l > 16 then 0
+      else
+        let c = u8 d (at + l - 1) in
+        let _ = vec_set valptr l k in
+        let _ = vec_set mincode l code in
+        // -1 for "no code of this length", which is what the standard's own decoder does. Poisoning
+        // found that removing it changes no answer on any file here, and the reason is an invariant
+        // rather than luck: the running code at length l is never below `mincode[l]` for a valid
+        // stream, so the empty-length bound `code - 1` can never be met either. It is kept because it
+        // is the difference between a corrupt stream stopping and a corrupt stream being decoded.
+        let _ = vec_set maxcode l (if c == 0 then 0 - 1 else code + c - 1) in
+        go (l + 1) ((code + c) * 2) (k + c) in
+    let _ = go 1 0 0 in
+    htab { cls = cls, hid = hid, mincode = mincode, maxcode = maxcode, valptr = valptr, syms = syms };
+
+  // Walk the markers to the start of the scan. Everything before SOS is a header; after it the bytes
+  // are entropy-coded and a `FF` no longer begins a marker unless what follows is not zero.
+  // What a frame marker calls itself, so a refusal names the thing it refused rather
+  // than a byte.
+  let sof_name = fn (m: int) ->
+    if m == 194 then "progressive DCT"
+    else if m == 195 then "lossless"
+    else if m == 197 then "differential sequential"
+    else if m == 198 then "differential progressive"
+    else if m == 199 then "differential lossless"
+    else if m == 201 then "arithmetic-coded extended sequential"
+    else if m == 202 then "arithmetic-coded progressive"
+    else if m == 203 then "arithmetic-coded lossless"
+    else if m == 205 then "arithmetic-coded differential sequential"
+    else if m == 206 then "arithmetic-coded differential progressive"
+    else if m == 207 then "arithmetic-coded differential lossless"
+    else "SOF" ++ str_of_int (m - 192);
+
+  let header = fn (d: bytes) ->
+    let n = bytes_len d in
+    let rec go = fn (i: int) -> fn (h: jhead) ->
+      if i + 1 >= n then h
+      else if u8 d i != 255 then go (i + 1) h
+      else
+        let m = u8 d (i + 1) in
+        // Padding between markers is any number of `FF`s, and a marker with no payload has no length.
+        if m == 255 then go (i + 1) h
+        else if m == 216 || m == 1 || (m >= 208 && m <= 215) then go (i + 2) h
+        else if m == 217 then h
+        else
+          let len = u16 d (i + 2) in
+          let body = i + 4 in
+          let after = i + 2 + len in
+          // EVERY OTHER FRAME MARKER IS REFUSED BY NAME, and that is a fix rather than a
+          // restatement: this walk used to step PAST an SOF it did not know, and a
+          // progressive JPEG therefore came back as a header reading `0 0 0` -- width
+          // zero, height zero, no components -- having parsed the quantisation tables
+          // perfectly on the way. Nothing said anything. Two of the models in m3d's
+          // corpus are progressive, and a 0x0 image is the kind of wrong that arrives
+          // somewhere else entirely.
+          //
+          // C2 is progressive, C3 lossless, C5-C7 differential, C9-CB arithmetic-coded
+          // and CD-CF differential arithmetic. C4 is DHT and C8 and CC are not frames,
+          // so they are left to the branches below.
+          if m == 194 || m == 195 || (m >= 197 && m <= 199)
+             || (m >= 201 && m <= 203) || (m >= 205 && m <= 207) then
+            fail ("jpeg: this file is " ++ sof_name m
+                  ++ ", and this decoder reads baseline and extended sequential only")
+          else if m == 192 || m == 193 then
+            // SOF0 baseline, SOF1 extended sequential — the same layout, and the second is rare
+            // enough that refusing it would be a guess about what a file is rather than a reading.
+            let nc = u8 d (body + 5) in
+            let rec comps = fn (k: int) -> fn (acc: jcomp list) ->
+              if k >= nc then list_rev acc
+              else
+                let at = body + 6 + k * 3 in
+                let hv = u8 d (at + 1) in
+                comps (k + 1) (Cons (jcomp { id = u8 d at, hs = hv / 16,
+                                             vs = hv - (hv / 16) * 16, tq = u8 d (at + 2) }, acc)) in
+            go after (jhead { w = u16 d (body + 3), h = u16 d (body + 1), ncomp = nc,
+                              comps = comps 0 Nil, qt = h.qt, restart = h.restart,
+                              hts = h.hts, sos = h.sos, scan = h.scan })
+          else if m == 219 then
+            // One DQT segment can carry several tables, one after another, each with its own
+            // precision in the top half of the byte that names it.
+            let rec tabs = fn (at: int) -> fn (acc: (int * int list) list) ->
+              if at >= after then acc
+              else
+                let pq = u8 d at / 16 in
+                let tq = u8 d at - (u8 d at / 16) * 16 in
+                let vals = _dezigzag d (at + 1) (pq == 1) in
+                tabs (at + 1 + (if pq == 1 then 128 else 64))
+                     (list_append acc (Cons ((tq, vals), Nil))) in
+            go after (jhead { w = h.w, h = h.h, ncomp = h.ncomp, comps = h.comps,
+                              qt = tabs body h.qt, restart = h.restart,
+                              hts = h.hts, sos = h.sos, scan = h.scan })
+          else if m == 218 then
+            let ns = u8 d body in
+            let rec sc = fn (k: int) -> fn (acc: (int * int * int) list) ->
+              if k >= ns then list_rev acc
+              else
+                let at = body + 1 + k * 2 in
+                let t = u8 d (at + 1) in
+                sc (k + 1) (Cons ((u8 d at, t / 16, t - (t / 16) * 16), acc)) in
+            jhead { w = h.w, h = h.h, ncomp = h.ncomp, comps = h.comps, qt = h.qt,
+                    restart = h.restart, hts = h.hts, sos = sc 0 Nil, scan = after }
+          else if m == 196 then
+            // One DHT segment can carry several tables, same as DQT, and libjpeg does pack them.
+            let rec tabs = fn (at: int) -> fn (acc: htab list) ->
+              if at >= after then acc
+              else
+                let tc = u8 d at / 16 in
+                let th = u8 d at - (u8 d at / 16) * 16 in
+                let rec total = fn (l: int) -> fn (a: int) ->
+                  if l > 16 then a else total (l + 1) (a + u8 d (at + l)) in
+                tabs (at + 17 + total 1 0)
+                     (list_append acc (Cons (_build_htab d (at + 1) tc th, Nil))) in
+            go after (jhead { w = h.w, h = h.h, ncomp = h.ncomp, comps = h.comps, qt = h.qt,
+                              restart = h.restart, hts = tabs body h.hts, sos = h.sos, scan = h.scan })
+          else if m == 221 then
+            go after (jhead { w = h.w, h = h.h, ncomp = h.ncomp, comps = h.comps,
+                              qt = h.qt, restart = u16 d body,
+                              hts = h.hts, sos = h.sos, scan = h.scan })
+          else go after h in
+    go 0 (jhead { w = 0, h = 0, ncomp = 0, comps = Nil, qt = Nil, restart = 0,
+                  hts = Nil, sos = Nil, scan = 0 });
+
+  let render_head = fn (h: jhead) ->
+    let c1 = fn (c: jcomp) ->
+      str_of_int c.id ++ "," ++ str_of_int c.hs ++ "," ++ str_of_int c.vs ++ "," ++ str_of_int c.tq in
+    let q1 = fn (t: (int * int list)) ->
+      let (k, vs) = t in
+      str_of_int k ++ ": " ++ str_join " " (list_map vs str_of_int) in
+    str_of_int h.w ++ " " ++ str_of_int h.h ++ " " ++ str_of_int h.ncomp
+    ++ " | " ++ str_join " ; " (list_map h.comps c1)
+    ++ " | " ++ str_join " | " (list_map h.qt q1);
+
+  // ---- the scan ----------------------------------------------------------------------------
+  //
+  // The bit reader's whole state is three ints in a Vec: where in the file, the byte in hand, and how
+  // many of its bits are left. A record would be copied at every bit.
+  //
+  // `FF 00` is not a marker. The encoder stuffs a zero after every literal `FF` in the entropy data
+  // precisely so that a decoder scanning for markers cannot be fooled by the compressed bits, and the
+  // reader has to unstuff it here — this is the one place in the file where `FF` means the byte `FF`.
+  let _bit = fn (d: bytes) -> fn (st: int Vec) ->
+    let _ = if vec_get st 2 == 0 then
+              (let p = vec_get st 0 in
+               let b = u8 d p in
+               let _ = vec_set st 0 (if b == 255 then p + 2 else p + 1) in
+               let _ = vec_set st 1 b in
+               let _ = vec_set st 2 8 in 0)
+            else 0 in
+    let n = vec_get st 2 in
+    let b = vec_get st 1 in
+    let _ = vec_set st 2 (n - 1) in
+    (b / _pow2 (n - 1)) - (b / _pow2 n) * 2;
+
+  let _receive = fn (d: bytes) -> fn (st: int Vec) -> fn (n: int) ->
+    let rec go = fn (i: int) -> fn (a: int) ->
+      if i >= n then a else go (i + 1) (a * 2 + _bit d st) in go 0 0;
+
+  // A JPEG stores a coefficient as a length and then that many bits, and the bits are the value's
+  // magnitude only for positives; a negative is stored as one less than its two's complement in that
+  // width. So the top half of the range is positive and the bottom half is negative, and there is no
+  // sign bit to read.
+  let _extend = fn (v: int) -> fn (t: int) ->
+    if t == 0 then 0 else if v < _pow2 (t - 1) then v - _pow2 t + 1 else v;
+
+  let _dec_huff = fn (d: bytes) -> fn (st: int Vec) -> fn (t: htab) ->
+    let rec go = fn (l: int) -> fn (code: int) ->
+      if l > 16 then 0
+      else if vec_get t.maxcode l >= 0 && code <= vec_get t.maxcode l then
+        vec_get t.syms (vec_get t.valptr l + code - vec_get t.mincode l)
+      else go (l + 1) (code * 2 + _bit d st) in
+    go 1 (_bit d st);
+
+  let _find_htab = fn (hs: htab list) -> fn (cls: int) -> fn (hid: int) ->
+    let rec go = fn (l: htab list) ->
+      match l with
+      | Nil -> htab { cls = cls, hid = hid, mincode = _zeros 17, maxcode = _zeros 17,
+                      valptr = _zeros 17, syms = _zeros 1 }
+      | Cons (t, r) -> if t.cls == cls && t.hid == hid then t else go r in
+    go hs;
+
+  let _find_qt = fn (q: (int * int list) list) -> fn (tq: int) ->
+    let rec go = fn (l: (int * int list) list) ->
+      match l with
+      | Nil -> Nil
+      | Cons (t, r) -> let (k, vs) = t in if k == tq then vs else go r in
+    go q;
+
+  let _nthc = fn (l: scomp list) -> fn (i: int) ->
+    let rec go = fn (r: scomp list) -> fn (k: int) ->
+      match r with
+      | Nil -> scomp { ci = 0, hs = 1, vs = 1, bw = 1, plane = _zeros 64 }
+      | Cons (v, rest) -> if k == 0 then v else go rest (k - 1) in
+    go l i;
+
+  let _nthv = fn (l: (int Vec) list) -> fn (i: int) ->
+    let rec go = fn (r: (int Vec) list) -> fn (k: int) ->
+      match r with Nil -> _zeros 1 | Cons (v, rest) -> if k == 0 then v else go rest (k - 1) in
+    go l i;
+
+  let _qvec = fn (l: int list) ->
+    let v = vec_new () in
+    let rec go = fn (r: int list) ->
+      match r with Nil -> v | Cons (x, rest) -> let _ = vec_push v x in go rest in
+    let w = go l in
+    // A missing table would index out of range later; 64 zeroes is a black block, which is wrong in a
+    // way that shows, unlike a crash inside the transform.
+    let rec pad = fn (i: int) -> if i >= 64 then w else let _ = vec_push w 0 in pad (i + 1) in
+    pad (list_len l);
+
+  let _find_comp = fn (cs: jcomp list) -> fn (id: int) ->
+    let rec go = fn (l: jcomp list) ->
+      match l with
+      | Nil -> jcomp { id = id, hs = 1, vs = 1, tq = 0 }
+      | Cons (c, r) -> if c.id == id then c else go r in
+    go cs;
+
+  // A restart marker is a resynchronisation point: the bits are byte-aligned again and every DC
+  // predictor goes back to zero. That is the whole reason they exist — a corrupted stream can be
+  // picked up at the next one — and it is also why they must be consumed here rather than tripped over
+  // by the bit reader, which would read `FF D0` as data.
+  let _sync = fn (d: bytes) -> fn (st: int Vec) ->
+    let _ = vec_set st 2 0 in
+    let rec skip = fn (p: int) ->
+      if u8 d p == 255 && u8 d (p + 1) == 255 then skip (p + 1)
+      else if u8 d p == 255 && u8 d (p + 1) >= 208 && u8 d (p + 1) <= 215 then p + 2
+      else p in
+    vec_set st 0 (skip (vec_get st 0));
+
+  // One 8x8 block: the DC difference against this component's running predictor, then the AC
+  // coefficients as (run of zeroes, magnitude length) pairs until end-of-block.
+  //
+  // Returns the dequantised DC and how many AC coefficients were non-zero. Every image in
+  // `test/data/jpeg` is flat 16x16 blocks, so every AC here is zero and the only AC symbol that
+  // occurs is EOB — the count is returned so the gate can SAY that rather than assume it, and so the
+  // day it stops being true is a number changing and not a picture changing.
+  let _block = fn (d: bytes) -> fn (st: int Vec) -> fn (dct: htab) -> fn (act: htab) ->
+                  fn (co: int Vec) -> fn (zz: int Vec) -> fn (pred: int Vec) -> fn (ci: int) ->
+    let rec clear = fn (i: int) -> if i >= 64 then 0 else let _ = vec_set co i 0 in clear (i + 1) in
+    let _ = clear 0 in
+    let t = _dec_huff d st dct in
+    let dc = vec_get pred ci + _extend (_receive d st t) t in
+    let _ = vec_set pred ci dc in
+    let _ = vec_set co 0 dc in
+    // The coefficients arrive along the diagonals and are stored where they belong, so the transform
+    // never has to know about the zigzag and the quantisation table can be indexed the same way.
+    let rec ac = fn (k: int) -> fn (nz: int) ->
+      if k > 63 then nz
+      else
+        let rs = _dec_huff d st act in
+        let r = rs / 16 in
+        let sz = rs - r * 16 in
+        // A zero size means end-of-block, unless the run is fifteen — that is the escape that says
+        // "sixteen zeroes and keep going", and it is the one AC symbol a flat image never produces.
+        if sz == 0 then (if r == 15 then ac (k + 16) nz else nz)
+        else
+          let k2 = k + r in
+          let v = _extend (_receive d st sz) sz in
+          let _ = if k2 <= 63 then (let _ = vec_set co (vec_get zz k2) v in 0) else 0 in
+          ac (k2 + 1) (if v != 0 then nz + 1 else nz) in
+    ac 1 0;
+
+  let _descale = fn (x: int) -> fn (n: int) -> _fdiv (x + _pow2 (n - 1)) (_pow2 n);
+
+  // The inverse DCT, as libjpeg's `jpeg_idct_islow` computes it: separable, integer, thirteen bits of
+  // fraction, and the constants below are cosines rounded to that many bits.
+  //
+  // **Matching an implementation is the only way to be exact here.** The transform is real-valued and
+  // every decoder rounds it somewhere; the standard requires two decoders to agree within one, not to
+  // agree. So "correct to the bit" is a claim that only means something against a named
+  // implementation — and having one makes any image at all an exact test, instead of only the images
+  // whose blocks are flat.
+  //
+  // Both passes are written in full, without libjpeg's all-AC-zero shortcuts. Those shortcuts produce
+  // the same numbers as the general path — a DC-only column reduces to `dc << 2` either way — so
+  // leaving them out costs time and removes two branches that would need their own poison.
+  let _idct = fn (co: int Vec) -> fn (qv: int Vec) -> fn (px: int Vec) -> fn (stride: int) ->
+                 fn (ox: int) -> fn (oy: int) ->
+    let ws = _zeros 64 in
+    // The odd part of the butterfly, shared by both passes: four inputs in, four out.
+    let odd = fn (t0: int) -> fn (t1: int) -> fn (t2: int) -> fn (t3: int) ->
+      let y1 = t0 + t3 in let y2 = t1 + t2 in let y3 = t0 + t2 in let y4 = t1 + t3 in
+      let z5 = (y3 + y4) * 9633 in
+      let w1 = y1 * (0 - 7373) in
+      let w2 = y2 * (0 - 20995) in
+      let w3 = y3 * (0 - 16069) + z5 in
+      let w4 = y4 * (0 - 3196) + z5 in
+      (t0 * 2446 + w1 + w3, t1 * 16819 + w2 + w4, t2 * 25172 + w2 + w3, t3 * 12299 + w1 + w4) in
+    // The even part, likewise.
+    let even = fn (e0: int) -> fn (e2: int) -> fn (e4: int) -> fn (e6: int) ->
+      let z1 = (e2 + e6) * 4433 in
+      let tmp2 = z1 + e6 * (0 - 15137) in
+      let tmp3 = z1 + e2 * 6270 in
+      let tmp0 = (e0 + e4) * 8192 in
+      let tmp1 = (e0 - e4) * 8192 in
+      (tmp0 + tmp3, tmp1 + tmp2, tmp1 - tmp2, tmp0 - tmp3) in
+    let rec col = fn (c: int) ->
+      if c >= 8 then 0
+      else
+        let dq = fn (k: int) -> vec_get co (k * 8 + c) * vec_get qv (k * 8 + c) in
+        let (t10, t11, t12, t13) = even (dq 0) (dq 2) (dq 4) (dq 6) in
+        let (v0, v1, v2, v3) = odd (dq 7) (dq 5) (dq 3) (dq 1) in
+        let put = fn (k: int) -> fn (v: int) -> vec_set ws (k * 8 + c) (_descale v 11) in
+        let _ = put 0 (t10 + v3) in let _ = put 7 (t10 - v3) in
+        let _ = put 1 (t11 + v2) in let _ = put 6 (t11 - v2) in
+        let _ = put 2 (t12 + v1) in let _ = put 5 (t12 - v1) in
+        let _ = put 3 (t13 + v0) in let _ = put 4 (t13 - v0) in
+        col (c + 1) in
+    let _ = col 0 in
+    let rec row = fn (r: int) ->
+      if r >= 8 then 0
+      else
+        let g = fn (k: int) -> vec_get ws (r * 8 + k) in
+        let (t10, t11, t12, t13) = even (g 0) (g 2) (g 4) (g 6) in
+        let (v0, v1, v2, v3) = odd (g 7) (g 5) (g 3) (g 1) in
+        // Eighteen bits back out: thirteen of constant, two carried between the passes, and three for
+        // the transform's own eighth. Then the level shift from signed back to unsigned.
+        let put = fn (k: int) -> fn (v: int) ->
+          vec_set px ((oy + r) * stride + ox + k) (_clamp (_descale v 18 + 128)) in
+        let _ = put 0 (t10 + v3) in let _ = put 7 (t10 - v3) in
+        let _ = put 1 (t11 + v2) in let _ = put 6 (t11 - v2) in
+        let _ = put 2 (t12 + v1) in let _ = put 5 (t12 - v1) in
+        let _ = put 3 (t13 + v0) in let _ = put 4 (t13 - v0) in
+        row (r + 1) in
+    row 0;
+
+  let decode = fn (h: jhead) -> fn (d: bytes) ->
+    let cdiv = fn (a: int) -> fn (b: int) -> (a + b - 1) / b in
+    let ns = list_len h.sos in
+    let rec maxf = fn (l: jcomp list) -> fn (a: int) -> fn (b: int) ->
+      match l with Nil -> (a, b)
+      | Cons (c, r) -> maxf r (if c.hs > a then c.hs else a) (if c.vs > b then c.vs else b) in
+    let (hmax, vmax) = maxf h.comps 1 1 in
+    let mcux = cdiv h.w (8 * hmax) in
+    let mcuy = cdiv h.h (8 * vmax) in
+    // One entry per scan component, in scan order, each with somewhere to put its samples.
+    let rec build = fn (l: (int * int * int) list) -> fn (i: int) -> fn (acc: scomp list) ->
+      match l with
+      | Nil -> list_rev acc
+      | Cons (t, r) ->
+        let (cs, _td, _ta) = t in
+        let c = _find_comp h.comps cs in
+        let bw = mcux * c.hs in
+        build r (i + 1) (Cons (scomp { ci = i, hs = c.hs, vs = c.vs, bw = bw,
+                                       plane = _zeros (bw * 8 * mcuy * c.vs * 8) }, acc)) in
+    let scs = build h.sos 0 Nil in
+    let st = _zeros 3 in
+    let _ = vec_set st 0 h.scan in
+    let co = _zeros 64 in
+    let zz = _qvec zigzag in
+    let pred = _zeros (if ns == 0 then 1 else ns) in
+    let nzs = _zeros 1 in
+    let rec mcu = fn (my: int) -> fn (mx: int) -> fn (seen: int) ->
+      if my >= mcuy then 0
+      else if mx >= mcux then mcu (my + 1) 0 seen
+      else
+        let _ = if h.restart > 0 && seen > 0 && seen - (seen / h.restart) * h.restart == 0 then
+                  (let _ = _sync d st in
+                   let rec z = fn (i: int) -> if i >= ns then 0 else let _ = vec_set pred i 0 in z (i + 1) in z 0)
+                else 0 in
+        let rec each = fn (l: scomp list) -> fn (si: int) ->
+          match l with
+          | Nil -> 0
+          | Cons (c, r) ->
+            let (cs, td, ta) = _nth3 h.sos si in
+            let fc = _find_comp h.comps cs in
+            let dct = _find_htab h.hts 0 td in
+            let act = _find_htab h.hts 1 ta in
+            let qv = _qvec (_find_qt h.qt fc.tq) in
+            let rec blk = fn (bv: int) -> fn (bh: int) ->
+              if bv >= c.vs then 0
+              else if bh >= c.hs then blk (bv + 1) 0
+              else
+                let nz = _block d st dct act co zz pred c.ci in
+                let _ = vec_set nzs 0 (vec_get nzs 0 + nz) in
+                let _ = _idct co qv c.plane (c.bw * 8) ((mx * c.hs + bh) * 8) ((my * c.vs + bv) * 8) in
+                blk bv (bh + 1) in
+            let _ = blk 0 0 in
+            each r (si + 1) in
+        let _ = each scs 0 in
+        mcu my (mx + 1) (seen + 1) in
+    let _ = mcu 0 0 0 in
+    (scs, hmax, vmax, vec_get nzs 0);
+
+  // Upsampling: putting back the chroma samples the encoder threw away.
+  //
+  // Repeating the nearest sample is the obvious thing and it is not what any real decoder does. The
+  // samples that were kept are the averages of the ones that were not, so the value halfway between
+  // two kept samples is better estimated by leaning three parts toward the near one and one part
+  // toward the far one — a triangle filter — and libjpeg calls this "fancy upsampling" and does it by
+  // default. Repeating instead leaves visible blocks at every chroma edge.
+  //
+  // **This is matching an implementation, not a standard.** The standard does not say which filter to
+  // use, so two correct decoders legitimately differ within one chroma sample of a chroma edge. The
+  // weights and the rounding below are libjpeg's, which is what makes an exact comparison possible at
+  // all — and the claim the gate then makes is "the same as libjpeg", which is narrower than "right"
+  // and is the widest claim there is anything to check.
+  //
+  // The two ends round in opposite directions — +1 and +2 at the quarter positions — because they sit
+  // either side of the sample they interpolate from, and swapping them is visible.
+  //
+  // libjpeg writes the first and last columns as special cases that output the kept sample unchanged.
+  // Those cases are NOT written here, and finding that out was the point of poisoning: removing them
+  // changed nothing, because clamping the neighbour lookup at the edge already makes the general
+  // formula give the same answer — `(v*3 + v + 1) / 4` is `v`. libjpeg needs the special case because
+  // its pointers would run off the row; with a clamp there is one rule, not three. A branch that
+  // cannot change an answer is a branch that has to be maintained anyway.
+  let _upsample = fn (c: scomp) -> fn (hmax: int) -> fn (vmax: int) -> fn (w: int) -> fn (h: int) ->
+    let stride = c.bw * 8 in
+    let cw = (w * c.hs + hmax - 1) / hmax in
+    let ch = (h * c.vs + vmax - 1) / vmax in
+    let at = fn (y: int) -> fn (x: int) ->
+      vec_get c.plane ((if y < 0 then 0 else if y >= ch then ch - 1 else y) * stride
+                       + (if x < 0 then 0 else if x >= cw then cw - 1 else x)) in
+    let out = _zeros (w * h) in
+    let put = fn (y: int) -> fn (x: int) -> fn (v: int) ->
+      if x >= w || y >= h then 0 else (let _ = vec_set out (y * w + x) v in 0) in
+    let _ =
+      if c.hs == hmax && c.vs == vmax then
+        // Not subsampled: the samples are already where they belong.
+        let rec go = fn (y: int) -> fn (x: int) ->
+          if y >= h then 0
+          else if x >= w then go (y + 1) 0
+          else let _ = put y x (at y x) in go y (x + 1) in
+        go 0 0
+      else if c.hs * 2 == hmax && c.vs == vmax then
+        // Halved across only. Each kept sample becomes two: itself at the outer position, and a
+        // three-to-one blend with its neighbour at the inner one.
+        let rec go = fn (y: int) -> fn (i: int) ->
+          if y >= h then 0
+          else if i >= cw then go (y + 1) 0
+          else
+            let v = at y i in
+            let l = if i == 0 then v else at y (i - 1) in
+            let r = if i == cw - 1 then v else at y (i + 1) in
+            let a = (v * 3 + l + 1) / 4 in
+            let b = (v * 3 + r + 2) / 4 in
+            let _ = put y (i * 2) a in
+            let _ = put y (i * 2 + 1) b in
+            go y (i + 1) in
+        go 0 0
+      else if c.hs * 2 == hmax && c.vs * 2 == vmax then
+        // Halved both ways. Vertically first, three-to-one against the nearer neighbouring row, and
+        // the two are folded into one column sum so the horizontal pass divides by sixteen once
+        // instead of by four twice — which is not the same number, and libjpeg's is this one.
+        let rec go = fn (oy: int) -> fn (i: int) ->
+          if oy >= h then 0
+          else if i >= cw then go (oy + 1) 0
+          else
+            let r0 = oy / 2 in
+            let r1 = if oy - r0 * 2 == 0 then r0 - 1 else r0 + 1 in
+            let cs = fn (k: int) -> at r0 k * 3 + at r1 k in
+            let t = cs i in
+            let l = if i == 0 then t else cs (i - 1) in
+            let r = if i == cw - 1 then t else cs (i + 1) in
+            let a = (t * 3 + l + 8) / 16 in
+            let b = (t * 3 + r + 7) / 16 in
+            let _ = put oy (i * 2) a in
+            let _ = put oy (i * 2 + 1) b in
+            go oy (i + 1) in
+        go 0 0
+      else
+        // Any other ratio: repeat the nearest sample. libjpeg does the same for ratios it has no
+        // special case for, and no file here takes this branch.
+        let rec go = fn (y: int) -> fn (x: int) ->
+          if y >= h then 0
+          else if x >= w then go (y + 1) 0
+          else let _ = put y x (at (y * c.vs / vmax) (x * c.hs / hmax)) in go y (x + 1) in
+        go 0 0 in
+    out;
+
+  // libjpeg's fixed-point YCbCr to RGB, constants and rounding included, because those constants ARE
+  // the answer: the conversion is a real-valued matrix and every decoder rounds it somewhere, so
+  // "correct to the bit" only means anything against a named implementation.
+  let _ycc = fn (y: int) -> fn (cb: int) -> fn (cr: int) ->
+    let b1 = cb - 128 in
+    let r1 = cr - 128 in
+    let r = _clamp (y + _fdiv (91881 * r1 + 32768) 65536) in
+    let g = _clamp (y + _fdiv (0 - 22554 * b1 + 32768 - 46802 * r1) 65536) in
+    let b = _clamp (y + _fdiv (116130 * b1 + 32768) 65536) in
+    r * 65536 + g * 256 + b;
+
+  let pixels = fn (h: jhead) -> fn (d: bytes) ->
+    let (scs, hmax, vmax, nz) = decode h d in
+    let up = list_map scs (fn (c: scomp) -> _upsample c hmax vmax h.w h.h) in
+    let v = _zeros (h.w * h.h) in
+    let p0 = _nthv up 0 in
+    let three = list_len scs >= 3 in
+    let p1 = if three then _nthv up 1 else p0 in
+    let p2 = if three then _nthv up 2 else p0 in
+    let rec go = fn (y: int) -> fn (x: int) ->
+      if y >= h.h then 0
+      else if x >= h.w then go (y + 1) 0
+      else
+        let i = y * h.w + x in
+        let p = if three then _ycc (vec_get p0 i) (vec_get p1 i) (vec_get p2 i)
+                else let s = vec_get p0 i in s * 65536 + s * 256 + s in
+        let _ = vec_set v i p in
+        go y (x + 1) in
+    let _ = go 0 0 in
+    (v, nz);
+
+  let hex6 = fn (c: int) ->
+    let dg = "0123456789abcdef" in
+    let nib = fn (sh: int) -> char_at dg ((c / sh) - (c / (sh * 16)) * 16) in
+    nib 1048576 ++ nib 65536 ++ nib 4096 ++ nib 256 ++ nib 16 ++ nib 1;
+
+  // The same run-length rows the painter writes, for the same reason: exact, diffable, and a failing
+  // line names the row and the run.
+  let render_pixels = fn (v: int Vec) -> fn (w: int) -> fn (h: int) ->
+    let rec row = fn (y: int) -> fn (out: str list) ->
+      if y >= h then str_join "\n" (list_rev out)
+      else
+        let rec run = fn (x: int) -> fn (cur: int) -> fn (n: int) -> fn (acc: str list) ->
+          if x >= w then list_rev (Cons (str_of_int n ++ "x" ++ hex6 cur, acc))
+          else
+            let c = vec_get v (y * w + x) in
+            if c == cur then run (x + 1) cur (n + 1) acc
+            else run (x + 1) c 1 (Cons (str_of_int n ++ "x" ++ hex6 cur, acc)) in
+        row (y + 1) (Cons (str_join " " (run 1 (vec_get v (y * w)) 1 Nil), out)) in
+    row 0 Nil;
+
+  // A FILE WITH NO FRAME AT ALL IS A REFUSAL, not a zero-by-zero image. `header`
+  // returns whatever it accumulated, so a truncated file or one whose SOF this
+  // decoder skipped would otherwise hand back a plausible-looking record with no
+  // pixels in it -- and every caller would have to know to check.
+  let checked = fn (d: bytes) ->
+    let h = header d in
+    if h.w <= 0 || h.h <= 0 || h.ncomp <= 0
+    then fail ("jpeg: no frame header was found (SOF0 or SOF1), so there is nothing to "
+               ++ "decode -- the file is truncated, or is not a JPEG")
+    else h;
+
+  // Reading a file is the CALLER'S business, not this decoder's. The package takes
+  // bytes: a glTF image may be a file beside the document or a range of a binary
+  // chunk, and a decoder that insisted on a path could not read the second.
+  let load = fn (path: str) -> checked (bytes_of_vec (read_file_bytes path));
+  let load_bytes = fn (path: str) -> bytes_of_vec (read_file_bytes path);
+}

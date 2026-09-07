@@ -48,14 +48,18 @@ fi
 
 # MODELS THIS LOADER CANNOT READ, AND WHY -- listed, not tolerated.
 #
-# Six corpus models carry JPEG textures and there is no JPEG decoder here, so the loader
-# refuses them by name. That is the right behaviour and it is still a gap, so the gate
-# holds the list EXACTLY: a refusal that is not on it fails, and a model on it that has
-# started reading ALSO fails. The second half is the one that matters -- a list of known
-# failures with no way to notice that one is fixed becomes a list of things nobody looks
-# at, and the day JPEG lands this line is what says so.
-KNOWN_REFUSALS="CesiumMan CesiumMilkTruck CompareMetallic CompareNormal CompareRoughness MorphPrimitivesTest"
-KNOWN_REASON="a JPEG texture, and there is no JPEG decoder here yet"
+# The gate holds the list EXACTLY: a refusal that is not on it fails, and a model on it
+# that has started reading ALSO fails. The second half is the one that matters -- a list
+# of known failures with no way to notice that one is fixed becomes a list nobody looks
+# at -- and it has already earned its keep: the list was six models with JPEG textures,
+# and when the mjpeg package landed FOUR OF THEM STARTED READING and this line is what
+# made the gate say so rather than keep passing.
+#
+# The two that remain are PROGRESSIVE JPEGs, which is a different and much larger feature
+# than baseline: spectral selection and successive approximation, several scans per
+# component. The refusal names it, which is the point -- it used to say "not a PNG".
+KNOWN_REFUSALS="CesiumMan CesiumMilkTruck"
+KNOWN_REASON="a progressive JPEG, and mjpeg reads baseline and extended sequential only"
 
 fail=0; total=0; read_ok=0; drew=0; lit=0; nomesh=0
 refused=""

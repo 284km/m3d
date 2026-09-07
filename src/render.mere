@@ -301,7 +301,7 @@ module Render {
       // aliases. It is the largest remaining disagreement with the reference
       // renderer on the textured models, and it is recorded there rather than
       // hidden.
-      Some (texslot { img = Tex.of_png_data (Gltf.image d si) (Gltf.image_name d si),
+      Some (texslot { img = Tex.of_bytes (Gltf.image d si) (Gltf.image_name d si),
                       ws = ws, wt = wt, mag = mag, uvset = uvset });
 
   // Sampling a slot: the colour space and the coordinate set are both properties

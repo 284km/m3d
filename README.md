@@ -268,6 +268,15 @@ which is the entire point of it, and averaging then decoding makes edges
 between light and dark go dark. And **alpha never goes through it**: alpha is a
 coverage fraction and was never on a curve.
 
+**What an image is comes from its bytes, not from its name.** glTF carries a
+`mimeType` for an image in a bufferView and a uri with an extension for one
+beside the document, and both can lie — a file called `.png` holding a JPEG
+happens, and an extension is absent entirely from a `data:` URI. The first bytes
+are the format saying what it is. Anything that is neither a PNG nor a JPEG is
+refused with its first four bytes in the message, because "not an image I know"
+and "a WebP" are different things to be told and the second says what to
+implement.
+
 `scripts/tex_oracle.py` decodes the same files with **PIL** — a different PNG
 implementation, in another language — and compares every texel exactly. This is
 the one part of the project where a real second implementation is available off
@@ -499,9 +508,15 @@ so in the code.
 
 Ranked by what the corpus table says, rather than by what seems interesting:
 
-- **JPEG.** Six models are refused outright — five for their base colour and, now
-  that normal maps are resolved, `CompareNormal` for its normal map. mbrowse has
-  a 615-line baseline decoder; extracting it into a package is the job.
+- **Progressive JPEG.** Two models are refused, by name. Baseline JPEG landed as
+  [mjpeg](https://github.com/284km/mjpeg) — extracted from mbrowse, where it was
+  written for a browser and had only ever been handed files a browser had already
+  sniffed. Asking for it as a package found two things one caller could not: it
+  took a *path*, where a glTF image may be a range of the binary chunk, and it
+  **stepped past a frame marker it did not know**, so a progressive file came back
+  as a `0 0 0` header with no complaint. Progressive is a much larger feature than
+  baseline — several scans per component, spectral selection, successive
+  approximation — and `CesiumMan` and `CesiumMilkTruck` wait on it.
 - **Normal mapping.** Resolved and sampled but not yet applied, which is the
   ~8-unit residual on `NormalTangentTest` and `NormalTangentMirrorTest`. Three of
   the five models that use one have no `TANGENT` — which is exactly what

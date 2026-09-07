@@ -27,6 +27,24 @@ grep -q 'JFloat' "$ROOT/.mere_modules/json/json.mere" \
 # PNG, and the DEFLATE it is built on. Two more Mere-written projects rather than a C
 # library: MERE_DOGFOOD points at the directory holding them (github.com/284km/<name>).
 DOG="${MERE_DOGFOOD:-$(dirname "$(dirname "$MERE_SRC")")/284km}"
+# JPEG, which came out of mbrowse into a package of its own when this renderer asked for
+# it: six of the corpus's models carry JPEG textures. It reads a JPEG and knows nothing
+# about the web, and it now takes BYTES rather than a path -- a glTF image may be a range
+# of the binary chunk.
+if [ -f "$DOG/mjpeg/jpeg.mere" ]; then
+  mkdir -p "$ROOT/.mere_modules/mjpeg"
+  cp "$DOG/mjpeg/jpeg.mere" "$ROOT/.mere_modules/mjpeg/jpeg.mere"
+  # The version matters: an earlier copy STEPPED PAST a frame marker it did not know, so a
+  # progressive JPEG came back as a 0x0 header and said nothing. Two corpus models are
+  # progressive, and this renderer needs them refused by name, not silently empty.
+  grep -q 'sof_name' "$ROOT/.mere_modules/mjpeg/jpeg.mere" \
+    || { echo "vendor: this copy of mjpeg does not refuse unsupported frame types by name" >&2; exit 1; }
+  echo "vendored mjpeg/jpeg.mere"
+else
+  echo "vendor: no mjpeg at $DOG/mjpeg — set MERE_DOGFOOD to the directory holding it" >&2
+  exit 1
+fi
+
 if [ -f "$DOG/mpng/png.mere" ] && [ -f "$DOG/mgz/inflate.mere" ]; then
   mkdir -p "$ROOT/.mere_modules/mpng" "$ROOT/.mere_modules/mgz"
   cp "$DOG/mpng/png.mere" "$ROOT/.mere_modules/mpng/png.mere"

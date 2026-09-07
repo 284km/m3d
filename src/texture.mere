@@ -17,6 +17,7 @@
 // puts a pixel through `pow`, so the four-backend comparison survives it --
 // which was the open question when this file was planned.
 import "mpng/png.mere";
+import "mjpeg/jpeg.mere";
 import "./linalg.mere";
 import "./srgb.mere";
 
@@ -135,6 +136,53 @@ module Tex {
   // The channel expansion above mirrors mpng's `rgb8` and adds the alpha that
   // one drops, which is what a baseColor texture needs for MASK.
   let of_png = fn (path: str) -> of_png_data (read_bytes path) path;
+
+  // A JPEG, as RGBA8 with alpha 1. JPEG HAS NO ALPHA CHANNEL -- it is a lossy
+  // codec for photographs and the format has no way to say "transparent" -- so
+  // filling 255 here is a fact about the format and not a default this file
+  // picked. A baseColor texture that needs a cutout has to be a PNG.
+  //
+  // `Jpeg.pixels` returns one packed 0xRRGGBB per pixel; it is unpacked rather
+  // than reinterpreted, because a byte order assumed is a byte order wrong on
+  // some other machine.
+  let of_jpeg_data = fn (raw: bytes) -> fn (where: str) ->
+    let h = Jpeg.checked raw in
+    let (v, _ac) = Jpeg.pixels h raw in
+    let out = bytebuf_new (h.w * h.h * 4) in
+    let rec go = fn (i: int) ->
+      if i == h.w * h.h then ()
+      else
+        let c = vec_get v i in
+        let o = i * 4 in
+        let _ = bytebuf_set out o (c / 65536) in
+        let _ = bytebuf_set out (o + 1) ((c / 256) - (c / 65536) * 256) in
+        let _ = bytebuf_set out (o + 2) (c - (c / 256) * 256) in
+        let _ = bytebuf_set out (o + 3) 255 in
+        go (i + 1) in
+    let _ = go 0 in
+    texture { w = h.w, h = h.h, px = out };
+
+  // WHAT AN IMAGE IS COMES FROM ITS BYTES, NOT FROM ITS NAME.
+  //
+  // glTF carries a `mimeType` for an image in a bufferView and a uri with an
+  // extension for one beside the document, and BOTH CAN LIE -- a file called
+  // `.png` holding a JPEG is a thing that happens, and an extension is absent
+  // entirely from a data: URI. The first bytes are the format saying what it is:
+  // 89 50 4E 47 for a PNG, FF D8 FF for a JPEG.
+  //
+  // Anything else is REFUSED BY NAME with its first bytes in the message, because
+  // "this is not an image I know" and "this is a WebP" are different things to be
+  // told, and the second one tells you what to implement.
+  let of_bytes = fn (raw: bytes) -> fn (where: str) ->
+    let b = fn (i: int) -> if bytes_len raw > i then bytes_get raw i else 0 - 1 in
+    if b 0 == 137 && b 1 == 80 && b 2 == 78 && b 3 == 71 then of_png_data raw where
+    else if b 0 == 255 && b 1 == 216 && b 2 == 255 then of_jpeg_data raw where
+    else
+      let hx = fn (i: int) -> if b i < 0 then "--" else
+        let d = "0123456789abcdef" in
+        char_at d (b i / 16) ++ char_at d (b i - (b i / 16) * 16) in
+      fail ("texture: " ++ where ++ " is neither a PNG nor a JPEG -- it begins "
+            ++ hx 0 ++ " " ++ hx 1 ++ " " ++ hx 2 ++ " " ++ hx 3);
 
   // One texel, wrapped. Returns the four bytes as they are stored -- no
   // transfer curve, because whether one applies is the slot's business.
