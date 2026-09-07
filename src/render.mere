@@ -540,6 +540,20 @@ module Render {
         | None -> 1.0
         | Some oj -> J.flt_or oj "strength" 1.0;
 
+  // `normalTexture.scale`, which multiplies the map's X and Y and leaves Z alone.
+  // Defaults to 1. Every model in this corpus uses 1, so nothing here exercises
+  // it and there is a property instead.
+  let nrm_scale = fn (d: doc) -> fn (prim: Json.json) ->
+    match J.field prim "material" with
+    | None -> 1.0
+    | Some mi ->
+      match J.at (J.req d.j "materials") (J.int_ mi) with
+      | None -> 1.0
+      | Some m ->
+        match J.field m "normalTexture" with
+        | None -> 1.0
+        | Some nj -> J.flt_or nj "scale" 1.0;
+
   // The five slots glTF's metallic-roughness material has. `pbr` and the
   // material are two different holders and the specification puts particular
   // slots in each; getting that wrong finds nothing, because a slot looked for
@@ -648,6 +662,13 @@ module Render {
                   let sjoints = match J.field (J.req prim "attributes") "JOINTS_0" with
                                 | None -> None | Some a -> Some (Acc.ints d (J.int_ a)) in
                   let sweights = attr d prim "WEIGHTS_0" in
+                  // TANGENT is VEC4: xyz is the tangent and W IS A HANDEDNESS,
+                  // +1 or -1, saying which way the bitangent goes. It is not a
+                  // fourth coordinate and normalizing the four together would
+                  // destroy it -- which is what NormalTangentMirrorTest exists
+                  // to catch, its two halves differing only in that sign.
+                  let tang = match J.field (J.req prim "attributes") "TANGENT" with
+                             | None -> None | Some a -> Some (Acc.floats d (J.int_ a)) in
                   let uv = attr d prim "TEXCOORD_0" in
                   let uv1 = attr d prim "TEXCOORD_1" in
                   let col0 = attr d prim "COLOR_0" in
@@ -694,6 +715,26 @@ module Render {
                       match skin with
                       | None -> Some (V3.normalize (M4.mul_dir nrm_m n0))
                       | Some _ -> Some (V3.normalize (M4.mul_dir (vmat k) n0)) in
+                  // The tangent and bitangent of vertex `k`, in world space.
+                  // The bitangent is CONSTRUCTED, not stored: glTF gives a
+                  // handedness rather than a vector, and cross(N, T) * w is what
+                  // that handedness means.
+                  let vtan = fn (k: int) -> fn (n: v3) ->
+                    match tang with
+                    | None -> None
+                    | Some tv ->
+                      // NOT NAMED `t`. The render target is bound as `t` in
+                      // `one_frame_bg`, and the C backend's closure lifting gave
+                      // the OUTER one this local's type in the lifted signature:
+                      // `passing 'target' to parameter of incompatible type 'v3'`.
+                      // Two levels of lifting and a shadowed name -- the family
+                      // recorded as Q-126, and this is the first shape of it small
+                      // enough to point at.
+                      let tg = V3.normalize (M4.mul_dir (vmat k)
+                                (v3 { x = vec_get tv (4 * k), y = vec_get tv (4 * k + 1),
+                                      z = vec_get tv (4 * k + 2) })) in
+                      let hand = vec_get tv (4 * k + 3) in
+                      Some (tg, V3.scale (V3.cross n tg) hand) in
                   let vuv = fn (k: int) ->
                     match uv with
                     | None -> (0.0, 0.0)
@@ -715,8 +756,11 @@ module Render {
                   // the interpolated, re-normalized normal -- so a highlight
                   // lands where the surface points at the light rather than
                   // where a vertex happens to be.
-                  let shader = fn (wp: v3) -> fn (n: v3) -> fn (u: float) -> fn (vv: float) ->
-                               fn (u1: float) -> fn (vv1: float) -> fn (vc: v3) ->
+                  let has_tangent = match tang with | Some _ -> true | None -> false in
+                  let nm_scale = nrm_scale d prim in
+                  let shader = fn (wp: v3) -> fn (n0: v3) -> fn (u: float) -> fn (vv: float) ->
+                               fn (u1: float) -> fn (vv1: float) ->
+                               fn (fa: v3) -> fn (fb: v3) -> fn (vc: v3) ->
                     let sample_s = fn (ts: texslot) -> slot_sample ts true u vv u1 vv1 in
                     let sample_l = fn (ts: texslot) -> slot_sample ts false u vv u1 vv1 in
                     // baseColor is factor * vertex colour * texture, all three
@@ -749,6 +793,79 @@ module Render {
                              | None -> v3 { x = 1.0, y = 1.0, z = 1.0 }
                              | Some ts -> let c = sample_s ts in
                                           v3 { x = c.x, y = c.y, z = c.z } in
+                    // THE SHADING NORMAL, perturbed by the normal map.
+                    //
+                    // The map is sampled LINEARLY: a normal is a direction, not a
+                    // colour, and putting it through the sRGB curve is the classic
+                    // mistake -- subtly wrong everywhere and obviously wrong
+                    // nowhere. `Tex.sample_linear` is a separate name from
+                    // `sample_srgb` for exactly this reason.
+                    //
+                    // `texel * 2 - 1` because a normal component runs -1..1 and a
+                    // byte runs 0..1. `scale` multiplies X AND Y ONLY -- glTF says
+                    // so, and it is what makes a scale of 0 flatten the surface
+                    // rather than zero the normal.
+                    // ONLY WHERE THE FILE SUPPLIES TANGENTS, for now.
+                    //
+                    // glTF says a renderer SHOULD derive a tangent frame from the
+                    // texture coordinates when TANGENT is absent, and the code
+                    // below can do it -- `fa` and `fb` are computed for that case
+                    // and the frame is their cross with the pixel's normal. IT IS
+                    // NOT RIGHT YET, measured: against the reference it makes
+                    // NormalTangentTest worse (4.26 to 5.25) while making
+                    // CompareNormal better (5.72 to 4.37), which is not the
+                    // signature of a sign error or of a working implementation.
+                    //
+                    // What went wrong is HOW IT WAS DEBUGGED, not just the maths:
+                    // a corpus-wide mean is the weakest possible instrument for a
+                    // per-pixel frame, and two rounds of adjusting a sign against
+                    // it moved three numbers in three directions. The next step is
+                    // a purpose-built input -- one flat quad, a known map, a known
+                    // UV layout, an answer computable by hand -- and not more
+                    // tuning against an aggregate.
+                    //
+                    // So the three models without tangents keep the numbers they
+                    // had, and that is stated rather than pinned as progress.
+                    let n =
+                      match nmtex with
+                      | None -> n0
+                      | Some ts -> if not has_tangent then n0 else
+                        let c = slot_sample ts false u vv u1 vv1 in
+                        let mx = (c.x * 2.0 - 1.0) * nm_scale in
+                        let my = (c.y * 2.0 - 1.0) * nm_scale in
+                        let mz = c.z * 2.0 - 1.0 in
+                        // TWO WAYS TO THE SAME FRAME, and which one is the
+                        // primitive's business. With TANGENT, `fa` and `fb` are the
+                        // interpolated tangent and bitangent and want re-normalizing
+                        // -- interpolating two unit vectors gives short ones.
+                        // Without, they are the derived pair and the frame is their
+                        // cross with THIS PIXEL'S normal, which is what makes it
+                        // correct on a curved mesh: a cross product with N is
+                        // perpendicular to N by construction.
+                        // NOT `t` AND `b`. Naming the tangent `t` here made the
+                        // C backend's closure lifting give the OUTER `t` -- the
+                        // render target, bound in `one_frame_bg` -- this local's
+                        // type in the lifted signature: `passing 'target' to
+                        // parameter of incompatible type 'v3'`. A shadowed name
+                        // across two levels of lifting, which is the family
+                        // recorded as Q-126.
+                        let (tan_v, bit_v) =
+                          if has_tangent then (V3.normalize fa, V3.normalize fb)
+                          else
+                            let t0 = V3.cross fa n0 in
+                            let b0 = V3.cross fb n0 in
+                            // ONE SHARED SCALE, not two normalizations: the ratio
+                            // of |T| to |B| is a property of the texture
+                            // coordinates and dividing each by its own length
+                            // would throw it away. three.js takes the larger of
+                            // the two, and so does this.
+                            let d2 = f_max (V3.dot t0 t0) (V3.dot b0 b0) in
+                            if d2 <= 0.0 then (t0, b0)
+                            else let sc = 1.0 / sqrt d2 in
+                                 (V3.scale t0 sc, V3.scale b0 sc) in
+                        let nn = V3.add (V3.add (V3.scale tan_v mx) (V3.scale bit_v my))
+                                        (V3.scale n0 mz) in
+                        if V3.dot nn nn <= 0.0 then n0 else V3.normalize nn in
                     let mat2 = material { br = mat.br * vc.x * tc.x, bg = mat.bg * vc.y * tc.y,
                                           bb = mat.bb * vc.z * tc.z, ba = mat.ba * tc.w,
                                           metallic = mat.metallic * mr.z,
@@ -842,12 +959,75 @@ module Render {
                           // and comes out at ambient: a dark shape that reads as a
                           // hole rather than as a surface.
                           let nsign = if sarea < 0.0 then 0.0 - 1.0 else 1.0 in
+                          // THE TANGENT FRAME'S TWO VECTORS, per triangle when
+                          // the primitive has no TANGENT.
+                          //
+                          // three.js takes the SCREEN-SPACE DERIVATIVES of the
+                          // eye position and of the texture coordinate. A
+                          // scanline rasterizer has no derivatives, so they are
+                          // solved analytically from the triangle's own screen
+                          // edges: for any attribute A,
+                          //
+                          //   [dA/dx, dA/dy] = [A1 - A0, A2 - A0] * inverse(M)
+                          //
+                          // where M is the 2x2 matrix of screen edges. THAT IS AN
+                          // AFFINE ANSWER AND THE TRUE DERIVATIVE IS NOT AFFINE:
+                          // under perspective three.js's varies across the
+                          // triangle and this does not. The difference is stated
+                          // rather than hidden, and it is small at the corpus's
+                          // field of view.
+                          //
+                          // World space rather than eye space, which is
+                          // equivalent here: the formula uses only differences
+                          // and cross and dot products, and the world-to-eye
+                          // transform of a look-at camera is a rotation and a
+                          // translation, both of which those survive.
+                          let ex1 = sx_of cb2 - sx_of ca in
+                          let ey1 = sy_of cb2 - sy_of ca in
+                          let ex2 = sx_of cc - sx_of ca in
+                          let ey2 = sy_of cc - sy_of ca in
+                          let sdet = ex1 * ey2 - ex2 * ey1 in
+                          let (fa, fb) =
+                            match tang with
+                            // With tangents there is nothing to derive.
+                            | Some _ -> (v3 { x = 0.0, y = 0.0, z = 0.0 },
+                                         v3 { x = 0.0, y = 0.0, z = 0.0 })
+                            | None ->
+                              // A degenerate screen triangle has no frame, and
+                              // zero is the answer that makes the normal map do
+                              // nothing rather than divide by zero.
+                              if sdet == 0.0 then (v3 { x = 0.0, y = 0.0, z = 0.0 },
+                                                   v3 { x = 0.0, y = 0.0, z = 0.0 })
+                              else
+                                let inv = 1.0 / sdet in
+                                let (u0, v0) = vuv ka in
+                                let (u1, v1) = vuv kb2 in
+                                let (u2, v2) = vuv kc in
+                                let dp = fn (a1: v3) -> fn (a2: v3) ->
+                                  // dA/dx and dA/dy from the two edge values.
+                                  (V3.scale (V3.sub (V3.scale a1 ey2) (V3.scale a2 ey1)) inv,
+                                   V3.scale (V3.sub (V3.scale a2 ex1) (V3.scale a1 ex2)) inv) in
+                                let (q0, q1) = dp (V3.sub wb2 wa) (V3.sub wc wa) in
+                                let du = fn (b1: float) -> fn (b2: float) ->
+                                  ((b1 * ey2 - b2 * ey1) * inv, (b2 * ex1 - b1 * ex2) * inv) in
+                                let (sx0, sx1) = du (u1 - u0) (u2 - u0) in
+                                let (sy0, sy1) = du (v1 - v0) (v2 - v0) in
+                                // cross(q1,N)*a + cross(N,q0)*b is cross(q1*a - q0*b, N),
+                                // so the two vectors below are all the pixel needs.
+                                (V3.sub (V3.scale q1 sx0) (V3.scale q0 sx1),
+                                 V3.sub (V3.scale q1 sy0) (V3.scale q0 sy1)) in
                           let sv = fn (c: v4) -> fn (wp: v3) -> fn (n: v3) ->
                                    fn (k: int) ->
                             let iw = 1.0 / c.w in
                             let (uu, vv) = vuv k in
                             let (uu1, vv1) = vuv1 k in
                             let (cr, cg, cb) = vcol k in
+                            // With tangents these are the vertex's own frame; the
+                            // derived pair is constant across the triangle, and a
+                            // constant survives interpolation as itself.
+                            let (fav, fbv) = match vtan k n with
+                                             | Some (tg, bt) -> (tg, bt)
+                                             | None -> (fa, fb) in
                             svert { sx = (c.x * iw * 0.5 + 0.5) * fw,
                                     sy = (0.5 - c.y * iw * 0.5) * fh,
                                     sz = c.z * iw, siw = iw,
@@ -855,6 +1035,8 @@ module Render {
                                     nx = n.x * nsign, ny = n.y * nsign, nz = n.z * nsign,
                                     su = uu, sv = vv,
                                     su1 = uu1, sv1 = vv1,
+                                    fax = fav.x, fay = fav.y, faz = fav.z,
+                                    fbx = fbv.x, fby = fbv.y, fbz = fbv.z,
                                     cr = cr, cg = cg, cb = cb } in
                           let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in
                           RasterS.triangle t depth (not mat.double_sided)

@@ -14,3 +14,5 @@ node_modules/
 scripts/ref/three.module.js
 scripts/ref/jsm/
 scripts/ref/three.core.js
+/test/data/png/m3d_nm.gltf
+/test/data/png/m3d_nm.bin

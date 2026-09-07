@@ -225,14 +225,32 @@ type svert = {
   // picture rather than an error.
   su: float, sv: float,
   su1: float, sv1: float,
+  // THE TWO VECTORS A TANGENT FRAME IS BUILT FROM. What they are depends on
+  // whether the primitive supplied tangents, and the SHADER knows which -- it is
+  // a property of the primitive, so it lives in the closure and not in here:
+  //
+  //   with TANGENT     `fa` is the tangent and `fb` the bitangent, interpolated
+  //                    and re-normalized at the pixel.
+  //   without          `fa` and `fb` are constant across the triangle and the
+  //                    frame is cross(fa, N), cross(fb, N).
+  //
+  // Six floats serve both because the derived form collapses:
+  // cross(q1,N)*a + cross(N,q0)*b is cross(q1*a - q0*b, N), so two vectors carry
+  // what looked like four. And a cross product with N is PERPENDICULAR TO N by
+  // construction, which is why the derived frame is right on a curved mesh
+  // without any re-orthogonalising -- three.js's formula has the same shape for
+  // the same reason.
+  fax: float, fay: float, faz: float,
+  fbx: float, fby: float, fbz: float,
   cr: float, cg: float, cb: float
 };
 
 module RasterS {
   // `shade` is called with the interpolated world position, the interpolated
   // and RE-NORMALIZED normal, BOTH texture coordinate sets and the vertex
-  // colour, and returns linear light -- OR `None`, meaning this pixel is not
-  // drawn at all, which is glTF's MASK alpha mode.
+  // colour, THE TWO TANGENT-FRAME VECTORS, and the vertex colour, and returns
+  // linear light -- OR `None`, meaning this pixel is not drawn at all, which is
+  // glTF's MASK alpha mode.
   //
   // Re-normalized because interpolating three unit vectors does not give a unit
   // vector -- it gives one that is short by however much they diverge, and a
@@ -291,6 +309,12 @@ module RasterS {
                     let vv = pc a.sv b.sv c.sv in
                     let uu1 = pc a.su1 b.su1 c.su1 in
                     let vv1 = pc a.sv1 b.sv1 c.sv1 in
+                    let fa = v3 { x = pc a.fax b.fax c.fax,
+                                  y = pc a.fay b.fay c.fay,
+                                  z = pc a.faz b.faz c.faz } in
+                    let fb = v3 { x = pc a.fbx b.fbx c.fbx,
+                                  y = pc a.fby b.fby c.fby,
+                                  z = pc a.fbz b.fbz c.fbz } in
                     let vc = v3 { x = pc a.cr b.cr c.cr,
                                   y = pc a.cg b.cg c.cg,
                                   z = pc a.cb b.cb c.cb } in
@@ -305,7 +329,7 @@ module RasterS {
                     //
                     // Annotated because the closure is a parameter and its
                     // result type has nothing to be inferred from at this call.
-                    match (shade wp n uu vv uu1 vv1 vc : v3 option) with
+                    match (shade wp n uu vv uu1 vv1 fa fb vc : v3 option) with
                     | None -> ()
                     | Some lit ->
                       let o = idx * 4 in

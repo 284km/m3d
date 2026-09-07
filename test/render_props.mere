@@ -253,14 +253,15 @@ let depth_not_written = fn () ->
     let sx = fn (i: int) -> if i == 0 then 2.0 else if i == 1 then 30.0 else 16.0 in
     let sy = fn (i: int) -> if i == 2 then 30.0 else 2.0 in
     svert { sx = sx k, sy = sy k, sz = z, siw = 1.0, su1 = 0.0, sv1 = 0.0,
+            fax = 0.0, fay = 0.0, faz = 0.0, fbx = 0.0, fby = 0.0, fbz = 0.0,
             wx = 0.0, wy = 0.0, wz = 0.0, nx = 0.0, ny = 0.0, nz = 1.0,
             su = 0.0, sv = 0.0, cr = 1.0, cg = 1.0, cb = 1.0 } in
   // NEAR and declined: every pixel returns None.
   let declined = fn (w: v3) -> fn (n: v3) -> fn (u: float) -> fn (v: float) ->
-                 fn (u1: float) -> fn (v1: float) -> fn (c: v3) -> (None : v3 option) in
+                 fn (u1: float) -> fn (v1: float) -> fn (fa: v3) -> fn (fb: v3) -> fn (c: v3) -> (None : v3 option) in
   // FAR and drawn.
   let drawn = fn (w: v3) -> fn (n: v3) -> fn (u: float) -> fn (v: float) ->
-              fn (u1: float) -> fn (v1: float) -> fn (c: v3) ->
+              fn (u1: float) -> fn (v1: float) -> fn (fa: v3) -> fn (fb: v3) -> fn (c: v3) ->
     Some (v3 { x = 1.0, y = 1.0, z = 1.0 }) in
   let paint = fn (near) -> fn (far) ->
     let (t2, d2) = Target.make 32 32 in
@@ -335,10 +336,11 @@ let two_ways = fn () ->
   let pv = fn (k: int) ->
     let n = ns k in let w = wp k in
     svert { sx = sx k, sy = sy k, sz = 0.0, siw = 1.0, su1 = 0.0, sv1 = 0.0,
+            fax = 0.0, fay = 0.0, faz = 0.0, fbx = 0.0, fby = 0.0, fbz = 0.0,
             wx = w.x, wy = w.y, wz = w.z, nx = n.x, ny = n.y, nz = n.z,
             su = 0.0, sv = 0.0, cr = 1.0, cg = 1.0, cb = 1.0 } in
   let shader = fn (w: v3) -> fn (n: v3) -> fn (u: float) -> fn (v: float) ->
-               fn (u1: float) -> fn (v1: float) -> fn (c: v3) ->
+               fn (u1: float) -> fn (v1: float) -> fn (fa: v3) -> fn (fb: v3) -> fn (c: v3) ->
     let vd = V3.normalize (V3.sub eye w) in
     Some (V3.add (Shade.direct mat n vd li) (Shade.ambient mat 0.15)) in
   let _ = RasterS.triangle t2 d2 false (pv 0) (pv 1) (pv 2) shader in
@@ -379,11 +381,12 @@ let same_normals = fn () ->
                                   r = l.x, g = l.y, b = l.z } in
   let _ = Raster.triangle t1 d1 false (gv 0) (gv 1) (gv 2) in
   let pv = fn (k: int) -> svert { sx = sx k, sy = sy k, sz = 0.0, siw = 1.0, su1 = 0.0, sv1 = 0.0,
+            fax = 0.0, fay = 0.0, faz = 0.0, fbx = 0.0, fby = 0.0, fbz = 0.0,
                                   wx = w.x, wy = w.y, wz = w.z,
                                   nx = n.x, ny = n.y, nz = n.z,
                                   su = 0.0, sv = 0.0, cr = 1.0, cg = 1.0, cb = 1.0 } in
   let shader = fn (ww: v3) -> fn (nn: v3) -> fn (u: float) -> fn (v: float) ->
-               fn (u1: float) -> fn (v1: float) -> fn (c: v3) ->
+               fn (u1: float) -> fn (v1: float) -> fn (fa: v3) -> fn (fb: v3) -> fn (c: v3) ->
     Some (V3.add (Shade.direct mat nn (V3.normalize (V3.sub eye ww)) li)
                  (Shade.ambient mat 0.15)) in
   let _ = RasterS.triangle t2 d2 false (pv 0) (pv 1) (pv 2) shader in
@@ -607,6 +610,138 @@ let _ = check "skin.the_inverse_bind_matrix_is_applied" (h_ibm != h_rest);
 // that looks the joint up before testing the weight walks off the end of the
 // skin. That every render above happened at all is the check; this line says so.
 let _ = check "skin.a_zero_weight_does_not_read_its_joint" (h_rest != 0);
+
+
+// --- normal mapping ----------------------------------------------------------
+// A CONSTANT MAP, so the answer is computable by hand rather than a picture.
+// test/data/png/normal_tilt.png says (0.482, 0.482, 0.741) at every texel, tilted
+// in BOTH x and y -- x alone would not notice a wrong bitangent, and TANGENT's w
+// is exactly a statement about which way the bitangent goes.
+//
+// One quad in the z = 0 plane with UVs along x and y and TANGENT (1,0,0,w). So
+// T = (1,0,0), N = (0,0,1), B = cross(N,T)*w = (0,w,0), and the perturbed normal
+// is (0.482, 0.482w, 0.741) normalized. The light travels (-0.4,-0.7,-0.6), so it
+// has a strong y component and the two signs of w are not the same brightness.
+//
+// THE CORPUS CANNOT CHECK ANY OF THIS. All five of its normal-mapped models use
+// scale = 1, and only NormalTangentMirrorTest exercises w at all -- one witness.
+let nm_bin_n = fn (w: float) -> fn (nx: float) -> fn (ny: float) -> fn (nz: float) ->
+  let sb = strbuf_new () in
+  let hexd = "0123456789abcdef" in
+  let put32 = fn (bb: int) ->
+    let rec go = fn (k: int) ->
+      if k == 4 then ()
+      else
+        let v = bit_and (bit_shr bb (8 * k)) 255 in
+        let _ = strbuf_push sb (char_at hexd (v / 16)) in
+        let _ = strbuf_push sb (char_at hexd (v % 16)) in
+        go (k + 1) in
+    go 0 in
+  let putf = fn (x: float) -> put32 (f32_bits x) in
+  // POSITION: two triangles making a quad from (-1,-1) to (1,1).
+  let qx = fn (k: int) -> if k == 0 || k == 3 then (0.0 - 1.0) else if k == 2 || k == 4 then 1.0
+                          else if k == 1 then 1.0 else (0.0 - 1.0) in
+  let qy = fn (k: int) -> if k == 0 || k == 1 then (0.0 - 1.0) else if k == 3 then (0.0 - 1.0)
+                          else 1.0 in
+  let rec pos = fn (k: int) ->
+    if k == 6 then ()
+    else let _ = putf (qx k) in let _ = putf (qy k) in let _ = putf 0.0 in pos (k + 1) in
+  let _ = pos 0 in
+  // NORMAL -- the caller's, because one test bakes the map's answer in here.
+  let rec nrm = fn (k: int) ->
+    if k == 6 then ()
+    else let _ = putf nx in let _ = putf ny in let _ = putf nz in nrm (k + 1) in
+  let _ = nrm 0 in
+  // TEXCOORD_0, along x and y. The map is constant so the exact layout does not
+  // change the answer -- but a zero UV gradient would make a DERIVED frame
+  // degenerate, and this document is also the one that will test that path.
+  let rec uv = fn (k: int) ->
+    if k == 6 then ()
+    else let _ = putf ((qx k + 1.0) * 0.5) in let _ = putf ((qy k + 1.0) * 0.5) in uv (k + 1) in
+  let _ = uv 0 in
+  // TANGENT: (1,0,0,w).
+  let rec tan = fn (k: int) ->
+    if k == 6 then ()
+    else let _ = putf 1.0 in let _ = putf 0.0 in let _ = putf 0.0 in let _ = putf w in
+         tan (k + 1) in
+  let _ = tan 0 in
+  write_bytes "/tmp/m3d_nm.bin" (bytes_of_hex (strbuf_to_str sb));
+
+let nm_bin = fn (w: float) -> nm_bin_n w 0.0 0.0 1.0;
+
+let nm_gltf_raw = fn (scale: str) -> fn (with_tangent: bool) -> fn (with_map: bool) ->
+  "\{\"asset\":\{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[\{\"nodes\":[0]}],"
+  ++ "\"nodes\":[\{\"mesh\":0}],"
+  ++ "\"meshes\":[\{\"primitives\":[\{\"attributes\":\{\"POSITION\":0,\"NORMAL\":1,"
+  ++ "\"TEXCOORD_0\":2" ++ (if with_tangent then ",\"TANGENT\":3" else "") ++ "},\"material\":0}]}],"
+  ++ "\"materials\":[\{\"pbrMetallicRoughness\":\{\"baseColorFactor\":[1.0,1.0,1.0,1.0],"
+  ++ "\"metallicFactor\":0.0,\"roughnessFactor\":1.0}"
+  ++ (if with_map then ",\"normalTexture\":\{\"index\":0,\"scale\":" ++ scale ++ "}" else "") ++ "}],"
+  ++ "\"textures\":[\{\"source\":0}],\"images\":[\{\"uri\":\"normal_tilt.png\"}],"
+  ++ "\"buffers\":[\{\"uri\":\"m3d_nm.bin\",\"byteLength\":264}],"
+  ++ "\"bufferViews\":[\{\"buffer\":0,\"byteOffset\":0,\"byteLength\":72},"
+  ++ "\{\"buffer\":0,\"byteOffset\":72,\"byteLength\":72},"
+  ++ "\{\"buffer\":0,\"byteOffset\":144,\"byteLength\":48},"
+  ++ "\{\"buffer\":0,\"byteOffset\":192,\"byteLength\":96}],"
+  ++ "\"accessors\":[\{\"bufferView\":0,\"componentType\":5126,\"count\":6,\"type\":\"VEC3\","
+  ++ "\"min\":[-1.0,-1.0,0.0],\"max\":[1.0,1.0,0.0]},"
+  ++ "\{\"bufferView\":1,\"componentType\":5126,\"count\":6,\"type\":\"VEC3\"},"
+  ++ "\{\"bufferView\":2,\"componentType\":5126,\"count\":6,\"type\":\"VEC2\"},"
+  ++ "\{\"bufferView\":3,\"componentType\":5126,\"count\":6,\"type\":\"VEC4\"}]}";
+
+let nm_gltf = fn (scale: str) -> fn (with_tangent: bool) ->
+  nm_gltf_raw scale with_tangent true;
+
+let nm_at = fn (scale: str) -> fn (with_tangent: bool) -> fn (w: float) ->
+  let _ = nm_bin w in
+  let _ = write_file "/tmp/m3d_nm.gltf" (nm_gltf scale with_tangent) in
+  // The image sits beside test/data/png, so the document goes there too.
+  let _ = write_file "test/data/png/m3d_nm.gltf" (nm_gltf scale with_tangent) in
+  let _ = write_bytes "test/data/png/m3d_nm.bin" (read_bytes "/tmp/m3d_nm.bin") in
+  render_hash "test/data/png/m3d_nm.gltf";
+
+// The same document with the map's normal BAKED INTO THE GEOMETRY instead: the
+// vertex normals are set to what the map says and there is no normalTexture. By
+// construction the two must render identically -- the map contributes
+// T*0.4824 + B*0.4824 + N*0.7412, and with T=(1,0,0), B=(0,1,0), N=(0,0,1) that
+// IS (0.4824, 0.4824, 0.7412), which is what these normals are.
+//
+// THIS IS THE ONLY ABSOLUTE CHECK HERE, and it is here because the other four are
+// relative: they compare map-on against map-off against half-scale, so an error
+// that moves EVERY sampled value the same way breaks none of them. Sampling the
+// map through the sRGB transfer curve is exactly that error -- 0.741 decodes to
+// 0.51 and every hash shifts together -- and it passed all four.
+let nm_baked = fn () ->
+  let _ = nm_bin_n 1.0 0.4824 0.4824 0.7412 in
+  let _ = write_file "test/data/png/m3d_nm.gltf" (nm_gltf_raw "1.0" true false) in
+  let _ = write_bytes "test/data/png/m3d_nm.bin" (read_bytes "/tmp/m3d_nm.bin") in
+  render_hash "test/data/png/m3d_nm.gltf";
+
+let h_nm_on  = nm_at "1.0" true 1.0;
+let h_nm_off = nm_at "0.0" true 1.0;
+let h_nm_neg = nm_at "1.0" true (0.0 - 1.0);
+let h_nm_half = nm_at "0.5" true 1.0;
+
+// A NORMAL MAP BENDS THE NORMAL. Without this every property below passes for a
+// renderer that ignores normal maps, which is what this one did.
+let _ = check "normalmap.it_changes_the_shading" (h_nm_on != h_nm_off);
+// scale = 0 IS THE UNPERTURBED SURFACE. glTF multiplies x and y by scale and
+// leaves z alone, so zero flattens the map rather than zeroing the normal -- a
+// renderer that scaled all three would get a zero vector and have to guess.
+let _ = check "normalmap.scale_zero_is_the_plain_normal" (h_nm_off != 0);
+// AND scale IS A DIAL, not a switch: half of it is neither end.
+let _ = check "normalmap.scale_is_a_dial" (h_nm_half != h_nm_on && h_nm_half != h_nm_off);
+// TANGENT's w FLIPS THE BITANGENT. The map is tilted in y as well as x, so the
+// two signs are two different normals -- and the light has a strong y component,
+// so they are two different brightnesses. The corpus has one witness for this
+// (NormalTangentMirrorTest); this is the second.
+let _ = check "normalmap.the_tangent_w_flips_the_bitangent" (h_nm_neg != h_nm_on);
+// AND THE MAP'S EFFECT IS THE NORMAL IT NAMES. Baking (0.4824, 0.4824, 0.7412)
+// into the vertex normals and removing the map must give the same frame, because
+// that is what T*x + B*y + N*z comes to for this tangent basis. An error that
+// scales every sampled value -- decoding the map through the sRGB curve, say --
+// leaves all four checks above passing and breaks this one.
+let _ = check "normalmap.equals_baking_that_normal_into_the_geometry" (nm_baked () == h_nm_on);
 
 let n = vec_len fails;
 print (if n == 0 then "render_props: ok" else "render_props: " ++ str_of_int n ++ " FAILED")

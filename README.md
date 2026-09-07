@@ -598,12 +598,18 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   as a `0 0 0` header with no complaint. Progressive is a much larger feature than
   baseline — several scans per component, spectral selection, successive
   approximation — and `CesiumMan` and `CesiumMilkTruck` wait on it.
-- **Normal mapping.** The slot is *resolved* — `mat_slots` decodes the image —
-  and then never sampled, which is the ~8-unit residual on `NormalTangentTest`
-  and `NormalTangentMirrorTest`. Three of the five models that use one have no
-  `TANGENT`, which is exactly what `NormalTangentTest` is for and means deriving
-  a tangent frame from the UVs. It also needs the tangent carried through the
-  rasterizer, which is four more interpolated floats.
+- **The derived tangent frame** — half of normal mapping. Where a file supplies
+  `TANGENT` the map is applied and it works: `NormalTangentMirrorTest` went from
+  3.84 to **0.41** and `TwoSidedPlane` from 0.35 to **0.17**. Where it does not,
+  glTF says to derive a frame from the texture coordinates, and that path is
+  written and **turned off**: measured, it made `NormalTangentTest` *worse* (4.26
+  to 5.25) while making `CompareNormal` better (5.72 to 4.37), which is the
+  signature of neither a sign error nor a working implementation. Two rounds of
+  adjusting a sign against a corpus-wide mean moved three numbers in three
+  directions — **the mean is the wrong instrument for a per-pixel frame**, and the
+  next step is a purpose-built input with an answer computable by hand, not more
+  tuning. `CompareNormal`, `NormalTangentTest` and `Box With Spaces` keep the
+  numbers they had.
 
 - **Mipmaps** — last, and for a reason. `minFilter` is read and ignored, so a
   minified texture aliases. Implementing it **cannot make the comparison exact**:
