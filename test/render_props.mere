@@ -115,6 +115,24 @@ let render_stats = fn () ->
       go (i + 1) (n + hit) (if hit == 1 && r > mx then r else mx) in
   go 0 0 0;
 
+// Coverage and the brightest red say "drawn" and "drawn facing the light". A
+// FRAME HASH answers a third question they cannot: whether two renders are the
+// SAME PICTURE. A rotation applied to a whole model preserves its area and its
+// bounds, so the auto-camera reframes it to the same size and the pixel COUNT
+// does not move -- but the pixels do. That is exactly the shape of the skinning
+// bug this file has to be able to see.
+let render_hash = fn (path: str) ->
+  let d = Gltf.load path in
+  let (t, dep, drawn, e, c, th, zn, zf) = Render.one_frame d 32 32 in
+  let rec go = fn (i: int) -> fn (h: int) ->
+    if i == 32 * 32 then h
+    else
+      let (r, g, b) = Target.get t (i % 32) (i / 32) in
+      // A position-sensitive mix, so two frames with the same pixels in different
+      // places do not collide. `% 1000000007` keeps it inside an int.
+      go (i + 1) ((h * 131 + r * 65536 + g * 256 + b + i) % 1000000007) in
+  go 0 7;
+
 let _ = write_file "/tmp/m3d_rp.gltf" (gltf_with "" "");
 
 // Counter-clockwise seen from +z, and the framing puts the camera there: a
@@ -426,6 +444,169 @@ let _ = check "morph.the_target_is_a_displacement" (n_w1 > 60);
 let _ = write_file "/tmp/m3d_rp.gltf" (gltf_at (mw "1.0") "" "1.0" mtgt (mw "0.0"));
 let (n_nodew, r_nodew) = render_stats ();
 let _ = check "morph.a_nodes_weights_override_its_meshs" (n_nodew == n_w1);
+
+
+// --- skinning ----------------------------------------------------------------
+// FIVE OF THE SIX SKINNED MODELS IN THE CORPUS CANNOT SEE THIS FEATURE AT ALL.
+// Their joints sit at their bind pose at rest, so every joint matrix is the
+// identity and skinning is a no-op -- measured: SimpleSkin, RiggedSimple,
+// RiggedFigure and Fox render BYTE-IDENTICALLY with skinning implemented and
+// with it absent. Only RecursiveSkeletons moves (IoU 0.199 to 0.999). So the
+// corpus is nearly blind here and these properties are the check.
+//
+// A self-contained document, because a skin needs joint nodes, a skin object and
+// three more accessors, and threading those through the shared builder would make
+// every other test's JSON carry them.
+let skin_bin = fn () ->
+  let sb = strbuf_new () in
+  let hexd = "0123456789abcdef" in
+  let put32 = fn (bb: int) ->
+    let rec go = fn (k: int) ->
+      if k == 4 then ()
+      else
+        let v = bit_and (bit_shr bb (8 * k)) 255 in
+        let _ = strbuf_push sb (char_at hexd (v / 16)) in
+        let _ = strbuf_push sb (char_at hexd (v % 16)) in
+        go (k + 1) in
+    go 0 in
+  let putf = fn (x: float) -> put32 (f32_bits x) in
+  let put16 = fn (n: int) ->
+    let lo = n % 256 in let hi = (n / 256) % 256 in
+    let _ = strbuf_push sb (char_at hexd (lo / 16)) in
+    let _ = strbuf_push sb (char_at hexd (lo % 16)) in
+    let _ = strbuf_push sb (char_at hexd (hi / 16)) in
+    strbuf_push sb (char_at hexd (hi % 16)) in
+  // 0..35 POSITION: the same triangle the winding tests use.
+  let px = fn (k: int) -> if k == 0 then (0.0 - 1.0) else if k == 1 then 1.0 else 0.0 in
+  let py = fn (k: int) -> if k == 2 then 1.0 else (0.0 - 1.0) in
+  let rec pos = fn (k: int) ->
+    if k == 3 then ()
+    else let _ = putf (px k) in let _ = putf (py k) in let _ = putf 0.0 in pos (k + 1) in
+  let _ = pos 0 in
+  // 36..71 NORMAL, all +z.
+  let rec nrm = fn (k: int) ->
+    if k == 3 then ()
+    else let _ = putf 0.0 in let _ = putf 0.0 in let _ = putf 1.0 in nrm (k + 1) in
+  let _ = nrm 0 in
+  // 72..95 JOINTS_0: VERTEX 0 FOLLOWS JOINT 0 AND THE OTHER TWO FOLLOW JOINT 1.
+  // Splitting them is what makes moving a joint change the triangle's SHAPE --
+  // a whole-mesh translation is absorbed by the auto-camera, which this project
+  // has already been caught by once.
+  //
+  // The three unused slots are 9999, WHICH IS NOT A JOINT. glTF allows any value
+  // where the matching weight is zero, so a reader that looks the joint up before
+  // testing the weight indexes out of bounds on a legal file. This is that file.
+  let rec joints = fn (k: int) ->
+    if k == 3 then ()
+    else
+      let _ = put16 (if k == 0 then 0 else 1) in
+      let _ = put16 9999 in let _ = put16 9999 in let _ = put16 9999 in
+      joints (k + 1) in
+  let _ = joints 0 in
+  // 96..143 WEIGHTS_0: all of it on the first slot.
+  let rec wts = fn (k: int) ->
+    if k == 3 then ()
+    else let _ = putf 1.0 in let _ = putf 0.0 in let _ = putf 0.0 in let _ = putf 0.0 in
+         wts (k + 1) in
+  let _ = wts 0 in
+  // 144..271 inverseBindMatrices, two identities.
+  let rec ibm = fn (k: int) ->
+    if k == 2 then ()
+    else
+      let rec e = fn (i: int) ->
+        if i == 16 then ()
+        else let _ = putf (if i % 5 == 0 then 1.0 else 0.0) in e (i + 1) in
+      let _ = e 0 in
+      ibm (k + 1) in
+  let _ = ibm 0 in
+  // 272..399 the SECOND set of inverse bind matrices: joint 0's is a translation
+  // of -0.5 in x. An inverse bind matrix takes a vertex out of the pose the mesh
+  // was authored in, so applying this one shifts vertex 0 the other way -- which
+  // is how "is the inverse bind matrix used at all" gets an answer.
+  let rec ibm2 = fn (k: int) ->
+    if k == 2 then ()
+    else
+      let rec e = fn (i: int) ->
+        if i == 16 then ()
+        else
+          let v = if i % 5 == 0 then 1.0
+                  else if i == 12 && k == 0 then (0.0 - 0.5)
+                  else 0.0 in
+          let _ = putf v in e (i + 1) in
+      let _ = e 0 in
+      ibm2 (k + 1) in
+  let _ = ibm2 0 in
+  write_bytes "/tmp/m3d_skin.bin" (bytes_of_hex (strbuf_to_str sb));
+
+// `node_x` goes on the MESH node, `joint_x` translates joint 0, and `ibm_off`
+// picks which of the two inverse-bind blocks to use.
+let skin_gltf = fn (node_x: str) -> fn (joint_x: str) -> fn (ibm_off: int) -> fn (skinned: bool) ->
+  "\{\"asset\":\{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[\{\"nodes\":[0,1,2]}],"
+  ++ "\"nodes\":[\{\"mesh\":0" ++ (if skinned then ",\"skin\":0" else "") ++ node_x ++ "},"
+  ++ "\{\"translation\":[" ++ joint_x ++ ",0.0,0.0]},\{}],"
+  ++ "\"skins\":[\{\"joints\":[1,2],\"inverseBindMatrices\":" ++ str_of_int (if ibm_off == 0 then 4 else 5) ++ "}],"
+  ++ "\"meshes\":[\{\"primitives\":[\{\"attributes\":\{\"POSITION\":0,\"NORMAL\":1,"
+  ++ "\"JOINTS_0\":2,\"WEIGHTS_0\":3},\"material\":0}]}],"
+  ++ "\"materials\":[\{\"pbrMetallicRoughness\":\{\"baseColorFactor\":[1.0,1.0,1.0,1.0],"
+  ++ "\"metallicFactor\":0.0,\"roughnessFactor\":1.0}}],"
+  ++ "\"buffers\":[\{\"uri\":\"m3d_skin.bin\",\"byteLength\":400}],"
+  ++ "\"bufferViews\":[\{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
+  ++ "\{\"buffer\":0,\"byteOffset\":36,\"byteLength\":36},"
+  ++ "\{\"buffer\":0,\"byteOffset\":72,\"byteLength\":24},"
+  ++ "\{\"buffer\":0,\"byteOffset\":96,\"byteLength\":48},"
+  ++ "\{\"buffer\":0,\"byteOffset\":144,\"byteLength\":128},"
+  ++ "\{\"buffer\":0,\"byteOffset\":272,\"byteLength\":128}],"
+  ++ "\"accessors\":[\{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\","
+  ++ "\"min\":[-1.0,-1.0,0.0],\"max\":[1.0,1.0,0.0]},"
+  ++ "\{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+  ++ "\{\"bufferView\":2,\"componentType\":5123,\"count\":3,\"type\":\"VEC4\"},"
+  ++ "\{\"bufferView\":3,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},"
+  ++ "\{\"bufferView\":4,\"componentType\":5126,\"count\":2,\"type\":\"MAT4\"},"
+  ++ "\{\"bufferView\":5,\"componentType\":5126,\"count\":2,\"type\":\"MAT4\"}]}";
+
+let skin_at = fn (node_x: str) -> fn (joint_x: str) -> fn (ibm_off: int) -> fn (skinned: bool) ->
+  let _ = write_file "/tmp/m3d_skin.gltf" (skin_gltf node_x joint_x ibm_off skinned) in
+  render_hash "/tmp/m3d_skin.gltf";
+
+let _ = skin_bin ();
+let h_rest = skin_at "" "0.0" 0 true;
+let h_moved = skin_at "" "0.5" 0 true;
+// MOVING A JOINT MOVES THE VERTICES THAT FOLLOW IT. Vertex 0 follows joint 0 and
+// the other two follow joint 1, so this changes the triangle's shape.
+let _ = check "skin.moving_a_joint_moves_the_mesh" (h_rest != h_moved);
+// AND A JOINT AT ITS BIND POSE CHANGES NOTHING -- the same frame as the same
+// document with no skin at all. Without this the one above passes for a renderer
+// that transforms vertices by something arbitrary.
+let h_unskinned = skin_at "" "0.0" 0 false;
+let _ = check "skin.a_bind_pose_joint_changes_nothing" (h_rest == h_unskinned);
+
+// THE MESH NODE'S OWN TRANSFORM IS IGNORED WHEN THE MESH IS SKINNED. The joint
+// matrices already carry the vertex to world space; applying the node's
+// transform on top transforms the model twice.
+//
+// The transform is a ROTATION and not a translation or a scale, because the
+// auto-camera reframes those away -- it follows the bounds -- and this project
+// has been caught by exactly that before. A rotation preserves area and bounds
+// here, so the pixel COUNT does not move either; only the picture does, which is
+// why this compares frame hashes.
+let rot90 = ",\"rotation\":[0.0,0.0,0.7071067811865476,0.7071067811865476]";
+let h_skin_rot = skin_at rot90 "0.0" 0 true;
+let _ = check "skin.the_nodes_own_transform_is_ignored" (h_skin_rot == h_rest);
+// AND THE ROTATION IS VISIBLE AT ALL, on the same document without the skin.
+// Without this the property above passes for a renderer that ignores rotations.
+let h_norot = skin_at rot90 "0.0" 0 false;
+let _ = check "skin.and_that_rotation_does_show_unskinned" (h_norot != h_unskinned);
+
+// THE INVERSE BIND MATRIX IS APPLIED. The second block translates joint 0's by
+// -0.5 in x, which moves vertex 0 and nothing else.
+let h_ibm = skin_at "" "0.0" 1 true;
+let _ = check "skin.the_inverse_bind_matrix_is_applied" (h_ibm != h_rest);
+
+// A ZERO WEIGHT'S JOINT INDEX IS NEVER READ. The unused slots of JOINTS_0 above
+// hold 9999, which is not a joint -- glTF allows any value there -- so a reader
+// that looks the joint up before testing the weight walks off the end of the
+// skin. That every render above happened at all is the check; this line says so.
+let _ = check "skin.a_zero_weight_does_not_read_its_joint" (h_rest != 0);
 
 let n = vec_len fails;
 print (if n == 0 then "render_props: ok" else "render_props: " ++ str_of_int n ++ " FAILED")

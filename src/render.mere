@@ -108,6 +108,27 @@ module Scene {
       if k == vec_len rs then ()
       else let _ = visit (vec_get rs k) M4.identity in go (k + 1) in
     go 0;
+
+  // EVERY NODE'S WORLD MATRIX, INDEXED BY NODE.
+  //
+  // `walk` hands each node its own matrix as it goes, which is all a mesh needs.
+  // A SKIN NEEDS SOMEBODY ELSE'S: its joints are node indices that can point
+  // anywhere in the scene, including at nodes not yet visited and at nodes that
+  // are not ancestors of the mesh. So the whole tree is resolved first, into an
+  // array, and skinning reads from that.
+  //
+  // A node no root reaches keeps the identity. That is not a guess about what it
+  // means -- glTF says a node not in the scene graph is not part of the scene --
+  // and a joint pointing at one would be a broken file, which the skin reader
+  // refuses by name rather than silently skinning against the identity.
+  let world_matrices = fn (d: doc) ->
+    let n = J.len (J.arr (nodes d)) in
+    let out = vec_new () in
+    let rec fill = fn (i: int) ->
+      if i >= n then () else let _ = vec_push out M4.identity in fill (i + 1) in
+    let _ = fill 0 in
+    let _ = walk d (fn (i: int) -> fn (nd: Json.json) -> fn (w: mat4) -> vec_set out i w) in
+    out;
 }
 
 module Frame {
@@ -202,6 +223,101 @@ module Render {
     match J.field (J.req prim "attributes") name with
     | None -> None
     | Some a -> Some (Acc.floats d (J.int_ a));
+
+  // SKINNING: a vertex belongs to up to four joints, and lands where their
+  // weighted average of transforms puts it.
+  //
+  // THE JOINT MATRICES, one per joint of a skin:
+  //
+  //     jointMatrix[j] = worldMatrix(joints[j]) * inverseBindMatrix[j]
+  //
+  // and the vertex is then `Σ weight_i * jointMatrix[joint_i] * position`.
+  //
+  // THE MESH NODE'S OWN TRANSFORM IS NOT APPLIED, and that is the whole thing to
+  // get right. The specification writes the joint matrix with an
+  // `inverse(globalTransform(meshNode))` in front of it and then multiplies the
+  // result by `globalTransform(meshNode)` again -- the two cancel, which is why
+  // every implementation says "ignore the node's transform" instead. Applying it
+  // anyway transforms the model twice, and for `CesiumMan` (whose mesh node sits
+  // under a rotation) that is a figure lying on its side at the wrong scale --
+  // a picture, not an error.
+  //
+  // The inverse bind matrix is what takes a vertex OUT of the pose the mesh was
+  // authored in and into the joint's own space. Without it the mesh is skinned
+  // from wherever the joints happen to be, which folds it into a knot at the
+  // origin.
+  let joint_matrices = fn (d: doc) -> fn (worlds) -> fn (si: int) ->
+    let sk = match J.at (J.req d.j "skins") si with
+             | None -> fail ("gltf: no skin " ++ str_of_int si)
+             | Some x -> x in
+    let js = J.arr (J.req sk "joints") in
+    let nj = J.len js in
+    // `inverseBindMatrices` is optional and its absence means the identity --
+    // which the specification says, and which is a real case: a mesh authored
+    // in the same space its joints start in needs no correction.
+    let ibm = match J.field sk "inverseBindMatrices" with
+              | None -> None
+              | Some a ->
+                let f = Acc.floats d (J.int_ a) in
+                let _ = if vec_len f != nj * 16
+                        then fail ("gltf: a skin has " ++ str_of_int nj ++ " joints but "
+                                   ++ str_of_int (vec_len f / 16) ++ " inverse bind matrices")
+                        else () in
+                Some f in
+    let out = vec_new () in
+    let rec go = fn (j: int) ->
+      if j >= nj then out
+      else
+        let ni = match J.at (J.req sk "joints") j with
+                 | None -> fail "gltf: a skin's joint list is shorter than it says"
+                 | Some x -> J.int_ x in
+        let _ = if ni < 0 || ni >= vec_len worlds
+                then fail ("gltf: skin joint " ++ str_of_int j ++ " names node "
+                           ++ str_of_int ni ++ ", which is not in the document")
+                else () in
+        let w = (vec_get worlds ni : mat4) in
+        let m =
+          match ibm with
+          | None -> w
+          | Some f ->
+            // COLUMN-MAJOR, which is how glTF stores every matrix -- the same
+            // layout `mat4` already uses, so this is a read and not a transpose.
+            let g = fn (k: int) -> vec_get f (j * 16 + k) in
+            M4.mul w (mat4 { c0 = v4 { x = g 0,  y = g 1,  z = g 2,  w = g 3 },
+                             c1 = v4 { x = g 4,  y = g 5,  z = g 6,  w = g 7 },
+                             c2 = v4 { x = g 8,  y = g 9,  z = g 10, w = g 11 },
+                             c3 = v4 { x = g 12, y = g 13, z = g 14, w = g 15 } }) in
+        let _ = vec_push out m in
+        go (j + 1) in
+    go 0;
+
+  // The weighted sum of four joint matrices for one vertex. Componentwise: a
+  // matrix sum, not a product, because the joints act in parallel on the same
+  // vertex rather than in sequence.
+  //
+  // A WEIGHT OF ZERO MUST CONTRIBUTE NOTHING EVEN IF ITS JOINT INDEX IS
+  // NONSENSE. glTF allows the unused slots of a JOINTS_0 to hold anything at all
+  // when the matching weight is zero, so a reader that looks the joint up first
+  // and multiplies by zero afterwards indexes out of bounds on a legal file.
+  let skin_matrix = fn (jm) -> fn (joints) -> fn (weights) -> fn (k: int) ->
+    let z = v4 { x = 0.0, y = 0.0, z = 0.0, w = 0.0 } in
+    let acc = fn (a: v4) -> fn (b: v4) -> fn (t: float) ->
+      v4 { x = a.x + b.x * t, y = a.y + b.y * t, z = a.z + b.z * t, w = a.w + b.w * t } in
+    let rec go = fn (i: int) -> fn (m: mat4) ->
+      if i >= 4 then m
+      else
+        let t = vec_get weights (4 * k + i) in
+        if t == 0.0 then go (i + 1) m
+        else
+          let ji = vec_get joints (4 * k + i) in
+          let _ = if ji < 0 || ji >= vec_len jm
+                  then fail ("gltf: a vertex names joint " ++ str_of_int ji
+                             ++ " and the skin has " ++ str_of_int (vec_len jm))
+                  else () in
+          let j = (vec_get jm ji : mat4) in
+          go (i + 1) (mat4 { c0 = acc m.c0 j.c0 t, c1 = acc m.c1 j.c1 t,
+                             c2 = acc m.c2 j.c2 t, c3 = acc m.c3 j.c3 t }) in
+    go 0 (mat4 { c0 = z, c1 = z, c2 = z, c3 = z });
 
   // MORPH TARGETS: the base attribute plus a weighted sum of DISPLACEMENTS.
   //
@@ -489,6 +605,12 @@ module Render {
         let mesh = match J.at (J.req d.j "meshes") (J.int_ mi) with
                    | None -> fail "gltf: node names a mesh that is not there" | Some x -> x in
         let mweights = morph_weights d nd mesh in
+        // A SKINNED NODE'S OWN TRANSFORM IS REPLACED, NOT COMBINED. The joint
+        // matrices already carry the vertex all the way to world space, so
+        // `world` must not be applied on top of them -- see `joint_matrices`.
+        let skin = match J.field nd "skin" with
+                   | None -> None
+                   | Some si -> Some (joint_matrices d (Scene.world_matrices d) (J.int_ si)) in
         let nrm_m = match M4x.normal_matrix world with | None -> M4.identity | Some x -> x in
         // A mirroring transform reverses the winding order (glTF 3.7.4). Decided
         // per node, once, from the global transform's determinant.
@@ -519,6 +641,13 @@ module Render {
                   let vcount = vec_len pos / 3 in
                   let idx = indices d prim vcount in
                   let tri = vec_len idx / 3 in
+                  // JOINTS_0 is read as INTEGERS, not floats: it is an index and
+                  // a float would be a conversion nobody asked for. WEIGHTS_0 may
+                  // be `normalized` bytes or shorts, which `Acc.floats` already
+                  // scales to 0..1.
+                  let sjoints = match J.field (J.req prim "attributes") "JOINTS_0" with
+                                | None -> None | Some a -> Some (Acc.ints d (J.int_ a)) in
+                  let sweights = attr d prim "WEIGHTS_0" in
                   let uv = attr d prim "TEXCOORD_0" in
                   let uv1 = attr d prim "TEXCOORD_1" in
                   let col0 = attr d prim "COLOR_0" in
@@ -533,17 +662,38 @@ module Render {
                   // a primitive with no NORMAL is FLAT SHADED, and a flat normal
                   // is a property of the triangle rather than of the vertex, so
                   // it cannot be decided until all three are in hand.
+                  // The matrix that takes vertex `k` to world space: the node's
+                  // own when the mesh is not skinned, and the vertex's own blend
+                  // of joint matrices when it is.
+                  let vmat = fn (k: int) ->
+                    match skin with
+                    | None -> world
+                    | Some jm ->
+                      match sjoints with
+                      | None -> world
+                      | Some js ->
+                        match sweights with
+                        | None -> world
+                        | Some ws -> skin_matrix jm js ws k in
                   let wpos = fn (k: int) ->
-                    V4.xyz (M4.mul_point world
+                    V4.xyz (M4.mul_point (vmat k)
                       (v3 { x = vec_get pos (3 * k), y = vec_get pos (3 * k + 1),
                             z = vec_get pos (3 * k + 2) })) in
                   let vnorm = fn (k: int) ->
                     match nrm with
                     | None -> None
                     | Some nv ->
-                      Some (V3.normalize (M4.mul_dir nrm_m
-                        (v3 { x = vec_get nv (3 * k), y = vec_get nv (3 * k + 1),
-                              z = vec_get nv (3 * k + 2) }))) in
+                      let n0 = v3 { x = vec_get nv (3 * k), y = vec_get nv (3 * k + 1),
+                                    z = vec_get nv (3 * k + 2) } in
+                      // THE SKIN MATRIX ITSELF, not its inverse transpose. A
+                      // normal wants the inverse transpose in general, and three.js
+                      // uses the skin matrix directly here -- so this matches the
+                      // reference renderer rather than the textbook, and says so.
+                      // It differs only under non-uniform joint scale, which none
+                      // of the corpus's rigs have.
+                      match skin with
+                      | None -> Some (V3.normalize (M4.mul_dir nrm_m n0))
+                      | Some _ -> Some (V3.normalize (M4.mul_dir (vmat k) n0)) in
                   let vuv = fn (k: int) ->
                     match uv with
                     | None -> (0.0, 0.0)

@@ -530,6 +530,52 @@ unmorphed, 118 at weight 0, 105 at weight 0.5, 93 at weight 1 — and the target
 displaces one vertex sideways rather than moving the whole mesh, because a change
 of shape is something the auto-camera cannot absorb by reframing.
 
+## Skinning
+
+A vertex belongs to up to four joints and lands where their weighted average of
+transforms puts it:
+
+```
+jointMatrix[j] = worldMatrix(joints[j]) * inverseBindMatrix[j]
+position       = Σ weightᵢ * jointMatrix[jointᵢ] * position
+```
+
+**The mesh node's own transform is not applied**, and that is the whole thing to
+get right. The specification writes the joint matrix with an
+`inverse(globalTransform(meshNode))` in front and then multiplies the result by
+`globalTransform(meshNode)` again — the two cancel, which is why every
+implementation says "ignore the node's transform" instead. Applying it anyway
+transforms the model twice, which for a rig under a rotation is a figure lying on
+its side: a picture, not an error.
+
+Joints are node indices that can point anywhere in the scene, including at nodes
+the walk has not reached and at nodes that are not the mesh's ancestors, so
+`Scene.world_matrices` resolves the whole tree into an array first.
+
+**`RecursiveSkeletons` went from IoU 0.199 to 0.999** and a colour error of 1.49
+to 0.03. The other five skinned models did not move a byte — and that is not
+luck: their joints sit at their bind pose at rest, so every joint matrix is the
+identity and skinning is a no-op. Which means **one model in the corpus can see
+this feature at all**, and that is why there are seven properties for it.
+
+Two of those properties exist because of what glTF permits rather than what the
+corpus contains:
+
+- **A zero weight's joint index is never read.** glTF allows any value in an
+  unused `JOINTS_0` slot, so the test document puts **9999** there. A reader that
+  looks the joint up before testing the weight walks off the end of the skin —
+  which it did, and the crash says `index 9999 out of bounds (len = 2)`.
+- **The node transform is ignored** — tested with a *rotation*, not a translation
+  or a scale, because the auto-camera reframes those away. A rotation here
+  preserves area and bounds too, so the pixel count does not move either; only
+  the picture does, which is why that property compares frame hashes rather than
+  counts.
+
+And one thing the properties **do not** cover, measured rather than assumed: the
+order of `worldMatrix * inverseBindMatrix`. Reversing it leaves all seven
+properties passing, and moves `RecursiveSkeletons` to 0.731 and 6.5% against the
+reference. The corpus row is the only witness for that, and the pin file says so.
+
 ## What is not here yet
 
 Ranked by what the corpus table says, rather than by what seems interesting:
@@ -547,8 +593,7 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   ~8-unit residual on `NormalTangentTest` and `NormalTangentMirrorTest`. Three of
   the five models that use one have no `TANGENT` — which is exactly what
   `NormalTangentTest` is for, and means generating a tangent frame from the UVs.
-- **Skinning** (six models; `RecursiveSkeletons` is at IoU 0.199, drawing its
-  bind pose where the reference draws the skin).
+
 - **Mipmaps.** `minFilter` is read and ignored, so a minified texture aliases.
   It is the whole of the textured models' remaining colour residual.
 - **Primitive modes** other than triangles — `PrimitiveModeNormalsTest` has

@@ -65,6 +65,14 @@
 #   are all zero at rest and their animations drive them, so a renderer that morphs
 #   correctly must leave them exactly where they were.
 #
+#   SO IS SKINNING: RecursiveSkeletons went from IoU 0.199 to 0.999 and a colour error of
+#   1.49 to 0.03. The other five skinned models did not move a byte, and that is not
+#   luck -- their joints sit at their bind pose at rest, so every joint matrix is the
+#   identity and skinning is a no-op. WHICH MEANS THIS ROW IS THE ONLY ONE IN THE CORPUS
+#   THAT CAN SEE SKINNING AT ALL, and it is also the only thing that catches the order of
+#   `worldMatrix * inverseBindMatrix`: reversing those two leaves every property in
+#   test/render_props.mere passing and moves this row to 0.731 and 6.5%, measured.
+#
 #   The four Compare* and MorphPrimitivesTest rows are here at all because JPEG is: their
 #   textures are baseline JPEGs and the loader used to refuse them. CesiumMan and
 #   CesiumMilkTruck are still refused -- their textures are PROGRESSIVE JPEGs, which is a
@@ -98,7 +106,7 @@ NormalTangentMirrorTest	        0.994   8.9    8.449   48.86
 NormalTangentTest	              0.996   9.3    8.343   53.69
 OrientationTest	                1.000   5.2    0.091   2.24
 PrimitiveModeNormalsTest	       0.606   15.6   12.048  21.11   POINTS and LINE_STRIP primitives are skipped and counted; three.js draws them
-RecursiveSkeletons	             0.199   34.1   1.489   49.22   skinning is not implemented, so this draws its bind pose where the reference draws the skin
+RecursiveSkeletons	             0.999   32.1   0.029   0.33
 RiggedFigure	                   0.999   2.8    0.067   0.98
 RiggedSimple	                   1.000   2.0    0.052   12.76
 SimpleMaterial	                 0.999   2.3    0.000   0.00
