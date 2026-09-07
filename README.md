@@ -869,6 +869,90 @@ Two of my own measurements along the way were wrong, in opposite directions:
 An unflattering number is worth suspecting the harness over — and so is a flattering
 one.
 
+## What a frame costs, and a gate that found a real bug on its first run
+
+`scripts/bench_check.sh` makes **one assertion and one report**, and they are
+different kinds of thing. The assertion: peak RSS for forty frames is not materially
+above peak RSS for one — a frame loop that keeps its scratch grows with the frame
+count. The report: frame times at two sizes, deliberately **not pinned**, because
+machine load moves them by a factor of two and a gate that asserted them would be red
+on a busy laptop.
+
+**Two sizes, because a frame has two costs that have nothing to do with each other.**
+At 64×64 almost all of it is per-frame setup — the node walk, the animation state, the
+joint matrices. At 512×512 the per-pixel work is added on top. `Box`, with twelve
+triangles, goes 1 → 4 → 15 → 60 ms across 64 → 128 → 256 → 512, exactly four times per
+doubling and so purely per-pixel; `RecursiveSkeletons` costs 240 ms to produce a 64×64
+image, which is all setup. One number would have blended them, and the first person to
+ask "why is a twelve-triangle model slow" would have had nowhere to look. `show` is
+timed separately for the same reason — it is 1 ms at every size on every model, so
+compositing is not where a frame goes, but that is a *finding*, and it took separating
+them to have it.
+
+**There is no allocation total.** Mere exposes `mem_alloc` and no allocation
+statistics, so there is no honest number to print and none is printed; peak RSS stands
+in, from outside the process, because the language cannot be asked for that either.
+Peak RSS is spelled and scaled differently on each platform — macOS `time -l` reports
+bytes, Linux `time -v` reports kilobytes — so both are handled and an unrecognised one
+**skips by name** rather than being read as zero, which would make the assertion pass
+without measuring anything.
+
+### The assertion fired on its first run
+
+Forty frames of `Suzanne` took **4198 MB against 382 MB for one**. Attributing it took
+three steps, and the first two answers were wrong:
+
+| step | result |
+|---|---|
+| Is it the framebuffer? | **No.** At 64×64 the framebuffer is 16 KB and RSS still went 293 → 3366 MB over forty frames — about 77 MB a frame. |
+| A `region` per frame? | **No help**: 384 → 4257 MB. The emitted C showed the arena acquired, swapped in, copied out of and released exactly as it should. What that *ruled out* was the scene walk. |
+| Textured versus not? | **Found it.** `Box`, no textures, was flat at 25 → 27 MB. `Suzanne` went 295 → 3006. |
+
+`slot_tex` decoded its image on **every call**, and `mat_slots` runs **per primitive** —
+so N primitives sharing a material decoded the same PNG N times, every frame. Waste in
+a still render; unbounded growth in a loop.
+
+The fix is a decoded-image cache keyed by glTF image index, plus a warm pass the caller
+runs **once, outside every region**. That last part is forced, not stylistic: a
+`texture` holds a `ByteBuf[R]`, so one decoded inside a region may not be stored in a
+cache that outlives it, and Mere rejects that **at compile time on the code path
+existing**, not on it being taken. So the lookup never writes; filling is a separate
+function.
+
+**Both pieces are needed, for two different things**, and dropping either one shows:
+
+| | Suzanne, 40 frames at 64² | Box (no textures), 40 frames |
+|---|---|---|
+| neither | 293 → 3366 MB | 25 → 287 MB |
+| region only | 384 → 4257 MB | 25 → 27 MB |
+| cache only | 293 → 621 MB | 25 → **287 MB** |
+| both | 301 → **356 MB** | 25 → **28 MB** |
+
+The scene walk is per-frame scratch and the region reclaims it; the textures must
+survive every frame and the cache holds them. **Mere does not reclaim by default** —
+whatever a loop allocates without saying `region` stays for the life of the process —
+so neither was going to happen on its own.
+
+### It was mostly a speed bug
+
+The memory was the symptom the gate could see. The cost was the frame time:
+
+| | before | after |
+|---|---|---|
+| Suzanne at 64² | 75 ms | **2 ms** |
+| Suzanne at 512² | 103 ms | **16 ms** |
+| Fox at 64² | 28 ms | **3 ms** |
+
+Suzanne's 75 ms to produce a 64×64 image was almost entirely PNG decoding. Every
+picture in the corpus is byte-identical before and after, on both entry points.
+
+**One residual, named rather than hidden.** `RecursiveSkeletons` — 924 nodes, 84 skins,
+*zero* images — still grows about 12 MB a frame, roughly 13 KB per node per frame, so
+something in the per-node work escapes the frame's region. Every ordinary model is
+flat (`Box` 25→28, `RiggedSimple` 15→19, `MultipleScenes` 21→24, `Fox` 115→133). The
+gate **prints** that number instead of asserting it, because a threshold loose enough
+to admit 1.55× would be too loose to catch the defect the gate exists for.
+
 ### The 19 seconds were not the renderer
 
 Rendering `Fox` at 512 to a PNG takes 19 seconds, which would make an orbiting window
@@ -924,9 +1008,14 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   created without `SDL_WINDOW_RESIZABLE`, so a drag cannot cause one, but
   `SDL_WINDOW_ALLOW_HIGHDPI` is set and moving between displays of different scale
   can.
-- **A frame-rate and memory report** for the window: frame time, allocation total,
-  peak RSS. The window is fast enough to orbit (0.07 s a frame for `Fox` at 512,
-  0.49 s for a million triangles) but nothing here pins that.
+- **The last of the frame-loop growth.** `RecursiveSkeletons` — 924 nodes, 84 skins,
+  no images — still grows about 12 MB a frame, roughly 13 KB per node, so something
+  in the per-node work escapes the frame's region. Every ordinary model is flat.
+  `scripts/bench_check.sh` prints that number rather than asserting it, because a
+  threshold loose enough to admit it could not catch the tenfold leak the gate
+  exists for.
+- **Mipmaps**, still — see below. And the 924-node walk itself: `RecursiveSkeletons`
+  costs 240 ms to produce a 64×64 image, which is all scene setup and no pixels.
 
 Within the loader: **`data:` URIs** (glTF-Embedded) and matrix accessors whose
 columns need 4-byte padding — both **refused by name** rather than mis-read.

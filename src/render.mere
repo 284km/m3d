@@ -851,7 +851,97 @@ module Render {
   //
   // `where` is the JSON object holding the slot -- `pbrMetallicRoughness` for
   // baseColor and metallicRoughness, the material itself for the other three.
-  let slot_tex = fn (d: doc) -> fn (holder: Json.json) -> fn (slot: str) ->
+  // A DECODED-IMAGE CACHE, INDEXED BY glTF IMAGE INDEX.
+  //
+  // `slot_tex` used to decode its image every time it was called, and `mat_slots`
+  // is called PER PRIMITIVE -- so N primitives sharing a material decoded the same
+  // PNG N times, every frame. In a still render that is waste; in a frame loop it
+  // is unbounded growth, and it is what bench_check.sh's peak-RSS assertion caught
+  // on its first run: forty frames of Suzanne took 4198 MB against 382 MB for one.
+  //
+  // KEYED ON THE IMAGE AND NOT THE TEXTURE, because the expensive part is the
+  // decode and that depends only on the image. Wrap modes and the coordinate set
+  // are cheap JSON reads and stay per-slot, which they have to: MultiUVTest points
+  // two slots with different `texCoord` at the same image.
+  //
+  // WHY THE CALLER OWNS IT. A `texture` holds a `ByteBuf[R]`, so one decoded inside
+  // a region cannot be stored anywhere that outlives the region -- Mere rejects
+  // that outright. A cache that is to survive across frames therefore has to be
+  // created, and filled, outside them. `one_frame_cam` makes a fresh one per call
+  // so every existing caller is unchanged; a frame loop makes one and keeps it.
+  let tex_cache = fn (d: doc) ->
+    let n = match J.field d.j "images" with
+            | None -> 0
+            | Some ij -> J.arr_len ij in
+    let v = vec_new () in
+    let rec fill = fn (i: int) ->
+      if i >= n then v
+      else
+        let _ = vec_push v (None : texture option) in
+        fill (i + 1) in
+    fill 0;
+
+  // THE LOOKUP NEVER WRITES, and that is a structural requirement rather than
+  // tidiness. A `texture` holds a `ByteBuf[R]`; if this function could store one,
+  // then calling it from inside a `region` would mean storing a region-allocated
+  // value into a Vec that outlives the region, and Mere rejects that AT COMPILE
+  // TIME -- on the code path existing, not on it being taken. So a frame loop could
+  // not wrap its frames in a region at all. Filling is `warm_cache` below, which
+  // the caller runs once, outside.
+  //
+  // A miss decodes and does not store. That keeps this total, and the still path
+  // warms the cache first so a miss there means the image was not reachable from
+  // any material -- in which case decoding it once is exactly the old behaviour.
+  let cached_image = fn (d: doc) -> fn (cache) -> fn (si: int) ->
+    if si < 0 || si >= vec_len cache then
+      Tex.of_bytes (Gltf.image d si) (Gltf.image_name d si)
+    else
+      match (vec_get cache si : texture option) with
+      | Some t -> t
+      | None -> Tex.of_bytes (Gltf.image d si) (Gltf.image_name d si);
+
+  // Decode every image A MATERIAL CAN REACH, and no others.
+  //
+  // Not "every image in the document", which would be simpler and would change
+  // which files load: an unused image that this decoder refuses -- a progressive
+  // JPEG, say -- would start failing a document that renders fine today. The set
+  // here is exactly the set `mat_slots` asks for, because it runs for every
+  // primitive regardless of what ends up visible.
+  let warm_cache = fn (d: doc) -> fn (cache) ->
+    let src_of = fn (ti: int) ->
+      match J.at (J.req d.j "textures") ti with
+      | None -> 0 - 1
+      | Some tx -> match J.field tx "source" with
+                   | None -> 0 - 1
+                   | Some sj -> J.int_ sj in
+    let want = fn (holder: Json.json) -> fn (slot: str) ->
+      match J.field holder slot with
+      | None -> ()
+      | Some sj ->
+        let si = src_of (J.int_ (J.req sj "index")) in
+        if si < 0 || si >= vec_len cache then ()
+        else
+          match (vec_get cache si : texture option) with
+          | Some _ -> ()
+          | None -> vec_set cache si
+                      (Some (Tex.of_bytes (Gltf.image d si) (Gltf.image_name d si))) in
+    let rec mats = fn (xs) ->
+      match xs with
+      | Nil -> ()
+      | Cons (m, rest) ->
+        let pbr = match J.field m "pbrMetallicRoughness" with
+                  | None -> Json.JObj Nil | Some x -> x in
+        let _ = want pbr "baseColorTexture" in
+        let _ = want pbr "metallicRoughnessTexture" in
+        let _ = want m "normalTexture" in
+        let _ = want m "occlusionTexture" in
+        let _ = want m "emissiveTexture" in
+        mats rest in
+    match J.field d.j "materials" with
+    | None -> ()
+    | Some mj -> mats (J.arr mj);
+
+  let slot_tex = fn (d: doc) -> fn (cache) -> fn (holder: Json.json) -> fn (slot: str) ->
     match J.field holder slot with
     | None -> None
     | Some sj ->
@@ -885,7 +975,7 @@ module Render {
       // aliases. It is the largest remaining disagreement with the reference
       // renderer on the textured models, and it is recorded there rather than
       // hidden.
-      Some (texslot { img = Tex.of_bytes (Gltf.image d si) (Gltf.image_name d si),
+      Some (texslot { img = cached_image d cache si,
                       ws = ws, wt = wt, mag = mag, uvset = uvset });
 
   // Sampling a slot: the colour space and the coordinate set are both properties
@@ -949,7 +1039,7 @@ module Render {
   // material are two different holders and the specification puts particular
   // slots in each; getting that wrong finds nothing, because a slot looked for
   // in the wrong object is simply absent.
-  let mat_slots = fn (d: doc) -> fn (prim: Json.json) ->
+  let mat_slots = fn (d: doc) -> fn (cache) -> fn (prim: Json.json) ->
     match J.field prim "material" with
     | None -> (None, None, None, None, None)
     | Some mi ->
@@ -958,11 +1048,11 @@ module Render {
               | Some x -> x in
       let pbr = match J.field m "pbrMetallicRoughness" with
                 | None -> Json.JObj Nil | Some x -> x in
-      (slot_tex d pbr "baseColorTexture",
-       slot_tex d pbr "metallicRoughnessTexture",
-       slot_tex d m "normalTexture",
-       slot_tex d m "occlusionTexture",
-       slot_tex d m "emissiveTexture");
+      (slot_tex d cache pbr "baseColorTexture",
+       slot_tex d cache pbr "metallicRoughnessTexture",
+       slot_tex d cache m "normalTexture",
+       slot_tex d cache m "occlusionTexture",
+       slot_tex d cache m "emissiveTexture");
 
   // SHADING IS PER VERTEX HERE, and that is a first slice rather than the
   // answer. The rasterizer interpolates a colour, so a normal cannot reach the
@@ -1000,9 +1090,9 @@ module Render {
   // `Frame.auto_camera_at` returns, so handing it that output unchanged must give
   // back exactly the frame `one_frame_anim` gives. A property asserts that, byte for
   // byte, because it is the only thing that says this extraction moved nothing.
-  let one_frame_cam = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+  let one_frame_cached = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
                       fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
-                      fn (cam: (v3 * v3 * float * float * float * mat4)) ->
+                      fn (cam: (v3 * v3 * float * float * float * mat4)) -> fn (cache) ->
     let (t, depth) = Target.make w h in
     let _ = Target.clear t depth (int_of_float bg.x) (int_of_float bg.y) (int_of_float bg.z) in
     let ast = Scene.anim_state_of d time anim in
@@ -1060,7 +1150,7 @@ module Render {
                             | Some n0 -> Some (morphed d prim "NORMAL" mweights n0) in
                   let mat = material_of d prim in
                   let occ_strength = occ_str d prim in
-                  let (btex, mrtex, nmtex, octex, emtex) = mat_slots d prim in
+                  let (btex, mrtex, nmtex, octex, emtex) = mat_slots d cache prim in
                   let vcount = vec_len pos / 3 in
                   let idx = indices d prim vcount in
                   let tri = vec_len idx / 3 in
@@ -1561,6 +1651,17 @@ module Render {
             prims rest in
         prims (J.arr (J.req mesh "primitives"))) in
     (t, depth, vec_get drawn 0, eye, ctr, th, zn, zf);
+
+  // A FRESH CACHE PER CALL, so every existing caller is unchanged: one frame decodes
+  // each image at most once instead of once per primitive, and nothing survives the
+  // call. A frame LOOP wants the opposite and calls `one_frame_cached` with a cache
+  // it keeps -- see src/view.mere.
+  let one_frame_cam = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+                      fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
+                      fn (cam: (v3 * v3 * float * float * float * mat4)) ->
+    let c = tex_cache d in
+    let _ = warm_cache d c in
+    one_frame_cached d w h lit bg time anim cam c;
 
   // THE ANIMATION IS EVALUATED BEFORE THE CAMERA, and that ordering lives here
   // because this is the function that chooses a camera. The camera is framed from

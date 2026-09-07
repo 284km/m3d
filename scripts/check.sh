@@ -34,4 +34,10 @@ sh "$ROOT/scripts/reference_check.sh" || exit 1
 # or a C compiler -- neither is a build dependency of a Mere program, and the window
 # externs are C-backend only.
 sh "$ROOT/scripts/screen_check.sh" || exit 1
+
+# What a frame costs, and whether the loop grows. One assertion (peak RSS does not
+# scale with the frame count) and one report (frame times at two sizes, unpinned --
+# machine load moves them by a factor of two). SKIPS by name without SDL2, a C
+# compiler, or a /usr/bin/time that reports peak RSS in a spelling it knows.
+sh "$ROOT/scripts/bench_check.sh" || exit 1
 echo "check: ok"

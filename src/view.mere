@@ -1,7 +1,7 @@
 // view.mere — the renderer in a window.
 //
 //   m3d-view <file.gltf|file.glb> [--size N] [--time t] [--anim i]
-//             [--orbit yaw,pitch,dist] [--check] [--out x.png]
+//             [--orbit yaw,pitch,dist] [--check] [--out x.png] [--bench N]
 //
 // Controls: drag to orbit, shift-drag to pan, +/- to zoom, arrows to orbit by
 // keyboard, r to return to the auto framing, Escape or the close button to quit.
@@ -21,6 +21,13 @@
 import "./render.mere";
 import "mere-window/window.mere";
 import "mpng/encode.mere";
+
+// DECLARED, because `now_ms` is an extern and not a builtin -- calling it bare is
+// `unbound variable: now_ms`, the same trap `acos` set. It is `clock_gettime`
+// (CLOCK_MONOTONIC) in milliseconds, and the C backend is the only one with it:
+// the interpreter says "no interp mock implementation" and names the fix. A frame
+// here is 79 to 288 ms, so millisecond resolution is enough by two orders.
+extern fn now_ms: unit -> int;
 
 let argv = args ();
 
@@ -47,6 +54,9 @@ let size = match find_flag argv "--size" with | None -> 512 | Some v -> int_of_s
 let time = match find_flag argv "--time" with | None -> 0.0 | Some v -> float_of_str v;
 let anim = match find_flag argv "--anim" with | None -> 0 | Some v -> int_of_str v;
 let check_only = has_flag argv "--check";
+// `--bench N` draws N frames and reports what they cost, instead of waiting for a
+// person. 0 means "not benchmarking".
+let bench = match find_flag argv "--bench" with | None -> 0 | Some v -> int_of_str v;
 let out = find_flag argv "--out";
 
 // `--orbit yaw,pitch,dist` -- degrees and a multiple of the auto-framed distance,
@@ -88,8 +98,18 @@ let o_start = match orbit_flag with
               | None -> Frame.orbit_of a_eye a_ctr
               | Some (oy, op, od) -> Frame.orbit_of_flag autocam oy op od;
 
+// ONE DECODED-IMAGE CACHE FOR THE WHOLE SESSION. `one_frame_cam` makes a fresh one
+// per call, which is right for a single picture and wrong for a loop: `slot_tex`
+// decodes an image the first time it is asked and `mat_slots` runs per primitive, so
+// without this a frame loop re-decodes every texture on every frame. Measured, that
+// was 4198 MB over forty frames of Suzanne against 382 MB for one.
+let cache = Render.tex_cache d;
+// WARMED ONCE, HERE, OUTSIDE EVERY REGION. This is the whole reason the frame loop
+// can both reclaim its scratch and keep its textures: the decode happens out here,
+// so the lookup inside a frame never allocates anything that would have to escape.
+let _ = Render.warm_cache d cache;
 let render_at = fn (o) ->
-  Render.one_frame_cam d size size true bgv time anim (Frame.orbit_framed o aspect autocam);
+  Render.one_frame_cached d size size true bgv time anim (Frame.orbit_framed o aspect autocam) cache;
 
 // WITH NO `--orbit`, THE FRAME COMES FROM THE UNTOUCHED AUTO PATH -- not from
 // decomposing that camera into angles and rebuilding it. The round trip through
@@ -124,6 +144,85 @@ let code =
       let _ = Window.close win in
       let _ = print "m3d-view: FAIL — the window refused the frame" in
       1
+    else if bench > 0 then
+      // N FRAMES, EACH FROM A DIFFERENT ANGLE. Redrawing the same camera would let
+      // anything that caches per-camera work answer from the cache, and the number
+      // would be a measurement of the cache. Turning a little each frame is also
+      // what a drag actually does.
+      //
+      // RENDER AND SHOW ARE TIMED SEPARATELY. Blended into one number, "a frame
+      // costs X" cannot say whether X is the rasterizer or the compositing, and
+      // those have nothing to do with each other.
+      let rt = vec_new () in
+      let st = vec_new () in
+      // A REGION PER FRAME, AND A CACHE OUTSIDE THEM. It took measuring both to see
+      // that the two are needed for two different things, and the intermediate
+      // guesses were each wrong:
+      //
+      //   region alone   382 -> 4198 MB over forty frames of Suzanne became
+      //                  384 -> 4257. No help at all, and the emitted C showed the
+      //                  arena acquired, swapped in, copied out of and released
+      //                  exactly as it should. What it ruled out was the scene walk.
+      //   cache alone    Suzanne 293 -> 621 MB instead of 293 -> 3366, a 5.4x cut --
+      //                  but BOX, which has no textures at all, went 25 -> 287 MB
+      //                  where the region had held it at 25 -> 27. Dropping the
+      //                  region put the scene walk's growth back.
+      //   both           what is here.
+      //
+      // MERE DOES NOT RECLAIM BY DEFAULT: whatever a loop allocates without saying
+      // `region` stays for the life of the process. The scene walk, the animation
+      // state and the joint matrices are per-frame scratch and the region reclaims
+      // them. The decoded textures are the opposite -- they must survive every
+      // frame -- and a `texture` holds a `ByteBuf[R]`, so one decoded inside a
+      // region could not be stored in a cache that outlives it. Hence the warm pass
+      // above, out here, and a lookup inside that never writes.
+      //
+      // WHAT CROSSES THE BOUNDARY IS TWO INTS. `Window.show` is INSIDE, because it
+      // copies the pixels into the window's own block: after it the target is dead
+      // and only the timings need to survive. The orbit state is stepped OUTSIDE,
+      // since a tuple built in here could not leave.
+      let frame = fn (o) -> region FR {
+        let a = now_ms () in
+        let (t2, _d2, _dr, _e2, _c2, _t3, _z1, _z2) = render_at o in
+        let b = now_ms () in
+        let ok = Window.show win (canvas { w = t2.w, h = t2.h, px = t2.color }) bg in
+        let c = now_ms () in
+        // THE FRAME IS READ. Without this, nothing downstream depends on the pixels
+        // and a sufficiently clever compiler may skip producing them -- which would
+        // make this a measurement of an empty loop.
+        let (pr, _pg, _pb) = Target.get t2 (t2.w / 2) (t2.h / 2) in
+        let _ = if pr < 0 then print "impossible" else () in
+        (b - a, if ok then c - b else 0 - 1)
+      } in
+      let rec go = fn (k: int) -> fn (o) ->
+        if k >= bench then ()
+        else
+          let (rms, sms) = frame o in
+          let _ = vec_push rt rms in
+          let _ = vec_push st sms in
+          go (k + 1) (Frame.orbit_turn o 0.05 0.0) in
+      let _ = go 0 o_start in
+      let stats = fn (v) -> fn (label: str) ->
+        let n = vec_len v in
+        let rec mm = fn (i: int) -> fn (lo: int) -> fn (hi: int) -> fn (sum: int) ->
+          if i >= n then (lo, hi, sum)
+          else
+            let x = vec_get v i in
+            mm (i + 1) (if x < lo then x else lo) (if x > hi then x else hi) (sum + x) in
+        let (lo, hi, sum) = mm 0 1000000000 (0 - 1) 0 in
+        print (label ++ " frames " ++ str_of_int n ++ " min " ++ str_of_int lo
+               ++ " ms max " ++ str_of_int hi ++ " ms total " ++ str_of_int sum ++ " ms") in
+      let _ = stats rt "m3d-view: render" in
+      let _ = stats st "m3d-view: show  " in
+      let _ = Window.close win in
+      // NO ALLOCATION TOTAL, and that is a statement about the language rather than
+      // an omission here: Mere exposes `mem_alloc` and no allocation statistics, so
+      // there is no honest number to print. Peak RSS is measured from OUTSIDE, by
+      // scripts/bench_check.sh, because there is no way to ask for it from in here
+      // either.
+      let _ = print ("m3d-view: no allocation total — the language has no such "
+                     ++ "builtin; peak RSS is measured from outside") in
+      0
     else if check_only then
       // THE RENDERER'S SIZE IS NOT THE WINDOW'S SIZE on a HiDPI display, and the
       // readback comes back at the renderer's. Comparing a 256-wide readback with a
