@@ -63,6 +63,47 @@ instead of merely embarrassing.
   repository, not to this one.
 - **Verify**: `! ls "$MERE_SRC/contrib/encoding/base64.mere" >/dev/null 2>&1`
 
+## Q-8: a record field cannot hold a `Vec`, a `StrBuf` or a `Map`
+
+- **State**: open in the language; worked around here, and the workaround is fine.
+- **Measured** (mere v0.1.447), a record with one field of each:
+
+  | field type | result |
+  |---|---|
+  | `ByteBuf[R]` | **works** |
+  | `Vec[R, T]` | `type error: expected &R unit, got &__heap unit` |
+  | `StrBuf[R]` | same |
+  | `Map[R, K, V]` | same |
+
+  A tuple holding a `Vec` works, and so does a function taking or returning one -- a
+  function's signature can be generalised over the region and a record's field cannot.
+  `ByteBuf` escapes it because its region is erased from the type's tag.
+- **Why it showed up here**: a framebuffer wants a colour buffer AND a depth buffer, and
+  depth has to be floats. `contrib/raster`'s canvas gets away with one field because that
+  field is a `ByteBuf`.
+- **The workaround, and why it is not a bad one**: `Target.make` returns the pair, and
+  every function takes the two together, so they cannot end up different sizes. It reads
+  worse than one record and is otherwise the same program.
+- **The alternative that was rejected**: keeping depth as f32 bit patterns inside a second
+  `ByteBuf`, which would fit in the record. It costs four `bytebuf_get` plus a shift and a
+  widening per depth test, in the innermost loop of the rasterizer, to buy a nicer type.
+- **Verify**: `printf 'type box = \{ v: Vec[R, float] };\nlet b = box \{ v = vec_new () };\nprint_int (vec_len b.v)\n' > /tmp/m3dq8.mere && ! "$MERE" /tmp/m3dq8.mere >/dev/null 2>&1`
+
+## Q-9: the rasterizer runs on two backends, not four
+
+- **State**: open, and it is the language's to answer.
+- `bytebuf_new`, `bytebuf_get` and `bytebuf_set` are **refused by the LLVM and Wasm
+  backends** (`docs/host-matrix.md` says so, and `scripts/linalg_check.sh` prints the
+  refusal rather than passing over it). So `test/raster_dump.mere` and
+  `test/raster_props.mere` are compared across the interpreter and the C backend only,
+  where the linear-algebra ones are compared across four.
+- That is a real weakening of the strongest check this project has -- four independent
+  implementations of the same arithmetic -- and it is stated in the gate's output so a
+  reader is not left to assume otherwise.
+- **What would fix it**: a `ByteBuf` lowering in those two backends, which is the language
+  repository's work. Until then the browser path (M2c) cannot render either, since it is
+  the Wasm backend.
+
 ## Q-2: does `linalg` belong in the language's `contrib/`
 
 - **State**: open. It stays here until there is a second consumer.

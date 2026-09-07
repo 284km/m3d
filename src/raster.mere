@@ -1,0 +1,189 @@
+// A triangle rasterizer: which pixels a triangle covers, which of them survive
+// the depth test, and what the attributes are worth at each of them.
+//
+// PURE. Nothing here opens a window or reads a file; a target is a buffer in
+// and a buffer out, which is what lets the four backends be run against each
+// other and what lets a Python implementation read the same answer. The window
+// comes later and is a different question.
+//
+// THE FILL RULE IS THE WHOLE DESIGN. Two triangles that share an edge must
+// cover every pixel along it EXACTLY ONCE -- not twice, which double-blends,
+// and not zero times, which draws a seam of background through a solid mesh.
+// The half-open convention that gets this right is the top-left rule: a pixel
+// centre exactly on an edge belongs to the triangle if that edge is a top or a
+// left edge, and to the other one otherwise. `test/raster_props.mere` checks
+// the exactly-once property directly, with no oracle, because it is a fact
+// about the answer rather than about the code.
+//
+// Screen space: pixel (x, y) is sampled at its CENTRE, (x + 0.5, y + 0.5), and
+// y grows downward, which is what a framebuffer and glTF's texture origin both
+// do. A front face is counter-clockwise in the source and therefore CLOCKWISE
+// once y is flipped, so the sign test below reads the way it does on purpose.
+import "./linalg.mere";
+
+// A vertex as the rasterizer sees it: already projected and viewport-mapped.
+// `iw` is 1/w from the clip-space position and is what makes interpolation
+// perspective-correct -- an attribute is carried as attribute/w, interpolated
+// linearly in screen space, and divided by the interpolated 1/w at the end.
+type rvert = { x: float, y: float, z: float, iw: float, r: float, g: float, b: float };
+
+// Colour, and depth ALONGSIDE IT RATHER THAN INSIDE IT.
+//
+// A record field can hold a `ByteBuf[R]` and cannot hold a `Vec[R, T]`, a
+// `StrBuf[R]` or a `Map[R, K, V]` -- measured, not assumed: the first three
+// give `expected &R unit, got &__heap unit`, because a record type has no way
+// to be parameterised over the region its field's container lives in, and
+// ByteBuf escapes that only because its region is erased from the type's tag.
+// Tuples and function signatures are both fine, which is why the pair below
+// works and a third field would not. See OPEN_QUESTIONS Q-8.
+//
+// Depth is a Vec of doubles rather than four more bytes because it is compared
+// and not blended, and a byte has nowhere near the resolution a depth test
+// needs. Every function here takes the two together so they cannot drift
+// apart, and `Target.make` builds them as one value.
+type target = { w: int, h: int, color: ByteBuf[R] };
+
+module Target {
+  // Depth starts at the far plane. NDC z runs -1 (near) to +1 (far) here, the
+  // OpenGL convention `M4x.perspective_from_tan` produces, so "nothing drawn
+  // yet" is +1 and the test is less-than.
+  // Returns the pair, so a caller cannot end up holding a colour buffer and a
+  // depth buffer of different sizes.
+  let make = fn (w: int) -> fn (h: int) ->
+    let d = vec_new () in
+    let rec fill = fn (i: int) -> if i == w * h then () else let _ = vec_push d 1.0 in fill (i + 1) in
+    let _ = fill 0 in
+    (target { w = w, h = h, color = bytebuf_new (w * h * 4) }, d);
+
+  let clear = fn (t: target) -> fn (depth) -> fn (r: int) -> fn (g: int) -> fn (b: int) ->
+    let rec go = fn (i: int) ->
+      if i == t.w * t.h then ()
+      else
+        let o = i * 4 in
+        let _ = bytebuf_set t.color o r in
+        let _ = bytebuf_set t.color (o + 1) g in
+        let _ = bytebuf_set t.color (o + 2) b in
+        let _ = bytebuf_set t.color (o + 3) 255 in
+        let _ = vec_set depth i 1.0 in
+        go (i + 1) in
+    go 0;
+
+  let get = fn (t: target) -> fn (x: int) -> fn (y: int) ->
+    let o = (y * t.w + x) * 4 in
+    (bytebuf_get t.color o, bytebuf_get t.color (o + 1), bytebuf_get t.color (o + 2));
+}
+
+module Raster {
+  // The signed area of the triangle (a, b, p), doubled. Positive when the three
+  // are clockwise in screen coordinates (y down). Every coverage question here
+  // is three of these.
+  let edge = fn (ax: float) -> fn (ay: float) -> fn (bx: float) -> fn (by: float) ->
+             fn (px: float) -> fn (py: float) ->
+    (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+
+  // THE TOP-LEFT RULE, and it is a rule about the EDGE and not about the pixel.
+  // With y growing downward and the triangle wound CLOCKWISE in screen space --
+  // which is what `triangle` below guarantees before it gets here:
+  //   a TOP edge is horizontal (dy = 0) and goes RIGHT (dx > 0);
+  //   a LEFT edge goes UP (dy < 0).
+  // A pixel centre landing exactly on such an edge is inside; on any other edge
+  // it is outside, and belongs to the neighbour that shares it. So a quad comes
+  // out as the half-open box [x0, x1) x [y0, y1).
+  //
+  // BOTH SIGNS WERE THE OTHER WAY ROUND HERE FIRST, and the shared-edge property
+  // still passed: the mirrored rule is just as consistent, it merely produces
+  // (x0, x1] x (y0, y1] instead. Consistency does not pin the convention down --
+  // the test that did is the one comparing the covered SET against the half-open
+  // box, and it is why that assertion compares pixels rather than counting them.
+  //
+  // Exact equality and not a tolerance: two triangles sharing an edge compute it
+  // from the same two vertices, so their edge functions are the same expression
+  // and agree bit for bit. That is why exactly-once holds exactly.
+  let is_top_left = fn (ax: float) -> fn (ay: float) -> fn (bx: float) -> fn (by: float) ->
+    let dx = bx - ax in
+    let dy = by - ay in
+    (dy == 0.0 && dx > 0.0) || dy < 0.0;
+
+  // Inside, given that edge function's value and which edge it came from.
+  let accept = fn (e: float) -> fn (top_left: bool) ->
+    if e > 0.0 then true else if e < 0.0 then false else top_left;
+
+  // Draw one triangle. Back faces (counter-clockwise in screen space, so a
+  // negative doubled area) are dropped when `cull` is set; a zero area is
+  // always dropped, because a degenerate triangle has no inside and its edge
+  // functions are all zero, which the rule above would otherwise read as "every
+  // pixel is on every edge".
+  let triangle = fn (t: target) -> fn (depth) -> fn (cull: bool) ->
+                 fn (v0: rvert) -> fn (v1: rvert) -> fn (v2: rvert) ->
+    let area = edge v0.x v0.y v1.x v1.y v2.x v2.y in
+    if area == 0.0 then ()
+    else if cull && area < 0.0 then ()
+    else
+      // A back face that survives (cull off) is wound the other way, so every
+      // edge function has the opposite sign. Rather than branch inside the
+      // loop, the vertices are swapped once so the body always sees a
+      // clockwise triangle -- and the top-left rule stays a statement about
+      // clockwise triangles, which is the only way it is well defined.
+      let (a, b, c) = if area > 0.0 then (v0, v1, v2) else (v0, v2, v1) in
+      let area = if area > 0.0 then area else 0.0 - area in
+      let inv_area = 1.0 / area in
+      // The bounding box, clamped to the target. `int_of_float` truncates
+      // toward zero, so a negative left edge would round the wrong way; the
+      // clamp to 0 happens before the conversion for that reason.
+      let minxf = f_min a.x (f_min b.x c.x) in
+      let maxxf = f_max a.x (f_max b.x c.x) in
+      let minyf = f_min a.y (f_min b.y c.y) in
+      let maxyf = f_max a.y (f_max b.y c.y) in
+      let x0 = int_of_float (f_max 0.0 (floor minxf)) in
+      let y0 = int_of_float (f_max 0.0 (floor minyf)) in
+      let x1 = int_of_float (f_min (float_of_int t.w) (ceil maxxf)) in
+      let y1 = int_of_float (f_min (float_of_int t.h) (ceil maxyf)) in
+      let tl0 = is_top_left b.x b.y c.x c.y in
+      let tl1 = is_top_left c.x c.y a.x a.y in
+      let tl2 = is_top_left a.x a.y b.x b.y in
+      let rec row = fn (y: int) ->
+        if y >= y1 then ()
+        else
+          let py = float_of_int y + 0.5 in
+          let rec col = fn (x: int) ->
+            if x >= x1 then ()
+            else
+              let px = float_of_int x + 0.5 in
+              // Named for the vertex OPPOSITE the edge, so e0 is the weight of
+              // vertex a. That is the barycentric convention and keeps the
+              // interpolation below from needing a comment of its own.
+              let e0 = edge b.x b.y c.x c.y px py in
+              let e1 = edge c.x c.y a.x a.y px py in
+              let e2 = edge a.x a.y b.x b.y px py in
+              let _ =
+                if accept e0 tl0 && accept e1 tl1 && accept e2 tl2 then
+                  let w0 = e0 * inv_area in
+                  let w1 = e1 * inv_area in
+                  let w2 = e2 * inv_area in
+                  // Depth interpolates LINEARLY in screen space -- that is what
+                  // a projection matrix's z/w is for -- while everything else
+                  // needs the 1/w correction below.
+                  let z = w0 * a.z + w1 * b.z + w2 * c.z in
+                  let idx = y * t.w + x in
+                  if z < vec_get depth idx then
+                    let iw = w0 * a.iw + w1 * b.iw + w2 * c.iw in
+                    let inv = 1.0 / iw in
+                    let cr = (w0 * a.r * a.iw + w1 * b.r * b.iw + w2 * c.r * c.iw) * inv in
+                    let cg = (w0 * a.g * a.iw + w1 * b.g * b.iw + w2 * c.g * c.iw) * inv in
+                    let cb = (w0 * a.b * a.iw + w1 * b.b * b.iw + w2 * c.b * c.iw) * inv in
+                    let q = fn (v: float) ->
+                      let s = v * 255.0 in
+                      if s <= 0.0 then 0 else if s >= 255.0 then 255 else int_of_float (s + 0.5) in
+                    let o = idx * 4 in
+                    let _ = vec_set depth idx z in
+                    let _ = bytebuf_set t.color o (q cr) in
+                    let _ = bytebuf_set t.color (o + 1) (q cg) in
+                    let _ = bytebuf_set t.color (o + 2) (q cb) in
+                    bytebuf_set t.color (o + 3) 255
+                  else ()
+                else () in
+              col (x + 1) in
+          let _ = col x0 in
+          row (y + 1) in
+      row y0;
+}

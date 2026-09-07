@@ -1,0 +1,163 @@
+// Properties of the coverage, which need no oracle.
+//
+// THE ONE THAT MATTERS IS EXACTLY-ONCE. A fill rule exists so that two
+// triangles sharing an edge cover every pixel along it exactly once: twice
+// double-blends and shows as a bright seam, zero times shows as a line of
+// background through solid geometry. That is a fact about the answer, and no
+// amount of agreement with another rasterizer establishes it -- two
+// implementations of the same wrong rule agree perfectly.
+//
+// The counting is done with the depth test switched off in effect (every
+// triangle at the same z, drawn into a counter rather than a colour), so a
+// pixel covered twice is visible as a 2 rather than hidden by the second write
+// landing on the first.
+import "../src/raster.mere";
+
+let fails = vec_new ();
+let check = fn (name: str) -> fn (ok: bool) ->
+  if ok then () else let _ = vec_push fails name in print ("MISMATCH " ++ name);
+
+let wd = 24;
+let ht = 24;
+
+// Counting coverage: draw each triangle alone into a fresh target and add up
+// which pixels it touched. Drawing them into one target could not tell "the
+// second triangle also covered this" from "the second triangle overwrote it".
+let coverage = fn (v0: rvert) -> fn (v1: rvert) -> fn (v2: rvert) ->
+  let (t, d) = Target.make wd ht in
+  let _ = Target.clear t d 0 0 0 in
+  let _ = Raster.triangle t d false v0 v1 v2 in
+  let c = vec_new () in
+  let rec go = fn (i: int) ->
+    if i == wd * ht then ()
+    else
+      let (r, _, _) = Target.get t (i % wd) (i / wd) in
+      let _ = vec_push c (if r > 0 then 1 else 0) in
+      go (i + 1) in
+  let _ = go 0 in
+  c;
+
+let v = fn (x: float) -> fn (y: float) ->
+  rvert { x = x, y = y, z = 0.0, iw = 1.0, r = 1.0, g = 1.0, b = 1.0 };
+
+let count = fn (c) ->
+  let rec go = fn (i: int) -> fn (n: int) ->
+    if i == vec_len c then n else go (i + 1) (n + vec_get c i) in
+  go 0 0;
+
+// --- exactly once along a shared edge ------------------------------------
+// A quad split into two triangles. Both windings of the diagonal are tried:
+// the rule has to work for the pair as drawn, and a rule that only works when
+// the diagonal happens to run one way is not a rule.
+let quad_once = fn (name: str) -> fn (ax: float) -> fn (ay: float) -> fn (bx: float) -> fn (by: float) ->
+  let p00 = v ax ay in let p10 = v bx ay in
+  let p01 = v ax by in let p11 = v bx by in
+  let c1 = coverage p00 p10 p11 in
+  let c2 = coverage p00 p11 p01 in
+  let rec go = fn (i: int) -> fn (twice: int) -> fn (gaps: int) ->
+    if i == wd * ht then (twice, gaps)
+    else
+      let s = vec_get c1 i + vec_get c2 i in
+      // A gap only counts inside the quad's own bounding box of pixel centres;
+      // outside it, zero is the right answer.
+      let px = float_of_int (i % wd) + 0.5 in
+      let py = float_of_int (i / wd) + 0.5 in
+      let inside_box = px > ax && px < bx && py > ay && py < by in
+      go (i + 1) (twice + (if s > 1 then 1 else 0))
+                 (gaps + (if s == 0 && inside_box then 1 else 0)) in
+  let (twice, gaps) = go 0 0 0 in
+  let _ = check (name ++ ".no_pixel_twice") (twice == 0) in
+  let _ = check (name ++ ".no_gap") (gaps == 0) in
+  // And the halves together cover exactly the HALF-OPEN box [ax, bx) x [ay, by)
+  // -- not the strict interior, which is what this assertion said at first and
+  // why it failed on the half-integer cases while passing on the integer one.
+  // The fill rule's whole job is to decide the boundary, and half-open is the
+  // decision it makes; asserting "strictly inside" was asserting that it makes
+  // no decision. Compared pixel by pixel and not by counting, because [lo, hi)
+  // and (lo, hi] cover the same NUMBER of pixels and different ones.
+  let rec setcmp = fn (i: int) -> fn (bad: int) ->
+    if i == wd * ht then bad
+    else
+      let px = float_of_int (i % wd) + 0.5 in
+      let py = float_of_int (i / wd) + 0.5 in
+      let want = if px >= ax && px < bx && py >= ay && py < by then 1 else 0 in
+      setcmp (i + 1) (bad + (if vec_get c1 i + vec_get c2 i == want then 0 else 1)) in
+  check (name ++ ".is_the_half_open_box") (setcmp 0 0 == 0);
+
+// Integer corners: every pixel centre is strictly inside or strictly outside,
+// so nothing lands on an edge and this case would pass for a rasterizer with
+// no fill rule at all. It is here as the control.
+let _ = quad_once "quad.integer" 4.0 4.0 16.0 16.0;
+// Half-integer corners: every pixel centre along the boundary lands EXACTLY on
+// an edge. This is the case the fill rule exists for, and the one that fails
+// without it.
+let _ = quad_once "quad.half" 4.5 4.5 16.5 16.5;
+// A diagonal that passes through pixel centres, so the shared edge itself is
+// paved with exact hits rather than only the outer boundary.
+let _ = quad_once "quad.shifted" 3.5 5.5 15.5 17.5;
+
+// --- translation by a whole number of pixels moves the coverage exactly ----
+let shifted_same = fn (name: str) -> fn (dx: float) -> fn (dy: float) ->
+  let a = coverage (v 3.5 2.5) (v 11.5 4.5) (v 5.5 13.5) in
+  let b = coverage (v (3.5 + dx) (2.5 + dy)) (v (11.5 + dx) (4.5 + dy)) (v (5.5 + dx) (13.5 + dy)) in
+  let ix = int_of_float dx in
+  let iy = int_of_float dy in
+  let rec go = fn (i: int) -> fn (bad: int) ->
+    if i == wd * ht then bad
+    else
+      let x = i % wd in let y = i / wd in
+      let sx = x + ix in let sy = y + iy in
+      if sx < 0 || sx >= wd || sy < 0 || sy >= ht then go (i + 1) bad
+      else go (i + 1) (bad + (if vec_get a i == vec_get b (sy * wd + sx) then 0 else 1)) in
+  check name (go 0 0 == 0);
+let _ = shifted_same "translate.by_2_3" 2.0 3.0;
+let _ = shifted_same "translate.by_5_1" 5.0 1.0;
+
+// --- winding and culling ---------------------------------------------------
+// Reversing two vertices makes a back face. With culling on it disappears;
+// with culling off it covers exactly what the front face covered, because the
+// swap inside `triangle` puts it back to clockwise before the rule is applied.
+let front = coverage (v 4.5 4.5) (v 15.5 6.5) (v 6.5 16.5);
+let back = coverage (v 4.5 4.5) (v 6.5 16.5) (v 15.5 6.5);
+let rec same = fn (i: int) -> fn (bad: int) ->
+  if i == wd * ht then bad else same (i + 1) (bad + (if vec_get front i == vec_get back i then 0 else 1));
+let _ = check "winding.same_coverage_when_not_culled" (same 0 0 == 0);
+let _ = check "winding.front_is_not_empty" (count front > 20);
+
+let culled =
+  let (t, d) = Target.make wd ht in
+  let _ = Target.clear t d 0 0 0 in
+  let _ = Raster.triangle t d true (v 4.5 4.5) (v 6.5 16.5) (v 15.5 6.5) in
+  let rec go = fn (i: int) -> fn (n: int) ->
+    if i == wd * ht then n
+    else let (r, _, _) = Target.get t (i % wd) (i / wd) in go (i + 1) (n + (if r > 0 then 1 else 0)) in
+  go 0 0;
+let _ = check "cull.back_face_draws_nothing" (culled == 0);
+
+// --- degenerate triangles draw nothing -------------------------------------
+// All three edge functions are identically zero for a zero-area triangle, and
+// the top-left rule would read that as "every pixel is on every edge" -- so a
+// collinear triangle would fill its whole bounding box if the area were not
+// checked first.
+let _ = check "degenerate.collinear" (count (coverage (v 2.5 2.5) (v 8.5 8.5) (v 14.5 14.5)) == 0);
+let _ = check "degenerate.duplicate_vertex" (count (coverage (v 3.5 3.5) (v 3.5 3.5) (v 12.5 9.5)) == 0);
+
+// --- the depth test keeps the nearer one -----------------------------------
+let depth_pick = fn (name: str) -> fn (zfar: float) -> fn (znear: float) -> fn (want_r: int) ->
+  let (t, d) = Target.make wd ht in
+  let _ = Target.clear t d 0 0 0 in
+  let far = fn (x: float) -> fn (y: float) ->
+    rvert { x = x, y = y, z = zfar, iw = 1.0, r = 1.0, g = 0.0, b = 0.0 } in
+  let near = fn (x: float) -> fn (y: float) ->
+    rvert { x = x, y = y, z = znear, iw = 1.0, r = 0.0, g = 1.0, b = 0.0 } in
+  let _ = Raster.triangle t d false (far 2.5 2.5) (far 20.5 2.5) (far 2.5 20.5) in
+  let _ = Raster.triangle t d false (near 2.5 2.5) (near 20.5 2.5) (near 2.5 20.5) in
+  let (r, _, _) = Target.get t 5 5 in
+  check name (r == want_r);
+// The near one wins whichever order it is drawn in, which is the whole point of
+// a depth buffer as opposed to painting back to front.
+let _ = depth_pick "depth.near_over_far" 0.5 (0.0 - 0.5) 0;
+let _ = depth_pick "depth.far_does_not_overwrite_near" (0.0 - 0.5) 0.5 255;
+
+let n = vec_len fails;
+print (if n == 0 then "raster_props: ok" else "raster_props: " ++ str_of_int n ++ " FAILED")

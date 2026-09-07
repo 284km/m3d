@@ -1,0 +1,108 @@
+// Framebuffers, pixel by pixel, for two readers.
+//
+//   scripts/check.sh runs this on all four backends and requires the output to
+//   be identical -- no oracle, and exact.
+//
+//   scripts/raster_oracle.py decides the COVERAGE of the same scenes in exact
+//   rational arithmetic, with no floating point anywhere, and compares. That is
+//   the independent part: which pixels a triangle covers is a question about
+//   the exact geometry, and a reference that cannot round cannot agree with a
+//   rounding mistake. The colour and depth VALUES it checks by following the
+//   same formulae in floating point, which is a transcription and is labelled
+//   as one -- what it catches there is a transposed index or a wrong weight,
+//   not a last-bit difference.
+//
+// The scenes use halves and small integers so every coordinate, every edge
+// function and every barycentric weight is exact in binary floating point.
+// That is deliberate: it separates "the geometry is wrong" from "the arithmetic
+// rounded", and only the first is a bug in a rasterizer.
+import "../src/raster.mere";
+
+let wd = 16;
+let ht = 16;
+
+let v6 = fn (x: float) -> fn (y: float) -> fn (z: float) -> fn (iw: float) ->
+         fn (r: float) -> fn (g: float) -> fn (b: float) ->
+  rvert { x = x, y = y, z = z, iw = iw, r = r, g = g, b = b };
+
+let dump = fn (name: str) -> fn (t: target) -> fn (d) ->
+  let _ = print ("scene " ++ name) in
+  let rec go = fn (i: int) ->
+    if i == wd * ht then ()
+    else
+      let (r, g, b) = Target.get t (i % wd) (i / wd) in
+      let z = vec_get d i in
+      let _ = print ("p " ++ str_of_int i ++ " " ++ str_of_int r ++ " " ++ str_of_int g
+                     ++ " " ++ str_of_int b ++ " "
+                     ++ str_of_int (float_bits_hi z) ++ " " ++ str_of_int (float_bits_lo z)) in
+      go (i + 1) in
+  go 0;
+
+// 1. Integer corners: no pixel centre lands on an edge, so the fill rule is
+//    not consulted. The control.
+let s1 = fn () ->
+  let (t, d) = Target.make wd ht in
+  let _ = Target.clear t d 0 0 0 in
+  let _ = Raster.triangle t d true (v6 2.0 2.0 0.0 1.0 1.0 0.0 0.0)
+                                   (v6 13.0 3.0 0.0 1.0 1.0 0.0 0.0)
+                                   (v6 4.0 12.0 0.0 1.0 1.0 0.0 0.0) in
+  dump "integer" t d;
+
+// 2. Half-integer corners: every boundary pixel centre lands EXACTLY on an
+//    edge, so this scene is entirely about the fill rule.
+let s2 = fn () ->
+  let (t, d) = Target.make wd ht in
+  let _ = Target.clear t d 0 0 0 in
+  let _ = Raster.triangle t d true (v6 2.5 2.5 0.0 1.0 0.0 1.0 0.0)
+                                   (v6 12.5 2.5 0.0 1.0 0.0 1.0 0.0)
+                                   (v6 12.5 12.5 0.0 1.0 0.0 1.0 0.0) in
+  let _ = Raster.triangle t d true (v6 2.5 2.5 0.0 1.0 0.0 0.0 1.0)
+                                   (v6 12.5 12.5 0.0 1.0 0.0 0.0 1.0)
+                                   (v6 2.5 12.5 0.0 1.0 0.0 0.0 1.0) in
+  dump "halfint" t d;
+
+// 3. Two triangles at different depths, drawn far-first and then near-first in
+//    the same scene, so the depth test is exercised in both orders.
+let s3 = fn () ->
+  let (t, d) = Target.make wd ht in
+  let _ = Target.clear t d 0 0 0 in
+  let _ = Raster.triangle t d true (v6 1.5 1.5 0.5 1.0 1.0 0.0 0.0)
+                                   (v6 14.5 1.5 0.5 1.0 1.0 0.0 0.0)
+                                   (v6 1.5 14.5 0.5 1.0 1.0 0.0 0.0) in
+  let _ = Raster.triangle t d true (v6 3.5 3.5 (0.0 - 0.25) 1.0 0.0 1.0 0.0)
+                                   (v6 12.5 3.5 (0.0 - 0.25) 1.0 0.0 1.0 0.0)
+                                   (v6 3.5 12.5 (0.0 - 0.25) 1.0 0.0 1.0 0.0) in
+  let _ = Raster.triangle t d true (v6 5.5 5.5 0.75 1.0 0.0 0.0 1.0)
+                                   (v6 11.5 5.5 0.75 1.0 0.0 0.0 1.0)
+                                   (v6 5.5 11.5 0.75 1.0 0.0 0.0 1.0) in
+  dump "depth" t d;
+
+// 4. PERSPECTIVE CORRECTION. The three vertices have different 1/w, so a
+//    colour interpolated linearly in screen space is wrong and one interpolated
+//    through 1/w is right. Without the correction the middle of this triangle
+//    comes out a visibly different colour, which is the classic wobbling-texture
+//    bug and is what this scene pins.
+let s4 = fn () ->
+  let (t, d) = Target.make wd ht in
+  let _ = Target.clear t d 0 0 0 in
+  let _ = Raster.triangle t d true (v6 1.5 1.5 0.0 1.0 1.0 0.0 0.0)
+                                   (v6 14.5 2.5 0.25 0.25 0.0 1.0 0.0)
+                                   (v6 2.5 14.5 0.5 0.5 0.0 0.0 1.0) in
+  dump "perspective" t d;
+
+// 5. A back face with culling off: it must draw, and draw the same pixels the
+//    front face would.
+let s5 = fn () ->
+  let (t, d) = Target.make wd ht in
+  let _ = Target.clear t d 0 0 0 in
+  let _ = Raster.triangle t d false (v6 2.5 2.5 0.0 1.0 1.0 1.0 0.0)
+                                    (v6 3.5 13.5 0.0 1.0 1.0 1.0 0.0)
+                                    (v6 13.5 4.5 0.0 1.0 1.0 1.0 0.0) in
+  dump "backface" t d;
+
+let _ = s1 ();
+let _ = s2 ();
+let _ = s3 ();
+let _ = s4 ();
+let _ = s5 ();
+print "end"

@@ -153,9 +153,48 @@ and both of the shape where `mere -c` emits happily and `clang` refuses:
   `closure_int_M.t` — in two separate places. Neither shows up unless the
   function is used as a value.
 
+## Rasterizing
+
+`src/raster.mere` is the triangle rasterizer: edge functions, a top-left fill
+rule, a z-buffer, perspective-correct attribute interpolation and back-face
+culling. Pure — a buffer in and a buffer out, nothing opened.
+
+**The fill rule is the whole design.** Two triangles sharing an edge must cover
+every pixel along it exactly once: twice double-blends and shows as a bright
+seam, zero times shows as background through solid geometry.
+`test/raster_props.mere` checks that directly and needs no reference, because
+two implementations of the same wrong rule agree perfectly.
+
+That property is necessary and not sufficient, which was measured rather than
+argued. **Both signs in the rule were the other way round at first** — it
+implemented bottom-right where it said top-left — and exactly-once still held,
+because the mirrored rule is just as consistent. What pinned the convention
+down was asserting the covered *set* against the half-open box `[x0,x1) ×
+[y0,y1)`, pixel by pixel rather than by counting, since `[lo,hi)` and `(lo,hi]`
+cover the same number of pixels and different ones.
+
+`scripts/raster_oracle.py` decides the same coverage in **exact rational
+arithmetic** — `fractions.Fraction`, no floating point anywhere — so a
+disagreement is a mistake in the geometry rather than a last-bit difference.
+The colour and depth *values* it follows in float by the same formulae, which
+is a transcription and is labelled as one.
+
+The split between the two was measured too: removing perspective correction
+leaves every coverage property green and is caught by the rational reference at
+specific pixels. Coverage is all the properties look at.
+
+Scene coordinates are halves and small integers on purpose, so every edge
+function and barycentric weight is exact in binary floating point. That
+separates "the geometry is wrong" from "the arithmetic rounded", and only the
+first is a bug in a rasterizer.
+
+**It runs on two backends, not four.** `bytebuf_*` is refused by the LLVM and
+Wasm backends, so the rasterizer is compared across the interpreter and C where
+the linear algebra is compared across four. The gate prints the refusal rather
+than passing over it; see `OPEN_QUESTIONS.md` Q-9.
+
 ## What is not here yet
 
-The rasterizer, materials, the window, animation and skinning, and the GPU
-path. Also, within the loader: sparse accessors, `data:` URIs (glTF-Embedded),
+Materials and shading, the window, animation and skinning, and the GPU path. Also, within the loader: sparse accessors, `data:` URIs (glTF-Embedded),
 and matrix accessors whose columns need 4-byte padding — all three **refused by
 name** rather than mis-read. See `OPEN_QUESTIONS.md`.

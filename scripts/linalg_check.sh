@@ -65,7 +65,7 @@ else
 fi
 
 # ---- 1. the four backends, exactly ----------------------------------------------------
-for prog in test/linalg_dump.mere test/linalg_props.mere; do
+for prog in test/linalg_dump.mere test/linalg_props.mere test/raster_dump.mere test/raster_props.mere; do
   name=$(basename "$prog" .mere)
   ref=$(run_interp "$prog") || { echo "linalg_check: $name did not run on interp"; echo "$ref"; fail=1; continue; }
   n=1
@@ -75,7 +75,19 @@ for prog in test/linalg_dump.mere test/linalg_props.mere; do
       llvm) [ "$have_llvm" = 1 ] || continue ;;
       wasm) [ "$have_wasm" = 1 ] || continue ;;
     esac
-    out=$("run_$be" "$prog") || { echo "linalg_check: $name did not build/run on $be"; sed 's/^/    /' "$T/err" | head -4; fail=1; continue; }
+    if ! out=$("run_$be" "$prog"); then
+      # A CLEAN REFUSAL IS NOT A FAILURE, and telling them apart is the difference
+      # between a gate and a nuisance. `bytebuf_*` has no Wasm or LLVM lowering, so the
+      # rasterizer is refused there by name -- that is the backend saying what it does not
+      # have, which is the correct way to lack something. Anything else, including C that
+      # does not compile, is a failure. The count below then says how many backends
+      # actually agreed, so a program checked on one is not read as a program checked.
+      if grep -q 'codegen error: unsupported' "$T/err" 2>/dev/null; then
+        echo "linalg_check: $name UNSUPPORTED on $be — $(grep -o 'unsupported[^)]*)[^(]*' "$T/err" | head -1 | cut -c1-72)"
+        continue
+      fi
+      echo "linalg_check: $name did not build/run on $be"; sed 's/^/    /' "$T/err" | head -4; fail=1; continue
+    fi
     n=$((n + 1))
     if [ "$out" != "$ref" ]; then
       echo "linalg_check: $name DIFFERS on $be"

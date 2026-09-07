@@ -11,4 +11,5 @@ command -v "$MERE" >/dev/null 2>&1 || { echo "check: no mere — set MERE=/path/
 export MERE
 sh "$ROOT/scripts/linalg_check.sh" || exit 1
 sh "$ROOT/scripts/gltf_check.sh" || exit 1
+sh "$ROOT/scripts/raster_check.sh" || exit 1
 echo "check: ok"
