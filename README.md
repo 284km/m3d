@@ -589,15 +589,18 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   as a `0 0 0` header with no complaint. Progressive is a much larger feature than
   baseline — several scans per component, spectral selection, successive
   approximation — and `CesiumMan` and `CesiumMilkTruck` wait on it.
-- **Normal mapping.** Resolved and sampled but not yet applied, which is the
-  ~8-unit residual on `NormalTangentTest` and `NormalTangentMirrorTest`. Three of
-  the five models that use one have no `TANGENT` — which is exactly what
-  `NormalTangentTest` is for, and means generating a tangent frame from the UVs.
+- **Normal mapping.** The slot is *resolved* — `mat_slots` decodes the image —
+  and then never sampled, which is the ~8-unit residual on `NormalTangentTest`
+  and `NormalTangentMirrorTest`. Three of the five models that use one have no
+  `TANGENT`, which is exactly what `NormalTangentTest` is for and means deriving
+  a tangent frame from the UVs. It also needs the tangent carried through the
+  rasterizer, which is four more interpolated floats.
 
 - **Mipmaps.** `minFilter` is read and ignored, so a minified texture aliases.
   It is the whole of the textured models' remaining colour residual.
 - **Primitive modes** other than triangles — `PrimitiveModeNormalsTest` has
-  points and a line strip, skipped and counted, at IoU 0.587.
+  points and a line strip, skipped and counted, at IoU 0.606. It is the only row
+  left below the silhouette floor.
 - **Animation**, beyond the fact that every animated model renders its base pose
   and agrees with the reference there.
 - **Near-plane clipping**: a triangle with any vertex behind the eye is dropped
@@ -605,9 +608,9 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   inside geometry.
 - **The window and the GPU path.**
 
-Within the loader: **sparse accessors**, **`data:` URIs** (glTF-Embedded) and
-matrix accessors whose columns need 4-byte padding — all **refused by name**
-rather than mis-read.
+Within the loader: **`data:` URIs** (glTF-Embedded) and matrix accessors whose
+columns need 4-byte padding — both **refused by name** rather than mis-read.
+Sparse accessors used to be on this list and are implemented.
 
 Like the rasterizer, the texture and render paths are compared across two
 backends rather than four, because they write into a `ByteBuf`. See
