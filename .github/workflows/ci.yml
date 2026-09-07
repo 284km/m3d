@@ -1,0 +1,49 @@
+name: CI
+
+# WHY THIS EXISTS. The compiler moves daily and this repository does not, so the
+# interesting failure is the one where nothing here changed and it broke anyway.
+# mere's own CI checks that its main still TYPES the downstream repositories;
+# "does it still type" and "do its gates still pass" are different questions,
+# and only this can see the second one.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 4 * * 1"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Measured at about 30 seconds on a developer machine: four backends over two
+    # small programs, plus a Python pass. The limit is generous rather than tight
+    # because a hosted runner builds the compiler first.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the compiler
+        uses: actions/checkout@v4
+        with:
+          repository: merelang/mere
+          path: mere
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5"
+
+      - name: Build mere
+        working-directory: mere
+        run: opam install . --deps-only --yes && opam exec -- dune build
+
+      # wat2wasm is what turns the Wasm column from SKIPPED into checked, and a
+      # skip is a real weakening of the exact comparison -- three backends
+      # agreeing is a weaker statement than four.
+      - name: Install wabt
+        run: sudo apt-get update && sudo apt-get install -y wabt
+
+      - name: Gates
+        env:
+          MERE: ${{ github.workspace }}/mere/_build/default/bin/mere.exe
+          MERE_SRC: ${{ github.workspace }}/mere
+        run: sh scripts/check.sh

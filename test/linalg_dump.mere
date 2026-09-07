@@ -1,0 +1,115 @@
+// Every quantity linalg computes, printed as IEEE-754 bit patterns, for two
+// readers with two different jobs.
+//
+//   scripts/linalg_check.sh runs this on all four backends and requires the
+//   output to be IDENTICAL. That check needs no oracle -- the backends are
+//   each other's -- and it is exact because everything here uses only the five
+//   operations IEEE-754 requires to be correctly rounded.
+//
+//   scripts/gen_linalg_expected.py computes the same quantities by DIFFERENT
+//   ROUTES (Gauss-Jordan for the inverse, the quaternion sandwich for the
+//   rotation matrix, a frustum for the projection) and compares within a
+//   tolerance. That one catches the failure the first cannot see: four
+//   backends agreeing on the same wrong formula.
+//
+// Bit patterns and not digits, because a formatted double hides the low bits.
+// The inputs are non-dyadic (a division by 1000) so the arithmetic rounds.
+import "../src/linalg.mere";
+
+let p = fn (name: str) -> fn (x: float) ->
+  print (name ++ " " ++ str_of_int (float_bits_hi x) ++ " " ++ str_of_int (float_bits_lo x));
+let pv3 = fn (n: str) -> fn (a: v3) ->
+  let _ = p (n ++ ".x") a.x in let _ = p (n ++ ".y") a.y in p (n ++ ".z") a.z;
+let pv4 = fn (n: str) -> fn (a: v4) ->
+  let _ = p (n ++ ".x") a.x in let _ = p (n ++ ".y") a.y in
+  let _ = p (n ++ ".z") a.z in p (n ++ ".w") a.w;
+let pm = fn (n: str) -> fn (m: mat4) ->
+  let _ = pv4 (n ++ ".c0") m.c0 in let _ = pv4 (n ++ ".c1") m.c1 in
+  let _ = pv4 (n ++ ".c2") m.c2 in pv4 (n ++ ".c3") m.c3;
+
+// One LCG, the same one the compiler's benchmark suite uses, so the values are
+// off the dyadic grid and the Python side can generate them identically.
+let lcg = fn (count: int) -> fn (seed: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> fn (x: int) ->
+    if i == count then ()
+    else
+      let x2 = (1103515245 * x + 12345) % 2147483648 in
+      let _ = vec_push v (f_div (float_of_int (x2 % 2001 - 1000)) 1000.0) in
+      fill (i + 1) x2 in
+  let _ = fill 0 seed in
+  v;
+let d = lcg 64 20260907;
+let g = fn (i: int) -> vec_get d i;
+
+let a = v3 { x = g 0, y = g 1, z = g 2 };
+let b = v3 { x = g 3, y = g 4, z = g 5 };
+let _ = pv3 "v3.add" (V3.add a b);
+let _ = pv3 "v3.sub" (V3.sub a b);
+let _ = pv3 "v3.mul" (V3.mul a b);
+let _ = pv3 "v3.neg" (V3.neg a);
+let _ = pv3 "v3.scale" (V3.scale a (g 6));
+let _ = p   "v3.dot" (V3.dot a b);
+let _ = pv3 "v3.cross" (V3.cross a b);
+let _ = p   "v3.length" (V3.length a);
+let _ = pv3 "v3.normalize" (V3.normalize a);
+// A zero vector normalizes to zero, not to a NaN -- the degenerate triangle case.
+let _ = pv3 "v3.normalize_zero" (V3.normalize V3.zero);
+
+let a4 = v4 { x = g 0, y = g 1, z = g 2, w = g 3 };
+let b4 = v4 { x = g 4, y = g 5, z = g 6, w = g 7 };
+let _ = pv4 "v4.add" (V4.add a4 b4);
+let _ = pv4 "v4.sub" (V4.sub a4 b4);
+let _ = pv4 "v4.scale" (V4.scale a4 (g 8));
+let _ = p   "v4.dot" (V4.dot a4 b4);
+let _ = pv3 "v4.divide" (V4.perspective_divide a4);
+// w = 0 has no screen position; the value comes back unprojected rather than
+// as three infinities.
+let _ = pv3 "v4.divide_w0" (V4.perspective_divide (v4 { x = 1.0, y = 2.0, z = 3.0, w = 0.0 }));
+
+let mA = mat4 { c0 = v4 { x = g 8,  y = g 9,  z = g 10, w = g 11 },
+                c1 = v4 { x = g 12, y = g 13, z = g 14, w = g 15 },
+                c2 = v4 { x = g 16, y = g 17, z = g 18, w = g 19 },
+                c3 = v4 { x = g 20, y = g 21, z = g 22, w = g 23 } };
+let mB = mat4 { c0 = v4 { x = g 24, y = g 25, z = g 26, w = g 27 },
+                c1 = v4 { x = g 28, y = g 29, z = g 30, w = g 31 },
+                c2 = v4 { x = g 32, y = g 33, z = g 34, w = g 35 },
+                c3 = v4 { x = g 36, y = g 37, z = g 38, w = g 39 } };
+let _ = pm  "m4.identity" M4.identity;
+let _ = pm  "m4.mul" (M4.mul mA mB);
+let _ = pv4 "m4.mul_v4" (M4.mul_v4 mA a4);
+let _ = pv4 "m4.mul_point" (M4.mul_point mA a);
+let _ = pv3 "m4.mul_dir" (M4.mul_dir mA a);
+let _ = pm  "m4.transpose" (M4.transpose mA);
+let _ = pm  "m4.translation" (M4.translation a);
+let _ = pm  "m4.scaling" (M4.scaling b);
+let _ = p   "m4.determinant" (M4x.determinant mA);
+let _ = match M4x.inverse mA with
+  | None -> print "m4.inverse SINGULAR"
+  | Some inv -> pm "m4.inverse" inv;
+let _ = match M4x.normal_matrix mA with
+  | None -> print "m4.normal SINGULAR"
+  | Some nm -> pm "m4.normal" nm;
+// A singular matrix is refused rather than answered. A zero scale is an
+// ordinary thing for a glTF node to have.
+let _ = match M4x.inverse (M4.scaling (v3 { x = 1.0, y = 0.0, z = 1.0 })) with
+  | None -> print "m4.inverse_singular refused"
+  | Some _ -> print "m4.inverse_singular *** ANSWERED ***";
+
+let q = Q.normalize (quat { x = g 40, y = g 41, z = g 42, w = g 43 });
+let q2 = Q.normalize (quat { x = g 44, y = g 45, z = g 46, w = g 47 });
+let _ = p "q.x" q.x in let _ = p "q.y" q.y in
+let _ = p "q.z" q.z in let _ = p "q.w" q.w in
+let _ = pm "q.to_mat4" (Q.to_mat4 q);
+let qm = Q.mul q q2;
+let _ = p "q.mul.x" qm.x in let _ = p "q.mul.y" qm.y in
+let _ = p "q.mul.z" qm.z in let _ = p "q.mul.w" qm.w in
+let _ = pm "m4.trs" (M4x.trs a q b);
+
+let _ = pm "m4.perspective" (M4x.perspective_from_tan 0.5 1.5 0.1 100.0);
+let _ = pm "m4.infinite" (M4x.infinite_perspective_from_tan 0.5 1.5 0.1);
+let _ = pm "m4.ortho" (M4x.orthographic 2.0 1.5 0.1 100.0);
+let _ = pm "m4.look_at" (M4x.look_at (v3 { x = 3.0, y = 4.0, z = 5.0 })
+                                     (v3 { x = 0.0, y = 0.0, z = 0.0 })
+                                     (v3 { x = 0.0, y = 1.0, z = 0.0 }));
+print "end"

@@ -1,0 +1,309 @@
+// linalg — the arithmetic a renderer does before it touches a pixel.
+//
+// COLUMN-MAJOR, because glTF and OpenGL are: a `mat4` is four columns, and
+// element (row i, column j) is `c<j>.<i-th field>`. The transform is written
+// down the columns for the same reason it is written that way everywhere else
+// here — see the note on exactness below.
+//
+//     r = c0*v.x + c1*v.y + c2*v.z + c3*v.w
+//
+// EXACTNESS IS THE POINT OF THE SPLIT IN THIS FILE. Everything above the line
+// marked "the inexact fringe" uses only `+ - * /` and `sqrt`, which are the
+// five operations IEEE-754 requires to be correctly rounded and which every
+// Mere backend therefore agrees on to the bit. That is what lets four
+// backends be each other's oracle with no tolerance anywhere: a disagreement
+// is a bug, not a rounding story. Below the line are `sin`, `cos` and `tan`,
+// which no library is required to round correctly and which measurably differ
+// between the interpreter's OCaml, C's libm and Wasm's JavaScript — those are
+// held to a tolerance instead, and are deliberately NOT on the path a glTF
+// file takes (a file gives a quaternion, not an axis and an angle).
+
+type v3 = { x: float, y: float, z: float };
+type v4 = { x: float, y: float, z: float, w: float };
+// A quaternion in glTF's order: the storage is (x, y, z, w) with w last.
+type quat = { x: float, y: float, z: float, w: float };
+type mat4 = { c0: v4, c1: v4, c2: v4, c3: v4 };
+
+module V3 {
+  let make = fn (x: float) -> fn (y: float) -> fn (z: float) -> v3 { x = x, y = y, z = z };
+  let zero = v3 { x = 0.0, y = 0.0, z = 0.0 };
+  let add = fn (a: v3) -> fn (b: v3) -> v3 { x = a.x + b.x, y = a.y + b.y, z = a.z + b.z };
+  let sub = fn (a: v3) -> fn (b: v3) -> v3 { x = a.x - b.x, y = a.y - b.y, z = a.z - b.z };
+  let mul = fn (a: v3) -> fn (b: v3) -> v3 { x = a.x * b.x, y = a.y * b.y, z = a.z * b.z };
+  let neg = fn (a: v3) -> v3 { x = 0.0 - a.x, y = 0.0 - a.y, z = 0.0 - a.z };
+  let scale = fn (a: v3) -> fn (k: float) -> v3 { x = a.x * k, y = a.y * k, z = a.z * k };
+  // Ascending, x then y then z: the order is part of the answer, and the C and
+  // Python rows in the gates walk it the same way.
+  let dot = fn (a: v3) -> fn (b: v3) -> a.x * b.x + a.y * b.y + a.z * b.z;
+  let cross = fn (a: v3) -> fn (b: v3) ->
+    v3 { x = a.y * b.z - a.z * b.y,
+         y = a.z * b.x - a.x * b.z,
+         z = a.x * b.y - a.y * b.x };
+  let length2 = fn (a: v3) -> dot a a;
+  let length = fn (a: v3) -> sqrt (dot a a);
+  // A zero-length vector normalizes to zero rather than to a NaN. A renderer
+  // meets degenerate triangles and a NaN there spreads silently into every
+  // pixel it touches, where a zero normal is visible and local.
+  let normalize = fn (a: v3) ->
+    let l2 = dot a a in
+    if l2 == 0.0 then zero else scale a (1.0 / sqrt l2);
+}
+
+module V4 {
+  let make = fn (x: float) -> fn (y: float) -> fn (z: float) -> fn (w: float) ->
+    v4 { x = x, y = y, z = z, w = w };
+  // A point has w = 1 and is translated; a direction has w = 0 and is not.
+  let of_point = fn (a: v3) -> v4 { x = a.x, y = a.y, z = a.z, w = 1.0 };
+  let of_dir = fn (a: v3) -> v4 { x = a.x, y = a.y, z = a.z, w = 0.0 };
+  let xyz = fn (a: v4) -> v3 { x = a.x, y = a.y, z = a.z };
+  let add = fn (a: v4) -> fn (b: v4) ->
+    v4 { x = a.x + b.x, y = a.y + b.y, z = a.z + b.z, w = a.w + b.w };
+  let sub = fn (a: v4) -> fn (b: v4) ->
+    v4 { x = a.x - b.x, y = a.y - b.y, z = a.z - b.z, w = a.w - b.w };
+  let scale = fn (a: v4) -> fn (k: float) ->
+    v4 { x = a.x * k, y = a.y * k, z = a.z * k, w = a.w * k };
+  let dot = fn (a: v4) -> fn (b: v4) -> a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+  // The perspective divide, with the degenerate case named rather than left to
+  // produce infinities: w = 0 is a point on the eye plane and has no screen
+  // position, so the caller gets its unprojected self back and must clip.
+  let perspective_divide = fn (a: v4) ->
+    if a.w == 0.0 then v3 { x = a.x, y = a.y, z = a.z }
+    else let inv = 1.0 / a.w in v3 { x = a.x * inv, y = a.y * inv, z = a.z * inv };
+}
+
+module M4 {
+  let of_cols = fn (c0: v4) -> fn (c1: v4) -> fn (c2: v4) -> fn (c3: v4) ->
+    mat4 { c0 = c0, c1 = c1, c2 = c2, c3 = c3 };
+  let identity =
+    mat4 { c0 = v4 { x = 1.0, y = 0.0, z = 0.0, w = 0.0 },
+           c1 = v4 { x = 0.0, y = 1.0, z = 0.0, w = 0.0 },
+           c2 = v4 { x = 0.0, y = 0.0, z = 1.0, w = 0.0 },
+           c3 = v4 { x = 0.0, y = 0.0, z = 0.0, w = 1.0 } };
+
+  // Down the columns, ascending. This is the order `mat4xvec4` in the
+  // compiler's benchmark suite measures, and the reason explicit SIMD lanes
+  // pay on it: the sum runs across the columns, which is the direction the
+  // lanes are not.
+  let mul_v4 = fn (m: mat4) -> fn (v: v4) ->
+    V4.add (V4.add (V4.add (V4.scale m.c0 v.x) (V4.scale m.c1 v.y))
+                   (V4.scale m.c2 v.z))
+           (V4.scale m.c3 v.w);
+  let mul_point = fn (m: mat4) -> fn (p: v3) -> mul_v4 m (V4.of_point p);
+  let mul_dir = fn (m: mat4) -> fn (d: v3) -> V4.xyz (mul_v4 m (V4.of_dir d));
+
+  // (a * b) applies b first: each column of the product is a's transform of
+  // that column of b, which is the same accumulation order as mul_v4.
+  let mul = fn (a: mat4) -> fn (b: mat4) ->
+    mat4 { c0 = mul_v4 a b.c0, c1 = mul_v4 a b.c1,
+           c2 = mul_v4 a b.c2, c3 = mul_v4 a b.c3 };
+
+  let transpose = fn (m: mat4) ->
+    mat4 { c0 = v4 { x = m.c0.x, y = m.c1.x, z = m.c2.x, w = m.c3.x },
+           c1 = v4 { x = m.c0.y, y = m.c1.y, z = m.c2.y, w = m.c3.y },
+           c2 = v4 { x = m.c0.z, y = m.c1.z, z = m.c2.z, w = m.c3.z },
+           c3 = v4 { x = m.c0.w, y = m.c1.w, z = m.c2.w, w = m.c3.w } };
+
+  let translation = fn (t: v3) ->
+    mat4 { c0 = v4 { x = 1.0, y = 0.0, z = 0.0, w = 0.0 },
+           c1 = v4 { x = 0.0, y = 1.0, z = 0.0, w = 0.0 },
+           c2 = v4 { x = 0.0, y = 0.0, z = 1.0, w = 0.0 },
+           c3 = v4 { x = t.x,  y = t.y,  z = t.z,  w = 1.0 } };
+  let scaling = fn (s: v3) ->
+    mat4 { c0 = v4 { x = s.x, y = 0.0, z = 0.0, w = 0.0 },
+           c1 = v4 { x = 0.0, y = s.y, z = 0.0, w = 0.0 },
+           c2 = v4 { x = 0.0, y = 0.0, z = s.z, w = 0.0 },
+           c3 = v4 { x = 0.0, y = 0.0, z = 0.0, w = 1.0 } };
+}
+
+// A quaternion to a rotation matrix, and the TRS composition a glTF node
+// describes. Both are pure arithmetic -- a file hands over the quaternion
+// already, so nothing on this path needs a trigonometric function.
+module Q {
+  let identity = quat { x = 0.0, y = 0.0, z = 0.0, w = 1.0 };
+  let dot = fn (a: quat) -> fn (b: quat) -> a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+  let normalize = fn (a: quat) ->
+    let l2 = dot a a in
+    if l2 == 0.0 then identity
+    else let k = 1.0 / sqrt l2 in
+      quat { x = a.x * k, y = a.y * k, z = a.z * k, w = a.w * k };
+  // Hamilton product: `mul a b` is a applied after b, matching M4.mul.
+  let mul = fn (a: quat) -> fn (b: quat) ->
+    quat { x = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+           y = a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+           z = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+           w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z };
+  // The standard expansion, which is exact for a unit quaternion and does not
+  // require one: a non-unit quaternion gives the rotation scaled by its
+  // squared length, which is what glTF's own reference implementations do.
+  let to_mat4 = fn (q: quat) ->
+    let xx = q.x * q.x in let yy = q.y * q.y in let zz = q.z * q.z in
+    let xy = q.x * q.y in let xz = q.x * q.z in let yz = q.y * q.z in
+    let wx = q.w * q.x in let wy = q.w * q.y in let wz = q.w * q.z in
+    mat4 { c0 = v4 { x = 1.0 - 2.0 * (yy + zz), y = 2.0 * (xy + wz),       z = 2.0 * (xz - wy),       w = 0.0 },
+           c1 = v4 { x = 2.0 * (xy - wz),       y = 1.0 - 2.0 * (xx + zz), z = 2.0 * (yz + wx),       w = 0.0 },
+           c2 = v4 { x = 2.0 * (xz + wy),       y = 2.0 * (yz - wx),       z = 1.0 - 2.0 * (xx + yy), w = 0.0 },
+           c3 = v4 { x = 0.0, y = 0.0, z = 0.0, w = 1.0 } };
+}
+
+module M4x {
+  // The determinant and the inverse by Laplace expansion on complementary
+  // minors (Lengyel): the 4x4 splits into four 3-vectors and four scalars, and
+  // the whole thing is six cross products and a handful of dots. Fewer
+  // operations than the cofactor expansion and, more to the point here, it is
+  // written in terms of `V3.cross` and `V3.dot`, which are already pinned.
+  //
+  // `inverse` returns an OPTION. A singular matrix is an ordinary thing to
+  // meet -- a zero scale on a glTF node makes one -- and returning the
+  // identity instead would be a wrong answer that looks like a right one all
+  // the way to the pixels. The caller decides what a flattened node means.
+  let _abcd = fn (m: mat4) ->
+    (v3 { x = m.c0.x, y = m.c0.y, z = m.c0.z },
+     v3 { x = m.c1.x, y = m.c1.y, z = m.c1.z },
+     v3 { x = m.c2.x, y = m.c2.y, z = m.c2.z },
+     v3 { x = m.c3.x, y = m.c3.y, z = m.c3.z });
+
+  let determinant = fn (m: mat4) ->
+    let (a, b, c, d) = _abcd m in
+    let x = m.c0.w in let y = m.c1.w in let z = m.c2.w in let w = m.c3.w in
+    let s = V3.cross a b in
+    let t = V3.cross c d in
+    let u = V3.sub (V3.scale a y) (V3.scale b x) in
+    let vv = V3.sub (V3.scale c w) (V3.scale d z) in
+    V3.dot s vv + V3.dot t u;
+
+  let inverse = fn (m: mat4) ->
+    let (a, b, c, d) = _abcd m in
+    let x = m.c0.w in let y = m.c1.w in let z = m.c2.w in let w = m.c3.w in
+    let s = V3.cross a b in
+    let t = V3.cross c d in
+    let u = V3.sub (V3.scale a y) (V3.scale b x) in
+    let vv = V3.sub (V3.scale c w) (V3.scale d z) in
+    let det = V3.dot s vv + V3.dot t u in
+    if det == 0.0 then None
+    else
+      let k = 1.0 / det in
+      let s = V3.scale s k in
+      let t = V3.scale t k in
+      let u = V3.scale u k in
+      let vv = V3.scale vv k in
+      let r0 = V3.add (V3.cross b vv) (V3.scale t y) in
+      let r1 = V3.sub (V3.cross vv a) (V3.scale t x) in
+      let r2 = V3.add (V3.cross d u) (V3.scale s w) in
+      let r3 = V3.sub (V3.cross u c) (V3.scale s z) in
+      // r0..r3 are the ROWS of the inverse; a column of the result takes one
+      // component from each.
+      Some (mat4 {
+        c0 = v4 { x = r0.x, y = r1.x, z = r2.x, w = r3.x },
+        c1 = v4 { x = r0.y, y = r1.y, z = r2.y, w = r3.y },
+        c2 = v4 { x = r0.z, y = r1.z, z = r2.z, w = r3.z },
+        c3 = v4 { x = 0.0 - V3.dot b t, y = V3.dot a t,
+                  z = 0.0 - V3.dot d s, w = V3.dot c s } });
+
+  // The matrix normals transform by: the inverse transpose of the upper-left
+  // 3x3. Not the model matrix itself -- a non-uniform scale tilts a normal the
+  // wrong way if you use it, which is the classic squashed-sphere lighting bug.
+  // The translation is dropped because a normal is a direction.
+  let normal_matrix = fn (m: mat4) ->
+    match inverse m with
+    | None -> None
+    | Some inv ->
+      let t = M4.transpose inv in
+      Some (mat4 {
+        c0 = v4 { x = t.c0.x, y = t.c0.y, z = t.c0.z, w = 0.0 },
+        c1 = v4 { x = t.c1.x, y = t.c1.y, z = t.c1.z, w = 0.0 },
+        c2 = v4 { x = t.c2.x, y = t.c2.y, z = t.c2.z, w = 0.0 },
+        c3 = v4 { x = 0.0, y = 0.0, z = 0.0, w = 1.0 } });
+
+  // A glTF node's local transform: M = T * R * S, applied to a point as
+  // scale first, then rotate, then translate.
+  let trs = fn (t: v3) -> fn (r: quat) -> fn (s: v3) ->
+    M4.mul (M4.translation t) (M4.mul (Q.to_mat4 r) (M4.scaling s));
+
+  // Right-handed, looking down -Z, clip z in [-1, 1] -- the glTF/OpenGL
+  // convention. The half-angle arrives as its TANGENT so this stays inside the
+  // five correctly-rounded operations; `Camera.perspective` below takes the
+  // angle and is the one that cannot be exact.
+  let perspective_from_tan = fn (tan_half_yfov: float) -> fn (aspect: float) ->
+    fn (znear: float) -> fn (zfar: float) ->
+    let f = 1.0 / tan_half_yfov in
+    let nf = 1.0 / (znear - zfar) in
+    mat4 { c0 = v4 { x = f / aspect, y = 0.0, z = 0.0, w = 0.0 },
+           c1 = v4 { x = 0.0, y = f, z = 0.0, w = 0.0 },
+           c2 = v4 { x = 0.0, y = 0.0, z = (zfar + znear) * nf, w = 0.0 - 1.0 },
+           c3 = v4 { x = 0.0, y = 0.0, z = 2.0 * zfar * znear * nf, w = 0.0 } };
+
+  // glTF allows a perspective camera with no zfar, which is a projection whose
+  // far plane is at infinity -- the limit of the above, not a large number
+  // standing in for one.
+  let infinite_perspective_from_tan = fn (tan_half_yfov: float) -> fn (aspect: float) ->
+    fn (znear: float) ->
+    let f = 1.0 / tan_half_yfov in
+    mat4 { c0 = v4 { x = f / aspect, y = 0.0, z = 0.0, w = 0.0 },
+           c1 = v4 { x = 0.0, y = f, z = 0.0, w = 0.0 },
+           c2 = v4 { x = 0.0, y = 0.0, z = 0.0 - 1.0, w = 0.0 - 1.0 },
+           c3 = v4 { x = 0.0, y = 0.0, z = 0.0 - 2.0 * znear, w = 0.0 } };
+
+  // glTF's orthographic camera: xmag and ymag are half-extents.
+  let orthographic = fn (xmag: float) -> fn (ymag: float) ->
+    fn (znear: float) -> fn (zfar: float) ->
+    let nf = 1.0 / (znear - zfar) in
+    mat4 { c0 = v4 { x = 1.0 / xmag, y = 0.0, z = 0.0, w = 0.0 },
+           c1 = v4 { x = 0.0, y = 1.0 / ymag, z = 0.0, w = 0.0 },
+           c2 = v4 { x = 0.0, y = 0.0, z = 2.0 * nf, w = 0.0 },
+           c3 = v4 { x = 0.0, y = 0.0, z = (zfar + znear) * nf, w = 1.0 } };
+
+  // A view matrix: the world seen from `eye`, with -Z toward `center`. Only
+  // sqrt beyond arithmetic, so this is exact on every backend.
+  let look_at = fn (eye: v3) -> fn (center: v3) -> fn (up: v3) ->
+    let f = V3.normalize (V3.sub center eye) in
+    let s = V3.normalize (V3.cross f up) in
+    let u = V3.cross s f in
+    mat4 { c0 = v4 { x = s.x, y = u.x, z = 0.0 - f.x, w = 0.0 },
+           c1 = v4 { x = s.y, y = u.y, z = 0.0 - f.y, w = 0.0 },
+           c2 = v4 { x = s.z, y = u.z, z = 0.0 - f.z, w = 0.0 },
+           c3 = v4 { x = 0.0 - V3.dot s eye, y = 0.0 - V3.dot u eye,
+                     z = V3.dot f eye, w = 1.0 } };
+}
+
+// ---------------------------------------------------------------------------
+// The inexact fringe.
+//
+// Everything below calls a trigonometric function, and no library is required
+// to round one correctly: `exp -10` already differs in its last bit between
+// this language's four backends (the compiler's test/parity/exp_log.mere
+// records it), and sin, cos and tan are the same class. So these are held to a
+// TOLERANCE by the gates, never to a bit pattern, and nothing above this line
+// calls them.
+//
+// Nothing a glTF file needs is down here. A file gives a rotation as a
+// quaternion and a camera as a field of view; the first goes straight into
+// `Q.to_mat4`, and the second passes through `perspective` exactly once per
+// frame, where a last-bit difference in the projection is far below a pixel.
+// An interactive camera is the other caller, and it is not on any gate's
+// exactness path either.
+// ---------------------------------------------------------------------------
+
+module Camera {
+  let perspective = fn (yfov: float) -> fn (aspect: float) ->
+    fn (znear: float) -> fn (zfar: float) ->
+    M4x.perspective_from_tan (tan (yfov * 0.5)) aspect znear zfar;
+  let infinite_perspective = fn (yfov: float) -> fn (aspect: float) -> fn (znear: float) ->
+    M4x.infinite_perspective_from_tan (tan (yfov * 0.5)) aspect znear;
+  // An orbit camera's position from two angles and a distance -- the input a
+  // mouse drag produces, and the reason this module exists at all.
+  let orbit_eye = fn (target: v3) -> fn (yaw: float) -> fn (pitch: float) -> fn (dist: float) ->
+    let cp = cos pitch in
+    V3.add target (v3 { x = dist * cp * sin yaw,
+                        y = dist * sin pitch,
+                        z = dist * cp * cos yaw });
+}
+
+module Qx {
+  // A rotation of `angle` radians about `axis`. glTF never needs this -- it
+  // stores the quaternion -- so it lives below the line with the trigonometry.
+  let from_axis_angle = fn (axis: v3) -> fn (angle: float) ->
+    let a = V3.normalize axis in
+    let h = angle * 0.5 in
+    let s = sin h in
+    quat { x = a.x * s, y = a.y * s, z = a.z * s, w = cos h };
+}

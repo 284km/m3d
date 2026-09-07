@@ -1,0 +1,81 @@
+// Array of structs against struct of arrays, for a vertex buffer.
+//
+// M1's loader has to choose one, and the choice is usually argued rather than
+// measured. AoS keeps x, y, z, w adjacent, which is what a glTF accessor
+// hands over and what one cache line holds; SoA keeps each component in its
+// own array, which is what a wide lane wants to load.
+//
+// THE ANSWER DEPENDS ON SOMETHING THIS LANGUAGE DOES NOT YET HAVE. There is no
+// `f32x4_load` (nor an f64x2 load from four separate Vecs), so neither layout
+// can be read a vector at a time here: both go through `vec_get`, one scalar
+// at a time, and the only difference left is the ADDRESS PATTERN -- one stride
+// of 4 against four strides of 1. So this measures the memory system, honestly
+// labelled, and not the thing SoA is usually chosen for. It is here so that
+// when a load builtin arrives the before is on record.
+//
+// Both variants compute the same sum in the same order and print the same
+// bits; the run is void if they do not.
+import "../src/linalg.mere";
+
+let n = match args () with | Cons (a, _) -> int_of_str a | Nil -> 200000;
+let reps = 40;
+
+let lcg = fn (count: int) -> fn (seed: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> fn (x: int) ->
+    if i == count then ()
+    else
+      let x2 = (1103515245 * x + 12345) % 2147483648 in
+      let _ = vec_push v (f_div (float_of_int (x2 % 2001 - 1000)) 1000.0) in
+      fill (i + 1) x2 in
+  let _ = fill 0 seed in v;
+
+let src = lcg (3 * n) 77770707;
+let md = lcg 16 20260907;
+let m = mat4 { c0 = v4 { x = vec_get md 0,  y = vec_get md 1,  z = vec_get md 2,  w = vec_get md 3 },
+               c1 = v4 { x = vec_get md 4,  y = vec_get md 5,  z = vec_get md 6,  w = vec_get md 7 },
+               c2 = v4 { x = vec_get md 8,  y = vec_get md 9,  z = vec_get md 10, w = vec_get md 11 },
+               c3 = v4 { x = vec_get md 12, y = vec_get md 13, z = vec_get md 14, w = vec_get md 15 } };
+
+// AoS: one buffer, stride 3, the shape an interleaved accessor gives.
+let aos = src;
+// SoA: three buffers, stride 1 each.
+let sx = vec_new (); let sy = vec_new (); let sz = vec_new ();
+let rec split = fn (i: int) ->
+  if i == n then ()
+  else
+    let _ = vec_push sx (vec_get src (3 * i)) in
+    let _ = vec_push sy (vec_get src (3 * i + 1)) in
+    let _ = vec_push sz (vec_get src (3 * i + 2)) in
+    split (i + 1);
+let _ = split 0;
+
+let rec run_aos = fn (i: int) -> fn (a: v4) ->
+  if i == n then a
+  else
+    let p = v3 { x = vec_get aos (3 * i), y = vec_get aos (3 * i + 1), z = vec_get aos (3 * i + 2) } in
+    run_aos (i + 1) (V4.add a (M4.mul_point m p));
+let rec run_soa = fn (i: int) -> fn (a: v4) ->
+  if i == n then a
+  else
+    let p = v3 { x = vec_get sx i, y = vec_get sy i, z = vec_get sz i } in
+    run_soa (i + 1) (V4.add a (M4.mul_point m p));
+
+let rec rep_aos = fn (r: int) -> fn (a: v4) -> if r == reps then a else rep_aos (r + 1) (run_aos 0 a);
+let rec rep_soa = fn (r: int) -> fn (a: v4) -> if r == reps then a else rep_soa (r + 1) (run_soa 0 a);
+
+let z4 = v4 { x = 0.0, y = 0.0, z = 0.0, w = 0.0 };
+let t0 = time ();
+let ra = rep_aos 0 z4;
+let t1 = time ();
+let rs = rep_soa 0 z4;
+let t2 = time ();
+
+let same = float_bits_hi ra.x == float_bits_hi rs.x && float_bits_lo ra.x == float_bits_lo rs.x
+        && float_bits_hi ra.w == float_bits_hi rs.w && float_bits_lo ra.w == float_bits_lo rs.w;
+let _ = print ("n " ++ str_of_int n ++ " reps " ++ str_of_int reps);
+let _ = print ("checksum " ++ str_of_int (float_bits_hi ra.x) ++ " " ++ str_of_int (float_bits_lo ra.x));
+let _ = print (if same then "agree yes" else "agree NO — the run is void, the two are not the same computation");
+let _ = print ("aos " ++ str_of_float (t1 - t0) ++ " s");
+let _ = print ("soa " ++ str_of_float (t2 - t1) ++ " s");
+exit (if same then 0 else 1)

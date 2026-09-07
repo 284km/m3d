@@ -1,0 +1,192 @@
+// Properties of the answers, which need no oracle at all.
+//
+// scripts/linalg_check.sh has two other readers -- the four backends against each other,
+// and a second implementation in Python -- and both compare NUMBERS. This one compares
+// nothing: it asks whether the answer has the properties the mathematics says it must,
+// which catches the case both of the others share, a formula that is wrong the same way
+// everywhere. A cross product perpendicular to both its inputs is a fact about the answer;
+// no amount of agreement between implementations establishes it.
+//
+// Two tolerances, and the difference between them matters. `exact` is used where the
+// operation is a permutation or an identity that floating point preserves EXACTLY, and a
+// single bit is a failure. `near` is used where the mathematics is exact but the
+// arithmetic is not -- inverting a matrix and multiplying it back does not give ones and
+// zeros -- and its bound is stated per case rather than shared, so a loose one cannot
+// hide behind a tight one.
+import "../src/linalg.mere";
+
+let fails = vec_new ();
+let check = fn (name: str) -> fn (ok: bool) ->
+  if ok then () else let _ = vec_push fails name in print ("MISMATCH " ++ name);
+let exact = fn (name: str) -> fn (a: float) -> fn (b: float) ->
+  check name (float_bits_hi a == float_bits_hi b && float_bits_lo a == float_bits_lo b);
+let near = fn (name: str) -> fn (tol: float) -> fn (a: float) -> fn (b: float) ->
+  check name (f_abs (a - b) <= tol);
+let exact_m = fn (n: str) -> fn (p: mat4) -> fn (q: mat4) ->
+  let e = fn (t: str) -> fn (a: float) -> fn (b: float) -> exact (n ++ t) a b in
+  let _ = e ".c0.x" p.c0.x q.c0.x in let _ = e ".c0.y" p.c0.y q.c0.y in
+  let _ = e ".c0.z" p.c0.z q.c0.z in let _ = e ".c0.w" p.c0.w q.c0.w in
+  let _ = e ".c1.x" p.c1.x q.c1.x in let _ = e ".c1.y" p.c1.y q.c1.y in
+  let _ = e ".c1.z" p.c1.z q.c1.z in let _ = e ".c1.w" p.c1.w q.c1.w in
+  let _ = e ".c2.x" p.c2.x q.c2.x in let _ = e ".c2.y" p.c2.y q.c2.y in
+  let _ = e ".c2.z" p.c2.z q.c2.z in let _ = e ".c2.w" p.c2.w q.c2.w in
+  let _ = e ".c3.x" p.c3.x q.c3.x in let _ = e ".c3.y" p.c3.y q.c3.y in
+  let _ = e ".c3.z" p.c3.z q.c3.z in e ".c3.w" p.c3.w q.c3.w;
+let near_m = fn (n: str) -> fn (tol: float) -> fn (p: mat4) -> fn (q: mat4) ->
+  let e = fn (t: str) -> fn (a: float) -> fn (b: float) -> near (n ++ t) tol a b in
+  let _ = e ".c0.x" p.c0.x q.c0.x in let _ = e ".c0.y" p.c0.y q.c0.y in
+  let _ = e ".c0.z" p.c0.z q.c0.z in let _ = e ".c0.w" p.c0.w q.c0.w in
+  let _ = e ".c1.x" p.c1.x q.c1.x in let _ = e ".c1.y" p.c1.y q.c1.y in
+  let _ = e ".c1.z" p.c1.z q.c1.z in let _ = e ".c1.w" p.c1.w q.c1.w in
+  let _ = e ".c2.x" p.c2.x q.c2.x in let _ = e ".c2.y" p.c2.y q.c2.y in
+  let _ = e ".c2.z" p.c2.z q.c2.z in let _ = e ".c2.w" p.c2.w q.c2.w in
+  let _ = e ".c3.x" p.c3.x q.c3.x in let _ = e ".c3.y" p.c3.y q.c3.y in
+  let _ = e ".c3.z" p.c3.z q.c3.z in e ".c3.w" p.c3.w q.c3.w;
+
+let lcg = fn (count: int) -> fn (seed: int) ->
+  let v = vec_new () in
+  let rec fill = fn (i: int) -> fn (x: int) ->
+    if i == count then ()
+    else
+      let x2 = (1103515245 * x + 12345) % 2147483648 in
+      let _ = vec_push v (f_div (float_of_int (x2 % 2001 - 1000)) 1000.0) in
+      fill (i + 1) x2 in
+  let _ = fill 0 seed in v;
+let d = lcg 64 20260907;
+let g = fn (i: int) -> vec_get d i;
+
+let a = v3 { x = g 0, y = g 1, z = g 2 };
+let b = v3 { x = g 3, y = g 4, z = g 5 };
+let m = mat4 { c0 = v4 { x = g 8,  y = g 9,  z = g 10, w = g 11 },
+               c1 = v4 { x = g 12, y = g 13, z = g 14, w = g 15 },
+               c2 = v4 { x = g 16, y = g 17, z = g 18, w = g 19 },
+               c3 = v4 { x = g 20, y = g 21, z = g 22, w = g 23 } };
+let m2 = mat4 { c0 = v4 { x = g 24, y = g 25, z = g 26, w = g 27 },
+                c1 = v4 { x = g 28, y = g 29, z = g 30, w = g 31 },
+                c2 = v4 { x = g 32, y = g 33, z = g 34, w = g 35 },
+                c3 = v4 { x = g 36, y = g 37, z = g 38, w = g 39 } };
+let q = Q.normalize (quat { x = g 40, y = g 41, z = g 42, w = g 43 });
+
+// --- exact: a permutation is a permutation, and multiplying by one is a copy ---
+let _ = exact_m "transpose.involutive" (M4.transpose (M4.transpose m)) m;
+let _ = exact_m "mul.right_identity" (M4.mul m M4.identity) m;
+// The left identity is NOT bit-trivial the way the right one is: it forms
+// 1*x + 0*y + 0*z + 0*w for every entry, which is exact only because adding
+// signed zero to a finite number returns it unchanged. Asserting it exactly is
+// how we find out if that ever stops being true.
+let _ = exact_m "mul.left_identity" (M4.mul M4.identity m) m;
+// A TRS transform sends the origin to its translation, exactly: the scale
+// multiplies zeros and the rotation adds them.
+let t = v3 { x = g 0, y = g 1, z = g 2 };
+let trsm = M4x.trs t q b;
+let o = M4.mul_point trsm V3.zero;
+let _ = exact "trs.origin.x" o.x t.x in
+let _ = exact "trs.origin.y" o.y t.y in
+let _ = exact "trs.origin.z" o.z t.z in
+let _ = exact "trs.origin.w" o.w 1.0 in
+// A direction ignores the translation column ENTIRELY: change it and the
+// answer does not move, to the bit. (The first version of this asserted the
+// tempting thing instead -- that point minus direction is the translation
+// column -- and it failed, correctly. The transform accumulates
+// S = c0*x + c1*y + c2*z and then adds c3 or adds zero, so the difference is
+// (S + c3) - S, which floating point does not give back as c3. An identity
+// that holds in the reals is not automatically an exact assertion.)
+let trsm2 = mat4 { c0 = trsm.c0, c1 = trsm.c1, c2 = trsm.c2,
+                   c3 = v4 { x = 9.5, y = 0.0 - 3.25, z = 1e7, w = trsm.c3.w } } in
+let d1 = M4.mul_dir trsm a in
+let d2 = M4.mul_dir trsm2 a in
+let _ = exact "dir.ignores_translation.x" d1.x d2.x in
+let _ = exact "dir.ignores_translation.y" d1.y d2.y in
+let _ = exact "dir.ignores_translation.z" d1.z d2.z in
+// And a point does not ignore it, or the check above would pass for a
+// `mul_point` that had quietly become `mul_dir`.
+let p1 = M4.mul_point trsm a in
+let p2 = M4.mul_point trsm2 a in
+let _ = check "point.does_not_ignore_translation" (f_abs (p1.x - p2.x) > 1.0) in
+
+// --- near: the mathematics is exact, the arithmetic is not ---
+let _ = near "cross.perp_a" 1e-15 (V3.dot (V3.cross a b) a) 0.0;
+let _ = near "cross.perp_b" 1e-15 (V3.dot (V3.cross a b) b) 0.0;
+let _ = near "cross.anticommutes" 0.0 (V3.dot (V3.add (V3.cross a b) (V3.cross b a)) (v3 { x = 1.0, y = 1.0, z = 1.0 })) 0.0;
+let _ = near "normalize.unit" 1e-15 (V3.length (V3.normalize a)) 1.0;
+// A zero vector has no direction; the answer is zero and not a NaN, which a
+// renderer meeting a degenerate triangle would otherwise spread into every pixel.
+let _ = near "normalize.zero" 0.0 (V3.length (V3.normalize V3.zero)) 0.0;
+
+let _ = match M4x.inverse m with
+  | None -> print "MISMATCH inverse.exists"
+  | Some inv ->
+    let _ = near_m "inverse.roundtrip" 1e-11 (M4.mul m inv) M4.identity in
+    let _ = match M4x.inverse inv with
+      | None -> print "MISMATCH inverse.involutive_exists"
+      | Some inv2 -> near_m "inverse.involutive" 1e-11 inv2 m in
+    // det(A) * det(A-inverse) = 1 is a different statement from A * A-inverse = I,
+    // and a sign error in the determinant survives the second while failing this.
+    near "determinant.reciprocal" 1e-11 (M4x.determinant m * M4x.determinant inv) 1.0;
+let _ = near "determinant.multiplicative" 1e-11
+          (M4x.determinant (M4.mul m m2)) (M4x.determinant m * M4x.determinant m2);
+
+// A unit quaternion's matrix is a rotation: its columns are unit length and
+// mutually perpendicular, and it preserves lengths.
+let rm = Q.to_mat4 q;
+let c0 = V4.xyz rm.c0 in let c1 = V4.xyz rm.c1 in let c2 = V4.xyz rm.c2 in
+let _ = near "rot.col0_unit" 1e-15 (V3.length c0) 1.0;
+let _ = near "rot.col1_unit" 1e-15 (V3.length c1) 1.0;
+let _ = near "rot.col2_unit" 1e-15 (V3.length c2) 1.0;
+let _ = near "rot.orth01" 1e-15 (V3.dot c0 c1) 0.0;
+let _ = near "rot.orth02" 1e-15 (V3.dot c0 c2) 0.0;
+let _ = near "rot.orth12" 1e-15 (V3.dot c1 c2) 0.0;
+let _ = near "rot.det" 1e-14 (M4x.determinant rm) 1.0;
+let _ = near "rot.preserves_length" 1e-15 (V3.length (M4.mul_dir rm a)) (V3.length a);
+// Composing rotations is multiplying quaternions -- the two routes to the same
+// rotation must agree.
+let q2 = Q.normalize (quat { x = g 44, y = g 45, z = g 46, w = g 47 });
+let _ = near_m "quat.composition" 1e-14 (Q.to_mat4 (Q.mul q q2)) (M4.mul (Q.to_mat4 q) (Q.to_mat4 q2));
+
+// The camera puts its eye at the origin looking down -Z.
+let eye = v3 { x = 3.0, y = 4.0, z = 5.0 };
+let ctr = v3 { x = 0.0, y = 0.0, z = 0.0 };
+let vmat = M4x.look_at eye ctr (v3 { x = 0.0, y = 1.0, z = 0.0 });
+let ve = M4.mul_point vmat eye;
+let _ = near "look_at.eye_to_origin" 1e-14 (V3.length (V4.xyz ve)) 0.0;
+let vc = V4.xyz (M4.mul_point vmat ctr);
+let _ = near "look_at.center_on_minus_z" 1e-14 vc.x 0.0;
+let _ = near "look_at.center_on_minus_z_y" 1e-14 vc.y 0.0;
+let _ = check "look_at.center_is_in_front" (vc.z < 0.0);
+
+// The projection puts the near plane at -1 and the far plane at +1.
+let proj = M4x.perspective_from_tan 0.5 1.5 0.1 100.0;
+let znear = (V4.perspective_divide (M4.mul_v4 proj (v4 { x = 0.0, y = 0.0, z = 0.0 - 0.1, w = 1.0 }))).z;
+let zfar = (V4.perspective_divide (M4.mul_v4 proj (v4 { x = 0.0, y = 0.0, z = 0.0 - 100.0, w = 1.0 }))).z;
+let _ = near "perspective.near_to_minus1" 1e-14 znear (0.0 - 1.0);
+let _ = near "perspective.far_to_plus1" 1e-13 zfar 1.0;
+// The infinite-far projection is the limit of the finite one, not a large
+// number standing in for it: at a great distance the two agree.
+let pinf = M4x.infinite_perspective_from_tan 0.5 1.5 0.1;
+let far_pt = v4 { x = 0.0, y = 0.0, z = 0.0 - 1000000.0, w = 1.0 };
+let _ = near "infinite.approaches_one" 1e-5 (V4.perspective_divide (M4.mul_v4 pinf far_pt)).z 1.0;
+// Orthographic keeps w at 1: there is no perspective divide to do.
+let ortho = M4x.orthographic 2.0 1.5 0.1 100.0;
+let _ = exact "ortho.w_is_one" (M4.mul_v4 ortho (v4 { x = 1.0, y = 2.0, z = 0.0 - 3.0, w = 1.0 })).w 1.0;
+
+// The normal matrix is the inverse transpose, and its job is to keep a normal
+// perpendicular to a surface under a NON-UNIFORM scale -- which is exactly where
+// using the model matrix instead is wrong. Build a tangent and a normal that are
+// perpendicular, transform each by its own matrix, and they must still be.
+let model = M4x.trs t q (v3 { x = 3.0, y = 0.5, z = 1.0 });
+let _ = match M4x.normal_matrix model with
+  | None -> print "MISMATCH normal.exists"
+  | Some nmat ->
+    let n0 = V3.normalize a in
+    let tan0 = V3.normalize (V3.cross n0 b) in
+    let n1 = M4.mul_dir nmat n0 in
+    let t1 = M4.mul_dir model tan0 in
+    let _ = near "normal.perp_preserved" 1e-14 (V3.dot (V3.normalize n1) (V3.normalize t1)) 0.0 in
+    // And the model matrix alone does NOT preserve it, or this test would pass
+    // for a normal_matrix that just returned its argument.
+    let bad = M4.mul_dir model n0 in
+    check "normal.model_matrix_would_be_wrong"
+      (f_abs (V3.dot (V3.normalize bad) (V3.normalize t1)) > 1e-3);
+
+let n = vec_len fails;
+print (if n == 0 then "linalg_props: ok" else "linalg_props: " ++ str_of_int n ++ " FAILED")

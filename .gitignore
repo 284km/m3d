@@ -1,0 +1,9 @@
+.mere_modules/
+mere.lock
+*.c
+*.ll
+*.wat
+*.wasm
+*.png
+*.ppm
+m3d

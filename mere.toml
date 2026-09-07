@@ -1,0 +1,6 @@
+[package]
+name = "m3d"
+version = "0.1.0"
+path = "github.com/284km/m3d"
+
+[dependencies]
