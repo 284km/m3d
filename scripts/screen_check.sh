@@ -47,6 +47,9 @@
 #         six that have no animation to be at the wrong time of. So `--time` is plumbed
 #         through both entry points and not silently dropped by one.
 #   G4  sdl2-config hidden          -> green, and says which piece is missing
+#   G5  `--orbit` ignored by BOTH entry points -> red on all 7 non-trivial models,
+#         "the two viewpoints gave the same picture". Without this the two rows per
+#         model would agree on the auto frame twice and pass.
 #
 # WHAT THIS GATE CANNOT SEE. It runs under `SDL_VIDEODRIVER=dummy`, so it exercises
 # SDL's software path and not a GPU, a compositor, or a HiDPI scale factor. That is a
@@ -97,6 +100,16 @@ $CC -O2 -w "$T/main.c" -o "$T/m3d" -lm 2>/dev/null \
 # is NOT covered -- and that is the one case where `show`'s compositing stops being the
 # identity, which is exactly what poison P4 stands in for.
 MODELS="Box BoxTextured BoxVertexColors TwoSidedPlane Fox AnimatedCube MetalRoughSpheresNoTextures Unicode❤♻Test"
+
+# TWO VIEWPOINTS PER MODEL: the auto framing, and one the camera was orbited to.
+# `--orbit` exists so this column can exist at all -- the window drives the same
+# camera from a mouse, and a mouse is not something a gate can hold. Without a way
+# in from a command line the orbit would be reachable only by a person, which is to
+# say ungated. Same move as `--time` for animation.
+#
+# The empty string is the no-flag case; `-` is not a viewpoint but a marker for it,
+# because a shell word list cannot hold an empty word.
+VIEWS="- 45,20,1.5"
 SIZE=128
 
 checked=0; bad=0
@@ -107,7 +120,11 @@ for m in $MODELS; do
   done
   [ -n "$f" ] || { printf '%-30s %s\n' "$m" "SKIP — not in the corpus"; continue; }
 
-  msg=$(SDL_VIDEODRIVER=dummy "$T/view" "$f" --size "$SIZE" --time 0.4 --check \
+ for v in $VIEWS; do
+  if [ "$v" = "-" ]; then vflag=""; vname="auto"; else vflag="--orbit $v"; vname="orbit $v"; fi
+  label="$m [$vname]"
+
+  msg=$(SDL_VIDEODRIVER=dummy "$T/view" "$f" --size "$SIZE" --time 0.4 $vflag --check \
           --out "$T/win.png" 2>&1); rc=$?
   verdict=$(printf '%s\n' "$msg" | grep -o 'm3d-view: [A-Za-z]*' | tail -1)
 
@@ -117,25 +134,45 @@ for m in $MODELS; do
   # pass to anything grepping for it.
   case "$verdict:$rc" in
     "m3d-view: ok:0")   ;;
-    "m3d-view: SKIP:2") printf '%-30s %s\n' "$m" "$(printf '%s\n' "$msg" | tail -1)"; continue ;;
-    "m3d-view: FAIL:1") printf '%-30s %s\n' "$m" "$(printf '%s\n' "$msg" | tail -1)"
+    "m3d-view: SKIP:2") printf '%-42s %s\n' "$label" "$(printf '%s\n' "$msg" | tail -1)"; continue ;;
+    "m3d-view: FAIL:1") printf '%-42s %s\n' "$label" "$(printf '%s\n' "$msg" | tail -1)"
                         bad=$((bad + 1)); continue ;;
-    *) printf '%-30s %s\n' "$m" "FAIL — said '$verdict' and exited $rc, which do not agree"
+    *) printf '%-42s %s\n' "$label" "FAIL — said '$verdict' and exited $rc, which do not agree"
        printf '%s\n' "$msg" | head -4 | sed 's/^/    /'
        bad=$((bad + 1)); continue ;;
   esac
 
-  # Question 2. Same size, same time, same animation, so a difference is the entry point.
-  "$T/m3d" "$f" --size "$SIZE" --time 0.4 --out "$T/file.png" >/dev/null 2>&1 \
-    || { printf '%-30s %s\n' "$m" "FAIL — the window drew it but m3d --out did not"
+  # Question 2. Same size, same time, same animation, same viewpoint, so a difference
+  # is the entry point and nothing else.
+  "$T/m3d" "$f" --size "$SIZE" --time 0.4 $vflag --out "$T/file.png" >/dev/null 2>&1 \
+    || { printf '%-42s %s\n' "$label" "FAIL — the window drew it but m3d --out did not"
          bad=$((bad + 1)); continue; }
   if cmp -s "$T/win.png" "$T/file.png"; then
-    printf '%-30s %s\n' "$m" "window == painter == file"
+    printf '%-42s %s\n' "$label" "window == painter == file"
+    [ "$v" = "-" ] && cp "$T/file.png" "$T/first.png"
     checked=$((checked + 1))
   else
-    printf '%-30s %s\n' "$m" "FAIL — the window's picture is not the file's picture"
+    printf '%-42s %s\n' "$label" "FAIL — the window's picture is not the file's picture"
     bad=$((bad + 1))
   fi
+ done
+
+ # THE TWO VIEWPOINTS MUST DIFFER, for every model with no exceptions. Both rows
+ # above pass unchanged if `--orbit` is silently ignored by BOTH entry points --
+ # they would simply agree on the auto frame twice, which is exactly what happened
+ # when that was poisoned.
+ #
+ # `Box` was excluded here at first, on the reasoning that a cube seen from two
+ # angles could genuinely produce the same pixels. MEASURED, IT DOES NOT: not at
+ # 45,20,1.5 against the auto frame, and not even at 0 against 90, because the
+ # light is fixed in world space and turning the camera around a cube changes which
+ # face is lit. A waiver with a plausible reason and no measurement behind it is a
+ # hole in a gate, so it is gone.
+ if [ -f "$T/first.png" ] && cmp -s "$T/first.png" "$T/file.png"; then
+   printf '%-42s %s\n' "$m [both]" "FAIL — the two viewpoints gave the same picture, so --orbit did nothing"
+   bad=$((bad + 1))
+ fi
+ rm -f "$T/first.png"
 done
 
 # FAILURES ARE REPORTED BEFORE VACUITY, because `checked == 0` has two causes and only
@@ -145,7 +182,7 @@ done
 # nothing skipped and everything failed. Right verdict, wrong reason, and the wrong
 # reason is what somebody would go and investigate.
 if [ "$bad" -ne 0 ]; then
-  echo "screen: $bad model(s) failed, $checked passed"
+  echo "screen: $bad check(s) failed, $checked passed"
   exit 1
 fi
 # CHECKED == 0 IS RED. Every model could SKIP for its own good reason and the loop would
@@ -154,5 +191,7 @@ if [ "$checked" -eq 0 ]; then
   echo "screen: nothing was compared — every model skipped, so this gate is vacuous"
   exit 1
 fi
-echo "screen: $checked model(s) shown in a window and read back, identical to the file"
+# COMPARISONS AND NOT MODELS. Each model is checked at two viewpoints, so calling
+# the count models would overstate the corpus by a factor of two.
+echo "screen: $checked comparison(s) shown in a window and read back, identical to the file"
 echo "screen: ok"

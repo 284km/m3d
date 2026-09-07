@@ -469,6 +469,121 @@ module Frame {
 
   let auto_camera = fn (d: doc) -> fn (aspect: float) ->
     auto_camera_at d aspect (Scene.still d);
+
+  // ------------------------------------------------------------------------
+  // AN ORBIT CAMERA, AS PURE FUNCTIONS. A mouse moves a camera, and a mouse is
+  // not something a gate can hold -- so the interaction is defined here as
+  // arithmetic on a state, and the window is left with nothing but the job of
+  // turning events into calls. Everything below can be asserted without a
+  // display, and `test/render_props.mere` does.
+  //
+  // The state is `(yaw, pitch, dist, centre)`: azimuth and elevation in radians
+  // about a point, and a distance from it. `dist` is the real distance and not a
+  // multiplier, because the arithmetic needs a length; the CLI takes a multiple
+  // of the auto-framed distance instead, so `--orbit 45,20,1.5` means the same
+  // thing to every model regardless of its size.
+
+  // atan2 AND NOT acos, and that is not a style choice: `acos` appears in the
+  // compiler's builtin table and is NOT BOUND -- calling it is
+  // `unbound variable: acos`. Asking the table said yes and asking by calling
+  // said no. `sin`, `cos`, `atan2` and `sqrt` were each checked by calling, on
+  // the interpreter and the C backend, and agree to the byte.
+  let orbit_of = fn (eye: v3) -> fn (ctr: v3) ->
+    let d = V3.sub eye ctr in
+    let flat = sqrt (d.x * d.x + d.z * d.z) in
+    (atan2 d.x d.z, atan2 d.y flat, V3.length d, ctr);
+
+  // THE PITCH IS HELD JUST INSIDE VERTICAL -- 1.5697 rad, 89.94 degrees.
+  //
+  // AND NOT FOR THE REASON THAT LOOKED OBVIOUS. This first said the basis
+  // degenerates at exactly +-90 degrees and the matrix fills with NaN, which is
+  // what the geometry suggests: the view direction becomes parallel to the world
+  // up `look_at` builds from. MEASURED, IT DOES NOT HAPPEN. `cos (pi/2)` in double
+  // is 6.1e-17 rather than zero, so the direction is (1.2e-16, 4, 2.1e-16), the
+  // cross product with up is tiny but non-zero, and the determinant comes out
+  // -1.168056431889891 against -1.1680564318898945 a degree away. No NaN at pi/2,
+  // and none anywhere, because no double pitch makes that cosine exactly zero.
+  //
+  // What the clamp actually prevents is a TUMBLE. Past vertical the cosine turns
+  // negative, so the eye's horizontal offset flips sign and the camera swings over
+  // the top to the opposite azimuth: at pitch 1.75 the eye is at
+  // (-0.34, 3.94, -0.63) where at 1.40 it was at (+0.33, 3.94, +0.60). The view
+  // inverts and a drag that was raising the camera starts lowering it down the far
+  // side. That is a control that has stopped meaning anything, which is reason
+  // enough -- and it is the reason, so it is the one written down.
+  let pitch_limit = 1.5697;
+  let clamp_pitch = fn (p: float) ->
+    if p > pitch_limit then pitch_limit
+    else if p < 0.0 - pitch_limit then 0.0 - pitch_limit
+    else p;
+
+  let orbit_camera = fn (o: (float * float * float * v3)) -> fn (tan_half: float) ->
+                     fn (aspect: float) -> fn (znear: float) -> fn (zfar: float) ->
+    let (yaw, pitch, dist, ctr) = o in
+    let cp = cos pitch in
+    let eye = V3.add ctr (v3 { x = dist * cp * sin yaw,
+                               y = dist * sin pitch,
+                               z = dist * cp * cos yaw }) in
+    (eye, ctr, tan_half, znear, zfar,
+     M4.mul (M4x.perspective_from_tan tan_half aspect znear zfar)
+            (M4x.look_at eye ctr (v3 { x = 0.0, y = 1.0, z = 0.0 })));
+
+  // The three interactions. Angles in radians, `k` a multiplier, pan in units of
+  // the current distance so that dragging moves the model by the same fraction of
+  // the frame however far away it is.
+  let orbit_turn = fn (o: (float * float * float * v3)) -> fn (dyaw: float) -> fn (dpitch: float) ->
+    let (yaw, pitch, dist, ctr) = o in
+    (yaw + dyaw, clamp_pitch (pitch + dpitch), dist, ctr);
+
+  // Clamped at both ends: without a floor, repeated zooming reaches 0 and the eye
+  // sits exactly on the centre, where `look_at` has no direction to build a basis
+  // from -- the same degeneracy as the pole, arrived at from the other side.
+  let orbit_zoom = fn (o: (float * float * float * v3)) -> fn (k: float) ->
+    let (yaw, pitch, dist, ctr) = o in
+    let nd = dist * k in
+    (yaw, pitch, if nd < 0.0001 then 0.0001 else if nd > 1000000.0 then 1000000.0 else nd, ctr);
+
+  // Pan moves the CENTRE across the camera's own right and up, so the model
+  // slides in the frame rather than swinging around a point that has not moved.
+  // THE NEAR AND FAR PLANES HAVE TO FOLLOW THE DISTANCE, or zooming in clips the
+  // model away and zooming out loses it behind the far plane. Both are recovered
+  // from the auto camera's own numbers by algebra rather than by measuring the
+  // scene again: it set `znear = dist * 0.01` and `zfar = dist + r * 4`, so
+  // `r = (zfar - dist) / 4`. One source for the rule, so the orbiting camera and
+  // the framed one cannot drift apart.
+  let orbit_planes = fn (dist: float) -> fn (auto_dist: float) -> fn (auto_zfar: float) ->
+    let r = (auto_zfar - auto_dist) * 0.25 in
+    (dist * 0.01, dist + r * 4.0);
+
+  // The whole camera, from an orbit state and the auto camera it started from.
+  // Both entry points call this, so `--orbit` means the same thing to a file and
+  // to a window.
+  let orbit_framed = fn (o: (float * float * float * v3)) -> fn (aspect: float) ->
+                     fn (auto: (v3 * v3 * float * float * float * mat4)) ->
+    let (ae, ac, ath, _azn, azf, _avp) = auto in
+    let (_y, _p, dist, _c) = o in
+    let (zn, zf) = orbit_planes dist (V3.length (V3.sub ae ac)) azf in
+    orbit_camera o ath aspect zn zf;
+
+  // `--orbit yaw,pitch,dist`: DEGREES and a MULTIPLE of the auto-framed distance,
+  // because those are the two things that mean the same for every model. Radians
+  // would be unreadable on a command line and an absolute distance would frame
+  // Suzanne and miss Fox entirely.
+  let orbit_of_flag = fn (auto: (v3 * v3 * float * float * float * mat4)) ->
+                      fn (yaw_deg: float) -> fn (pitch_deg: float) -> fn (dist_mult: float) ->
+    let (ae, ac, _ath, _azn, _azf, _avp) = auto in
+    let deg = 0.017453292519943295 in
+    let (_y0, _p0, d0, _c0) = orbit_of ae ac in
+    (yaw_deg * deg, clamp_pitch (pitch_deg * deg), d0 * dist_mult, ac);
+
+  let orbit_pan = fn (o: (float * float * float * v3)) -> fn (dx: float) -> fn (dy: float) ->
+    let (yaw, pitch, dist, ctr) = o in
+    let (eye, _c, _t, _zn, _zf, _vp) = orbit_camera o 1.0 1.0 0.1 2.0 in
+    let fwd = V3.normalize (V3.sub ctr eye) in
+    let right = V3.normalize (V3.cross fwd (v3 { x = 0.0, y = 1.0, z = 0.0 })) in
+    let up = V3.cross right fwd in
+    let shift = V3.add (V3.scale right (dx * dist)) (V3.scale up (dy * dist)) in
+    (yaw, pitch, dist, V3.add ctr shift);
 }
 
 module Render {
@@ -877,16 +992,21 @@ module Render {
   // the only exact answer is to render twice on two backgrounds and take the
   // pixels that stay put. That costs a second render on both sides and is not
   // paid for yet; this is written down rather than assumed away.
-  let one_frame_anim = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
-                       fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
+  // ONE FRAME WITH A CAMERA SOMEBODY ELSE CHOSE. `one_frame_anim` below frames the
+  // scene itself, which is what a still-image renderer wants and what an orbiting
+  // window cannot use: the camera has to survive from one frame to the next and be
+  // driven by a mouse. So the body lives here, taking the camera as
+  // `(eye, center, tan_half_yfov, znear, zfar, view_projection)` -- the same 6-tuple
+  // `Frame.auto_camera_at` returns, so handing it that output unchanged must give
+  // back exactly the frame `one_frame_anim` gives. A property asserts that, byte for
+  // byte, because it is the only thing that says this extraction moved nothing.
+  let one_frame_cam = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+                      fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
+                      fn (cam: (v3 * v3 * float * float * float * mat4)) ->
     let (t, depth) = Target.make w h in
     let _ = Target.clear t depth (int_of_float bg.x) (int_of_float bg.y) (int_of_float bg.z) in
-    // THE ANIMATION IS EVALUATED ONCE, BEFORE THE CAMERA. The camera is framed
-    // from the scene's bounds, and at time t those are the ANIMATED bounds -- so
-    // computing it first would frame the still pose and let the moving model walk
-    // out of shot.
     let ast = Scene.anim_state_of d time anim in
-    let (eye, ctr, th, zn, zf, vp) = Frame.auto_camera_at d (float_of_int w / float_of_int h) ast in
+    let (eye, ctr, th, zn, zf, vp) = cam in
     let k = if lit then 3.0 else 0.0 in
     let light = dirlight { dx = 0.0 - 0.4, dy = 0.0 - 0.7, dz = 0.0 - 0.6, lr = k, lg = k, lb = k } in
     let fw = float_of_int w in
@@ -1441,6 +1561,16 @@ module Render {
             prims rest in
         prims (J.arr (J.req mesh "primitives"))) in
     (t, depth, vec_get drawn 0, eye, ctr, th, zn, zf);
+
+  // THE ANIMATION IS EVALUATED BEFORE THE CAMERA, and that ordering lives here
+  // because this is the function that chooses a camera. The camera is framed from
+  // the scene's bounds, and at time t those are the ANIMATED bounds -- framing first
+  // would frame the still pose and let a moving model walk out of shot.
+  let one_frame_anim = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+                       fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
+    let ast = Scene.anim_state_of d time anim in
+    let cam = Frame.auto_camera_at d (float_of_int w / float_of_int h) ast in
+    one_frame_cam d w h lit bg time anim cam;
 
   let dflt_bg = v3 { x = 26.0, y = 26.0, z = 30.0 };
   let one_frame_at = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->

@@ -669,6 +669,7 @@ frame, using [`contrib/window`](https://github.com/merelang/mere) over SDL2:
 mere -c src/view.mere > view.c
 clang -O2 -w view.c -o m3d-view -lm $(sdl2-config --cflags --libs)
 ./m3d-view test/data/gltf/Duck/glTF/Duck.gltf --size 512
+./m3d-view test/data/gltf/Duck/glTF/Duck.gltf --orbit 45,20,1.5 --check
 ```
 
 **It is a separate entry point, and that is the design rather than an accident.**
@@ -727,9 +728,157 @@ every pixel as differing with the real reason nowhere in the output, so `view.me
 refuses that mismatch **by name** instead. Whether a real display shows this
 correctly is not something this gate says.
 
-Nothing moves yet: the window shows one frame and waits for Quit or Escape. Orbit,
-pan and zoom are next, and zoom needs keys or a drag because `contrib/window` has
-no wheel event.
+### Orbit, pan, zoom — and how a mouse gets gated
+
+Drag to orbit, shift-drag to pan, `+`/`-` to zoom, arrows to turn by keyboard, `r`
+to return to the auto framing, Escape to quit.
+
+**Every camera decision is arithmetic in `Frame`, and only the event decoding is in
+the window.** `orbit_of`, `orbit_turn`, `orbit_zoom`, `orbit_pan` and `orbit_camera`
+are pure functions on a state of `(yaw, pitch, distance, centre)`, so
+`test/render_props.mere` asserts them with no display at all: the decomposition and
+the rebuild are inverses, a full turn of yaw comes back, zoom scales the distance
+*and* leaves the direction alone, pan there and back returns the centre *and* a
+single pan actually moves it. Keeping the split exactly at "events in, arithmetic
+out" is what makes any of that reachable.
+
+**And `--orbit yaw,pitch,dist` exists so the orbit can be gated at all.** A mouse is
+not something a gate can hold; a path with no way in but a person is a path with no
+gate. Both entry points take the flag — degrees, and a *multiple* of the auto-framed
+distance, because those are the two spellings that mean the same thing to a model of
+any size — so `screen_check.sh` checks every model at two viewpoints and compares the
+orbited window against the orbited file. Same move as `--time` was for animation.
+
+The gate also asserts **the two viewpoints differ**, which is not a formality: with
+`--orbit` poisoned to be ignored by *both* entry points, the two rows per model
+agreed on the auto frame twice and every comparison passed. `Box` was excluded from
+that check at first, on the reasoning that a cube from two angles might genuinely
+look the same — **measured, it does not**, not even at 0° against 90°, because the
+light is fixed in world space and turning the camera changes which face is lit. A
+waiver with a plausible reason and no measurement behind it is a hole, so it is gone,
+and the check now fires on all eight.
+
+The pitch is held at 89.94° and the zoom has a floor — **and the reason for the
+first one was wrong when it was written.** The comment said the basis degenerates at
+exactly ±90°, where the view direction is parallel to `look_at`'s world up, and the
+matrix fills with NaN. Measured, that does not happen: `cos(π/2)` in double is
+6.1e-17 rather than zero, so the cross product with up is tiny but non-zero, and the
+determinant comes out -1.168056431889891 against -1.1680564318898945 a degree away.
+No NaN at π/2, and none at any pitch, because no double makes that cosine exactly
+zero.
+
+What the clamp actually prevents is a **tumble**. Past vertical the cosine turns
+negative, the eye's horizontal offset flips sign, and the camera swings over the top
+to the opposite azimuth — at pitch 1.40 the eye is at (+0.33, 3.94, +0.60), at 1.75
+it is at (-0.34, 3.94, -0.63). The view inverts and a drag that was raising the
+camera starts lowering it down the far side.
+
+**Two properties died of that correction, and a third had the wrong input.** The two
+asked whether the camera and its matrix stay finite at the pole; since no NaN exists,
+both passed with the clamp deleted — vacuous, and caught only by poisoning. Their
+replacement asks the tumble question directly. It then failed on one side only,
+because the input was ±99 rad: the base pitch is 0.5404, so +99 wraps to 5.29 rad
+where the cosine is +0.56 again — past vertical many times over and back on the near
+side by luck. At +1.1 and −2.2 rad, just past vertical either way, all four fail
+without the clamp.
+
+**Writing the property for that floor took three tries**, and the two failures are
+the interesting part:
+
+| the property | why it passed with the floor deleted |
+|---|---|
+| the distance stays above zero | 40 tenfold reductions reach 1e-40, which is above zero |
+| two amounts of zooming end up *near* each other | `near_` is an absolute tolerance of 0.01, and near 1e-40 every pair of numbers is inside it |
+| two amounts of zooming end up **exactly** equal | — it fails, as it should |
+
+Absolute tolerances say nothing about numbers that have collapsed toward zero, which
+was the entire subject.
+
+### `acos` is in the table and is not bound
+
+The orbit decomposition uses `atan2` twice rather than `acos`, and that is not a
+style preference. `acos` appears in the Mere compiler's builtin table — grep says
+yes — and calling it says `unbound variable: acos`. `sin`, `cos`, `atan2` and `sqrt`
+were each checked *by calling*, on the interpreter and the C backend, and agree to
+the byte.
+
+### A "flake" that was a defect
+
+After the orbit landed, `reference_check` failed with `NormalTangentTest`: *never
+produced a finished frame*. m3d's own output was byte-identical to the previous
+commit, so only the browser side could have moved — and the gate's comment said the
+misses were "on no particular model and not reproducibly."
+
+**It failed twice in a row**, on a different one of its three renders each time. A
+different frame each time looks like randomness; the *same model* twice does not.
+Measured by hand at each budget:
+
+| variant | 20 s | 60 s | 90 s |
+|---|---|---|---|
+| stock | miss | **finish** | finish |
+| `?gltfbrdf=1` | miss | miss | **finish** |
+| `?nomip=1` | miss | miss | **finish** |
+
+(Measured in isolation on an otherwise quiet machine.)
+
+`--virtual-time-budget` was a flat 20000 for all four attempts. Four retries against
+a deterministic wall are four identical failures, which is why retrying never helped
+and why the gate said "never produced a finished frame" about a page that simply
+needed longer.
+
+**It now escalates: 20 s, 60 s, 120 s, 120 s** — because a larger budget is free when
+the page finishes and costs the whole of it when it does not. The budget is a *cap* on
+virtual time rather than a wait, so Chrome exits as soon as the page goes idle: `Box`
+takes 1.14 s at 20 s and 1.10–1.16 s at 120 s, timed three times each. But a frame
+that never finishes burns the full budget and the retry loop multiplies it — a flat
+120 s spent eight minutes on one frame that was never going to work. Escalating keeps
+the common case at 20 s, clears an ordinary one-off flake cheaply on the second
+attempt, and reaches 120 s only for a page that has already missed twice. Each retake
+now prints its budget, since "retaking" four times says nothing about whether a page
+is flaky or slow, and those want different fixes.
+
+The first green run under the escalation printed exactly the shape this predicts, and
+it shows **both things are true at once** — a budget that was too short, and ordinary
+flake on top of it:
+
+```
+retaking NormalTangentMirrorTest.patched.png at 20000ms   -> finished at 60 s
+retaking NormalTangentTest.nomip.png at 20000ms, 60000ms  -> finished at 120 s
+retaking NormalTangentTest.stock.png at 20000, 60000, 120000ms -> finished on the 4th
+```
+
+That is why the retries stay as well as the escalation, and why each retake prints the
+budget it was given.
+
+**This is not fully solved, and saying so is the point.** Under heavy machine load
+that model has still missed all four attempts at 120 s. The gate then refuses to
+report a number and names the model — the right behaviour — but a red line there can
+be the machine rather than the renderer, so the load is worth checking before
+believing it.
+
+Two of my own measurements along the way were wrong, in opposite directions:
+
+- I nearly concluded the page was *failing* rather than slow, because 120 s did not
+  help either — until `Box` produced no screenshot in the same harness. `ls`'s
+  executable marker `*` had ended up inside the Chrome path in my one-off script.
+- The first "raising it is free" timing put the shot inside a shell function passed
+  through `declare -f` to `sh`, which does not have `declare`; it was timing nothing.
+  The claim happened to survive re-measurement, but it was not evidence when I first
+  wrote it down.
+
+An unflattering number is worth suspecting the harness over — and so is a flattering
+one.
+
+### The 19 seconds were not the renderer
+
+Rendering `Fox` at 512 to a PNG takes 19 seconds, which would make an orbiting window
+useless. Timed by phase, `Target.make`, `Target.clear` and `to_png_rgb` are 0.01 s
+each at every size and **the whole cost is `encode_rgb8`** — mgz's deflate, whose own
+comment says "naive O(window) scan (fine for the probe; a real impl uses a hash
+chain)", up to 32768 comparisons per byte. A window never encodes a PNG: the same
+frame through the window path is 0.07 s, `Suzanne` at 1024 is 0.28 s, and the
+million-triangle `MetalRoughSpheresNoTextures` at 512 is 0.49 s. It also explains why
+every gate here runs at 128 or 192 pixels.
 
 ## What is not here yet
 
@@ -770,6 +919,14 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   inside geometry.
 - **The GPU path.** Everything here is a software rasterizer. The window shows the
   buffer it produced; nothing is drawn by a GPU.
+- **A resizable window.** The frame buffer is a fixed size, so a size change is
+  refused **by name** rather than silently freezing the picture — the window is
+  created without `SDL_WINDOW_RESIZABLE`, so a drag cannot cause one, but
+  `SDL_WINDOW_ALLOW_HIGHDPI` is set and moving between displays of different scale
+  can.
+- **A frame-rate and memory report** for the window: frame time, allocation total,
+  peak RSS. The window is fast enough to orbit (0.07 s a frame for `Fox` at 512,
+  0.49 s for a million triangles) but nothing here pins that.
 
 Within the loader: **`data:` URIs** (glTF-Embedded) and matrix accessors whose
 columns need 4-byte padding — both **refused by name** rather than mis-read.

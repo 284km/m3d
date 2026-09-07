@@ -1019,5 +1019,174 @@ let _ = check "anim.the_chosen_animation_is_the_one_applied"
 let _ = check "anim.before_the_first_key_holds" (near_ l_before 6.8);
 let _ = check "anim.after_the_last_key_holds" (near_ l_after 6.8);
 
+// ---------------------------------------------------------------------------
+// The explicit-camera entry point.
+//
+// `one_frame_cam` was extracted out of `one_frame_anim` so a window can drive the
+// camera from a mouse. The claim is that the extraction MOVED NOTHING, and the only
+// thing that can say so is the two paths producing the same bytes.
+//
+// SELF-COMPARISON, AND HERE THAT IS THE RIGHT SHAPE. Comparing m3d against m3d was
+// the mistake that left the derived tangent frame turned off -- self-consistency
+// standing in for conformance to a spec. This is the other case: the claim itself is
+// "these two code paths agree", so the two paths are the only witnesses there are.
+//
+// TWO DIRECTIONS, because the first alone is vacuous. If `one_frame_cam` ignored its
+// camera argument and re-framed the scene itself, the equality below would still
+// hold -- and the window would be unable to orbit while every property passed.
+let cam_bg = v3 { x = 26.0, y = 26.0, z = 30.0 };
+let cam_doc = Gltf.load "test/data/gltf/Box/glTF/Box.gltf";
+let cam_auto = Frame.auto_camera_at cam_doc 1.0 (Scene.anim_state_of cam_doc 0.0 0);
+
+let same_bytes = fn (a: target) -> fn (b: target) ->
+  let rec go = fn (i: int) ->
+    if i >= a.w * a.h * 4 then true
+    else if bytebuf_get a.color i != bytebuf_get b.color i then false
+    else go (i + 1) in
+  a.w == b.w && a.h == b.h && go 0;
+
+let (auto_t, _ad, _adr, _ae, _ac, _ath, _azn, _azf) =
+  Render.one_frame_anim cam_doc 48 48 true cam_bg 0.0 0;
+let (expl_t, _ed, _edr, _ee, _ec, _eth, _ezn, _ezf) =
+  Render.one_frame_cam cam_doc 48 48 true cam_bg 0.0 0 cam_auto;
+let _ = check "camera.explicit_given_the_auto_camera_is_byte_identical"
+  (same_bytes auto_t expl_t);
+
+// The other direction. The eye is moved to the opposite side of the model, which
+// under this box's lighting cannot coincidentally produce the same picture -- and
+// the property asserts DIFFERENT, so a camera argument that is silently dropped
+// fails here rather than passing everywhere.
+let (e0, c0, th0, zn0, zf0, _vp0) = cam_auto;
+let moved_eye = V3.add c0 (V3.scale (V3.sub e0 c0) (0.0 - 1.0));
+let moved = (moved_eye, c0, th0, zn0, zf0,
+             M4.mul (M4x.perspective_from_tan th0 1.0 zn0 zf0)
+                    (M4x.look_at moved_eye c0 (v3 { x = 0.0, y = 1.0, z = 0.0 })));
+let (moved_t, _md, _mdr, _me, _mc, _mth, _mzn, _mzf) =
+  Render.one_frame_cam cam_doc 48 48 true cam_bg 0.0 0 moved;
+let _ = check "camera.a_different_camera_gives_a_different_picture"
+  (not (same_bytes auto_t moved_t));
+
+// And the camera the frame REPORTS is the camera it was given, not the one it would
+// have chosen. `main.mere` prints these numbers and `reference_check.sh` hands them
+// to three.js, so a frame that drew with one camera and reported another would make
+// that whole gate compare two different viewpoints and call the difference a bug in
+// the shading.
+let _ = check "camera.the_reported_eye_is_the_given_eye"
+  (near_ _me.x moved_eye.x && near_ _me.y moved_eye.y && near_ _me.z moved_eye.z);
+
+// ---------------------------------------------------------------------------
+// The orbit camera.
+//
+// A MOUSE IS NOT SOMETHING A GATE CAN HOLD, so the interaction is arithmetic in
+// `Frame` and only the event decoding lives in the window. Everything here runs
+// with no display.
+let near3 = fn (a: v3) -> fn (b: v3) ->
+  near_ a.x b.x && near_ a.y b.y && near_ a.z b.z;
+let eye_of = fn (o) ->
+  let (e, _c, _t, _zn, _zf, _vp) = Frame.orbit_camera o 0.414 1.0 0.1 100.0 in e;
+
+let o_ctr = v3 { x = 1.0, y = 2.0, z = 0.0 - 3.0 };
+let o_eye = v3 { x = 4.0, y = 5.0, z = 1.0 };
+let o_base = Frame.orbit_of o_eye o_ctr;
+
+// The round trip. `orbit_of` decomposes a camera into angles and `orbit_camera`
+// rebuilds it, and the two must be inverses -- otherwise the window's first frame
+// jumps away from the auto-framed one the moment it derives its state.
+let _ = check "orbit.decompose_then_rebuild_returns_the_same_eye"
+  (near3 (eye_of o_base) o_eye);
+
+// A full turn is the identity. Not a tautology: it is the check that yaw enters
+// the arithmetic as an ANGLE and not as a length or a fraction.
+let two_pi = 6.283185307179586;
+let _ = check "orbit.a_full_turn_of_yaw_comes_back"
+  (near3 (eye_of (Frame.orbit_turn o_base two_pi 0.0)) o_eye);
+
+// Zoom moves the eye ALONG THE VIEW RAY and changes nothing else. Two separate
+// claims, because a zoom that also rotated would satisfy the distance one alone.
+let o_far = Frame.orbit_zoom o_base 2.0;
+let e_far = eye_of o_far;
+let dir_of = fn (e: v3) -> V3.normalize (V3.sub e o_ctr);
+let _ = check "orbit.zoom_scales_the_distance"
+  (near_ (V3.length (V3.sub e_far o_ctr)) (2.0 * V3.length (V3.sub o_eye o_ctr)));
+let _ = check "orbit.zoom_leaves_the_direction_alone"
+  (near3 (dir_of e_far) (dir_of o_eye));
+
+// Pan and pan back. The centre is what moves, so this also says pan did not
+// smuggle the change into yaw, pitch or distance.
+let o_panned = Frame.orbit_pan (Frame.orbit_pan o_base 0.3 (0.0 - 0.2)) (0.0 - 0.3) 0.2;
+let (_py, _pp, _pd, p_ctr) = o_panned;
+let _ = check "orbit.pan_there_and_back_returns_the_centre" (near3 p_ctr o_ctr);
+// And pan MUST actually move it -- the property above passes for a pan that does
+// nothing at all.
+let (_qy, _qp, _qd, q_ctr) = Frame.orbit_pan o_base 0.3 0.0;
+let _ = check "orbit.pan_moves_the_centre" (not (near3 q_ctr o_ctr));
+
+// VERTICAL. Asking for pitch far beyond it must come back clamped, on both sides,
+// since a clamp can be written for one side only.
+let o_pole = Frame.orbit_turn o_base 0.0 99.0;
+let (_zy, pole_pitch, _zd, _zc) = o_pole;
+let _ = check "orbit.pitch_is_held_inside_vertical" (pole_pitch < 1.5708 && pole_pitch > 1.5);
+let o_neg = Frame.orbit_turn o_base 0.0 (0.0 - 99.0);
+let (_ny, neg_pitch, _nd, _nc) = o_neg;
+let _ = check "orbit.the_other_side_is_held_too" (neg_pitch > 0.0 - 1.5708 && neg_pitch < 0.0 - 1.5);
+
+// WHAT THE CLAMP IS FOR, asserted directly. There were two properties here asking
+// whether the camera and its matrix stay finite at the pole, on the reasoning that
+// `look_at` degenerates when the view direction is parallel to its world up.
+// BOTH WERE VACUOUS: measured, no pitch produces a NaN at all -- `cos (pi/2)` in
+// double is 6.1e-17 rather than zero, so the basis never actually collapses -- and
+// they passed with the clamp deleted, which is how they were caught.
+//
+// What the clamp prevents is the camera TUMBLING over the top: past vertical the
+// cosine turns negative and the eye's horizontal offset flips sign, swinging it to
+// the opposite azimuth, so the view inverts and a drag reverses meaning. That is
+// what this asks, and it fails without the clamp.
+let horiz_sign = fn (o) ->
+  let e = eye_of o in
+  let (_hy, _hp, _hd, hc) = o in
+  if e.x - hc.x > 0.0 then 1 else 0 - 1;
+// THE AMOUNTS ARE CHOSEN TO LAND JUST PAST VERTICAL, and that took a correction.
+// The first version reused the +-99 rad states above, and only the downward one
+// failed when the clamp was deleted: the base pitch is 0.5404, so +99 rad wraps to
+// 5.29 rad where the cosine is +0.56 again -- past vertical many times over and
+// back on the near side by luck. An input has to be checked for whether it
+// discriminates, not just for whether it is extreme.
+//
+// Base pitch 0.5404, so +1.1 reaches 1.6404 rad (94 degrees) and -2.2 reaches
+// -1.6596 (-95 degrees). Both are just past vertical and neither wraps.
+let o_near = Frame.orbit_turn o_base 0.0 0.3;
+let o_over_up = Frame.orbit_turn o_base 0.0 1.1;
+let o_over_dn = Frame.orbit_turn o_base 0.0 (0.0 - 2.2);
+let _ = check "orbit.a_turn_past_vertical_does_not_swing_to_the_other_side"
+  (horiz_sign o_over_up == horiz_sign o_near);
+let _ = check "orbit.a_turn_past_the_bottom_does_not_either"
+  (horiz_sign o_over_dn == horiz_sign o_near);
+
+// Zoom has a floor for the same reason the pitch has a limit, reached from the
+// other side: at distance 0 the eye sits on the centre and `look_at` has no
+// direction to build a basis from.
+//
+// ASSERTED AS "IT STOPS CHANGING, EXACTLY", and it took two tries to write a
+// version that a missing floor can fail:
+//
+//   1. "the distance stays above zero" -- 40 tenfold reductions reach 1e-40,
+//      which is above zero. Passed with the floor DELETED.
+//   2. "two different amounts of zooming end up near each other" -- `near_` is
+//      an ABSOLUTE tolerance of 0.01, and near 1e-40 every pair of numbers is
+//      within it. Also passed with the floor deleted.
+//
+// So the comparison is exact equality. Two clamped values are the same double;
+// two unclamped ones differ by a factor of ten. Absolute tolerances say nothing
+// about numbers that have collapsed towards zero, which is the whole subject
+// here.
+let rec zoom_in = fn (o) -> fn (k: int) -> if k == 0 then o else zoom_in (Frame.orbit_zoom o 0.1) (k - 1);
+let (_fy, _fp, floor_d, _fc) = zoom_in o_base 40;
+let (_gy, _gp, floor_d2, _gc) = zoom_in o_base 41;
+let _ = check "orbit.zooming_in_forever_reaches_a_floor_and_stays"
+  (floor_d > 0.0 && floor_d == floor_d2);
+let floor_eye = eye_of (zoom_in o_base 40);
+let _ = check "orbit.at_the_zoom_floor_the_camera_is_still_finite"
+  (floor_eye.x == floor_eye.x && floor_eye.y == floor_eye.y && floor_eye.z == floor_eye.z);
+
 let n = vec_len fails;
 print (if n == 0 then "render_props: ok" else "render_props: " ++ str_of_int n ++ " FAILED")

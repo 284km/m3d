@@ -1,6 +1,10 @@
 // view.mere — the renderer in a window.
 //
-//   m3d-view <file.gltf|file.glb> [--size N] [--time t] [--anim i] [--check]
+//   m3d-view <file.gltf|file.glb> [--size N] [--time t] [--anim i]
+//             [--orbit yaw,pitch,dist] [--check] [--out x.png]
+//
+// Controls: drag to orbit, shift-drag to pan, +/- to zoom, arrows to orbit by
+// keyboard, r to return to the auto framing, Escape or the close button to quit.
 //
 // A SEPARATE ENTRY POINT FROM main.mere, and that is the point rather than an
 // accident. The window declares SDL2 externs and only the C backend emits them,
@@ -45,6 +49,17 @@ let anim = match find_flag argv "--anim" with | None -> 0 | Some v -> int_of_str
 let check_only = has_flag argv "--check";
 let out = find_flag argv "--out";
 
+// `--orbit yaw,pitch,dist` -- degrees and a multiple of the auto-framed distance,
+// the same spelling `m3d --orbit` takes, so the gate can render the same viewpoint
+// through both entry points and compare them.
+let orbit_flag = match find_flag argv "--orbit" with
+                 | None -> None
+                 | Some v ->
+                   match str_split v "," with
+                   | Cons (a, Cons (b2, Cons (c, Nil))) ->
+                     Some (float_of_str a, float_of_str b2, float_of_str c)
+                   | _ -> fail "m3d-view: --orbit wants three numbers, as yaw,pitch,dist";
+
 let d = Gltf.load path;
 let _ = Gltf.check_supported d;
 
@@ -60,10 +75,32 @@ let bg_r = 26;
 let bg_g = 26;
 let bg_b = 30;
 
+let bgv = v3 { x = float_of_int bg_r, y = float_of_int bg_g, z = float_of_int bg_b };
+let aspect = 1.0;
+let ast = Scene.anim_state_of d time anim;
+let autocam = Frame.auto_camera_at d aspect ast;
+
+// The orbit state the window starts from, and it is DERIVED from the auto camera
+// rather than invented, so the window opens on the frame the still renderer would
+// have produced.
+let (a_eye, a_ctr, _a_th, _a_zn, _a_zf, _a_vp) = autocam;
+let o_start = match orbit_flag with
+              | None -> Frame.orbit_of a_eye a_ctr
+              | Some (oy, op, od) -> Frame.orbit_of_flag autocam oy op od;
+
+let render_at = fn (o) ->
+  Render.one_frame_cam d size size true bgv time anim (Frame.orbit_framed o aspect autocam);
+
+// WITH NO `--orbit`, THE FRAME COMES FROM THE UNTOUCHED AUTO PATH -- not from
+// decomposing that camera into angles and rebuilding it. The round trip through
+// atan2/sin/cos is correct to about 1e-16 and NOT to the bit, and going through it
+// would move every pinned reference number in scripts/ref/pinned.txt by a hair for
+// no reason at all. The interactive loop picks up `o_start` from the round trip the
+// moment anything is dragged, which is where a 1e-16 difference belongs.
 let (t, depth, drawn, eye, ctr, th, zn, zf) =
-  Render.one_frame_anim d size size true
-    (v3 { x = float_of_int bg_r, y = float_of_int bg_g, z = float_of_int bg_b })
-    time anim;
+  match orbit_flag with
+  | None -> Render.one_frame_anim d size size true bgv time anim
+  | Some _ -> render_at o_start;
 
 let _ = print ("primitives " ++ str_of_int drawn ++ " size " ++ str_of_int size);
 
@@ -157,18 +194,108 @@ let code =
                  ++ str_of_int (bytebuf_get t.color (o + 2))) in
           1
     else
-      // Wait for the window to be closed. Nothing moves yet -- orbit and zoom are
-      // the next slice -- so the loop only has to notice Quit and Escape.
-      let rec loop = fn (k: int) ->
-        if k > 100000000 then ()
-        else
-          // 16 ms, so an idle window is not a busy loop. Nothing moves yet — orbit is
-          // the next slice — so the only events that matter are Quit and Escape.
-          match Window.poll 16 with
-          | Quit -> ()
-          | KeyDown c -> if c == 27 then () else loop (k + 1)
-          | _ -> loop (k + 1) in
-      let _ = loop 0 in
+      // THE INTERACTIVE LOOP. Every camera decision is a call into `Frame`, which is
+      // arithmetic that test/render_props.mere asserts without a display; what is
+      // left here is turning events into those calls, and that part no gate can
+      // reach. Keeping the split at exactly that line is the point.
+      //
+      // WHAT THE EVENT SOURCE DOES NOT GIVE US, read out of the packing rather than
+      // assumed: a mouse event carries x and y and NOT WHICH BUTTON, and no event
+      // carries modifier state. So "is a drag in progress" and "is shift held" are
+      // tracked here from Down/Up pairs, and shift-drag stands in for the middle
+      // button nobody can see. There is also no wheel event, so zoom is on keys.
+      let lshift = 1073742049 in
+      let rshift = 1073742053 in
+      let k_left = 1073741904 in
+      let k_right = 1073741903 in
+      let k_up = 1073741906 in
+      let k_down = 1073741905 in
+
+      // The result of `show` is CHECKED and not discarded. It returns false when the
+      // canvas does not fit the block the window was opened with, which cannot happen
+      // while the size is fixed -- and if the size ever does change under us, the
+      // alternative to saying so is a window that silently stops updating and looks
+      // frozen for no visible reason.
+      let show_it = fn (o) ->
+        let (t2, _d2, _dr, _e2, _c2, _t3, _z1, _z2) = render_at o in
+        if Window.show win (canvas { w = t2.w, h = t2.h, px = t2.color }) bg then ()
+        else print "m3d-view: the window refused a frame — the picture is no longer being updated" in
+
+      // A step per pixel dragged, and per key press. 0.008 rad is about half a
+      // degree, so a drag across a 512-pixel window is a bit over a full turn.
+      let per_px = 0.008 in
+      let per_key = 0.06 in
+
+      // REDRAWN ONLY WHEN THE CAMERA MOVED, which is why every branch below either
+      // calls `show_it` or does not. A million-triangle model takes half a second a
+      // frame, so re-rendering on every event -- the mouse moves that arrive while
+      // nothing is held, above all -- would make the window feel broken, and it would
+      // be nobody's fault but this loop's. 16 ms of wait per poll keeps an idle window
+      // off the CPU.
+      let rec loop = fn (o) -> fn (drag: bool) -> fn (lx: int) -> fn (ly: int) ->
+                     fn (shift: bool) ->
+        match Window.poll 16 with
+        | Quit -> ()
+        | KeyDown c ->
+          if c == 27 then ()
+          else if c == lshift || c == rshift then loop o drag lx ly true
+          else if c == 114 then
+            let o2 = Frame.orbit_of a_eye a_ctr in
+            let _ = show_it o2 in loop o2 drag lx ly shift
+          else if c == 43 || c == 61 then
+            let o2 = Frame.orbit_zoom o 0.9 in
+            let _ = show_it o2 in loop o2 drag lx ly shift
+          else if c == 45 then
+            let o2 = Frame.orbit_zoom o 1.1 in
+            let _ = show_it o2 in loop o2 drag lx ly shift
+          else if c == k_left then
+            let o2 = Frame.orbit_turn o (0.0 - per_key) 0.0 in
+            let _ = show_it o2 in loop o2 drag lx ly shift
+          else if c == k_right then
+            let o2 = Frame.orbit_turn o per_key 0.0 in
+            let _ = show_it o2 in loop o2 drag lx ly shift
+          else if c == k_up then
+            let o2 = Frame.orbit_turn o 0.0 per_key in
+            let _ = show_it o2 in loop o2 drag lx ly shift
+          else if c == k_down then
+            let o2 = Frame.orbit_turn o 0.0 (0.0 - per_key) in
+            let _ = show_it o2 in loop o2 drag lx ly shift
+          else loop o drag lx ly shift
+        | KeyUp c ->
+          if c == lshift || c == rshift then loop o drag lx ly false
+          else loop o drag lx ly shift
+        | MouseDown (mx, my) -> loop o true mx my shift
+        | MouseUp (_mx, _my) -> loop o false lx ly shift
+        | MouseMove (mx, my) ->
+          if not drag then loop o drag mx my shift
+          else
+            let dx = float_of_int (mx - lx) in
+            let dy = float_of_int (my - ly) in
+            // Screen y grows DOWNWARD, and the two interactions take OPPOSITE signs
+            // on it -- which looks like a bug and is not. Both are asked to make the
+            // model follow the drag, and they move different things to do it: turning
+            // moves the CAMERA, so a drag down lowers the pitch; panning moves the
+            // TARGET, so a drag down raises the centre. Written out because "both
+            // negate dy" is the plausible-looking thing to assume, and it is wrong.
+            let o2 = if shift then Frame.orbit_pan o (0.0 - dx * 0.002) (dy * 0.002)
+                              else Frame.orbit_turn o (0.0 - dx * per_px) (0.0 - dy * per_px) in
+            let _ = show_it o2 in loop o2 drag mx my shift
+        // NAMED, because this window is not resizable and the frame buffer is a fixed
+        // size, so a size change is a situation this cannot serve -- and the
+        // alternative to saying so is a window that silently stops updating. The
+        // window is created without SDL_WINDOW_RESIZABLE, so a drag cannot cause it;
+        // SDL_WINDOW_ALLOW_HIGHDPI is set, so moving between two displays with
+        // different scales can.
+        | Resized (rw2, rh2) ->
+          let _ = print ("m3d-view: the window became " ++ str_of_int rw2 ++ "x"
+                         ++ str_of_int rh2 ++ ", which this fixed-size frame cannot "
+                         ++ "follow — the picture stays at " ++ str_of_int size ++ "x"
+                         ++ str_of_int size) in
+          loop o drag lx ly shift
+        | _ -> loop o drag lx ly shift in
+
+      let _ = print "m3d-view: drag to orbit, shift-drag to pan, +/- to zoom, arrows to turn, r to reset, Escape to quit" in
+      let _ = loop o_start false 0 0 false in
       let _ = Window.close win in
       let _ = print "m3d-view: closed" in
       0;

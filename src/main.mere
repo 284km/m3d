@@ -6,6 +6,7 @@
 // disk.
 //
 //   m3d <file.gltf|file.glb> [--out <file.png>] [--size <pixels>] [--bg R,G,B]
+//       [--time <seconds>] [--anim <n>] [--orbit yaw,pitch,dist] [--no-light]
 //       [--time <seconds>] [--anim <index>]
 //
 // It prints the camera it computed. Most glTF sample models carry no camera, so
@@ -34,7 +35,7 @@ let rec first_positional = fn (xs) ->
     else Some a;
 
 let path = match first_positional argv with
-  | None -> fail "usage: m3d <file.gltf|file.glb> [--out out.png] [--size 512] [--bg 26,26,30] [--time 0]"
+  | None -> fail "usage: m3d <file.gltf|file.glb> [--out out.png] [--size 512] [--bg 26,26,30] [--time 0] [--anim 0] [--orbit 0,0,1]"
   | Some p -> p;
 let out = match find_flag argv "--out" with | None -> "out.png" | Some v -> v;
 let size = match find_flag argv "--size" with | None -> 512 | Some v -> int_of_str v;
@@ -76,8 +77,33 @@ let time = match find_flag argv "--time" with
 // "all at once" is not a well-defined answer, because a document's animations can
 // be alternatives that drive the same bones.
 let anim = match find_flag argv "--anim" with | None -> 0 | Some v -> int_of_str v;
+
+// `--orbit yaw,pitch,dist` moves the camera off the auto framing: yaw and pitch
+// in DEGREES, dist as a MULTIPLE of the auto-framed distance. Without it the
+// camera is framed from the scene's bounds as before.
+//
+// IT EXISTS SO THE ORBIT CAN BE CHECKED. The window drives the same camera from a
+// mouse, and a mouse is not something a gate can hold -- so the same state is
+// reachable from a command line, and `screen_check.sh` compares an orbited window
+// against an orbited file. This is the same move `--time` was for animation: a
+// path with no way in but a person is a path with no gate.
+let orbit_flag = match find_flag argv "--orbit" with
+                 | None -> None
+                 | Some v ->
+                   match str_split v "," with
+                   | Cons (a, Cons (b2, Cons (c, Nil))) ->
+                     Some (float_of_str a, float_of_str b2, float_of_str c)
+                   | _ -> fail "m3d: --orbit wants three numbers, as yaw,pitch,dist";
+
 let (t, depth, drawn, eye, ctr, th, zn, zf) =
-  Render.one_frame_anim d size size want_light bg time anim;
+  match orbit_flag with
+  | None -> Render.one_frame_anim d size size want_light bg time anim
+  | Some (oy, op, od) ->
+    let aspect = float_of_int size / float_of_int size in
+    let ast = Scene.anim_state_of d time anim in
+    let auto = Frame.auto_camera_at d aspect ast in
+    let o = Frame.orbit_of_flag auto oy op od in
+    Render.one_frame_cam d size size want_light bg time anim (Frame.orbit_framed o aspect auto);
 
 // The camera, in the form a reference renderer wants: a position, a target, the
 // tangent of the half-angle (not the angle -- the tangent is what the

@@ -119,22 +119,55 @@ done
 # size in the right background colour, and it silently answers a different question.
 #
 # The strip is checked HERE TOO, and a frame without one is RETAKEN. Headless Chrome
-# occasionally screenshots before the compositor has drawn, on no particular model and
-# not reproducibly, and that is the browser rather than anything under test. Retrying is
-# fine; retrying quietly is not, so each retake prints. A run that never gets a finished
-# frame fails and names the model.
+# occasionally screenshots before the compositor has drawn, and that is the browser
+# rather than anything under test. Retrying is fine; retrying quietly is not, so each
+# retake prints. A run that never gets a finished frame fails and names the model.
+#
+# THE BUDGET ESCALATES ACROSS ATTEMPTS -- 20 s, then 60, then 120 -- and it used to be
+# a flat 20 s for all four. Both halves of that were measured.
+#
+# 20 s ALONE IS TOO SHORT FOR AT LEAST ONE MODEL. This comment used to say the misses
+# were "on no particular model and not reproducibly"; `NormalTangentTest` then failed on
+# two consecutive runs, and by hand each of its three variants misses at 20 s and
+# finishes at 90 s. Four retries against a deterministic wall are four identical
+# failures, which is why retrying never helped and why the gate said "never produced a
+# finished frame" about a page that simply needed longer.
+#
+# A LARGER BUDGET IS FREE WHEN THE PAGE FINISHES AND COSTS THE WHOLE OF IT WHEN IT DOES
+# NOT. The budget is a CAP on virtual time rather than a wait, so Chrome exits as soon as
+# the page goes idle: `Box` takes 1.14 s at 20 s and 1.10-1.16 s at 120 s, timed three
+# times each. But a frame that never finishes burns the full budget, and then the retry
+# loop multiplies it -- a flat 120 s meant 8 minutes on one frame that was never going
+# to work. Escalating keeps the common case at 20 s, clears an ordinary one-off flake
+# cheaply on the second attempt, and reaches 120 s only for a page that has already
+# missed twice.
+#
+# WHAT THIS STILL DOES NOT FIX, so that a future reader does not mistake it for solved:
+# under heavy machine load `NormalTangentTest` has missed all four attempts even at
+# 120 s. The gate then refuses to report a number and names the model, which is the
+# right behaviour, but it means a red line here can still be the machine rather than the
+# renderer. Check the load before believing it.
+#
+# The first green run under the escalation printed exactly the shape this predicts:
+# `NormalTangentMirrorTest.patched` missed at 20 s and finished at 60; `.nomip` of
+# NormalTangentTest missed 20 and 60 and finished at 120; and its `.stock` missed all
+# of 20, 60 and 120 and finished on the fourth attempt. So both things are real at
+# once -- a budget that was too short, AND ordinary flake on top of it -- which is why
+# the retries stay and why they print what they were given.
 shoot() { # url out
   k=0
-  while [ "$k" -lt 4 ]; do
+  for budget in 20000 60000 120000 120000; do
     rm -f "$2"
     "$CHROME" --headless --no-sandbox --disable-gpu --use-angle=swiftshader \
       --enable-unsafe-swiftshader --hide-scrollbars --force-device-scale-factor=1 \
       --run-all-compositor-stages-before-draw \
-      --window-size="$SIZE,$((SIZE + 4))" --virtual-time-budget=20000 \
+      --window-size="$SIZE,$((SIZE + 4))" --virtual-time-budget="$budget" \
       --screenshot="$2" "$1" >/dev/null 2>&1
     if [ -s "$2" ] && python3 scripts/ref/finished.py "$2" "$SIZE"; then return 0; fi
     k=$((k + 1))
-    echo "  (retaking $(basename "$2"): the browser screenshotted before three.js drew)"
+    # THE BUDGET IS PRINTED, because "retaking" four times says nothing about whether
+    # the page is flaky or simply slow, and those want different fixes.
+    echo "  (retaking $(basename "$2") at ${budget}ms: the browser screenshotted before three.js drew)"
   done
   return 1
 }
