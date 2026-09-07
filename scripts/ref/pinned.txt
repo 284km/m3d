@@ -1,0 +1,59 @@
+# Pinned agreement with three.js, at 192x192. scripts/reference_check.sh renders each
+# model with m3d and twice with three.js -- stock, and patched to glTF's normative BRDF
+# (?gltfbrdf=1) -- and holds these numbers.
+#
+#   model   IoU   MAE-vs-stock   MAE-vs-glTF-BRDF   %-of-shared-pixels-that-differ
+#
+# IoU is the gate: same geometry, same transforms, same camera, so which pixels are
+# covered has one answer. It is under 1.000 only where a curved silhouette makes the two
+# rasterizers round a boundary pixel differently.
+#
+# MAE-vs-stock is RECORDED, not designed. Stock three.js departs from glTF's appendix in
+# three ways this renderer deliberately does not follow, and each shows up here as a
+# specific, explained number rather than as noise:
+#
+#   * MULTIPLE-SCATTERING COMPENSATION in the direct specular term (BRDF_GGX_Multiscatter,
+#     off a DFG lookup table). Single-scatter GGX loses about 45% of its energy at
+#     roughness 1, so a rough metal is nearly twice as bright in three.js. This is the
+#     whole of Triangle's 36.6 and SimpleMeshes' 36.9 -- both use glTF's default material,
+#     which is metallic 1, rough 1 -- and much of MetalRoughSpheres'.
+#   * THE MISSING (1 - F) in front of the diffuse lobe, which makes every dielectric about
+#     4% brighter than the specification asks. On Box that is +3 in the red channel and
+#     exactly nothing in green and blue, because they are zero there.
+#   * F0 INTERPOLATED TOWARD THE BASE COLOUR instead of glTF's mix of two whole BRDFs.
+#     That one is not a one-line patch, so it stays in the right-hand columns too, and it
+#     is what MetalRoughSpheres' remaining 8.8 is: a grid that sweeps metallic across
+#     exactly the range where the shortcut and the specification disagree.
+#
+# The last two columns have the first two patched out, and are where the claim lives.
+# THE SHARE OF DIFFERING PIXELS IS THE SHARP NUMBER, and the mean is here for scale. A
+# mean of 0.00 was what this file first pinned as "byte-identical" on three models, and
+# only one of them was: the other two differed on 0.5% and 0.09% of their pixels by a
+# single bit, which two decimal places of a mean cannot show. A percentage cannot round
+# its way out of being wrong.
+#
+#   TRIANGLE IS BYTE-IDENTICAL -- every pixel, every channel -- and its 0 is held with no
+#   slack at all, because the entire value of such a pin is that one changed pixel breaks
+#   it. It is the strongest statement this project can make about its shading: an
+#   independent renderer, handed the same file and the same camera and asked for the same
+#   BRDF, produces the same bytes.
+#
+#   SimpleMeshes (0.09%), BoxInterleaved (0.53%), BoxVertexColors (6.4%) and Box (9.6%)
+#   differ by ONE least-significant bit, spread over the interior rather than the
+#   silhouette: a float32 GPU and a float64 CPU rounding the same shading to the same
+#   byte and disagreeing by one. The means -- 0.001 to 0.065 -- are the scale of it.
+#
+#   BoxTextured (25%), Duck (25%) and Cube (99.7%) are MINIFICATION. three.js builds
+#   mipmaps; m3d has none and samples the full-resolution image, so a texture squeezed
+#   into fewer pixels than it has texels aliases. These are the only entries here that
+#   are a missing feature of THIS renderer rather than a divergence of the other one.
+#
+Box                            1.000   1.0    0.065   9.57
+BoxInterleaved                 1.000   5.9    0.003   0.53
+BoxTextured                    1.000   4.8    3.136   25.03
+BoxVertexColors                1.000   17.3   0.027   6.39
+Cube                           1.000   8.7    8.883   99.66
+Duck                           0.998   2.1    0.507   24.83
+MetalRoughSpheresNoTextures    0.990   10.7   8.790   75.36
+SimpleMeshes                   0.999   36.9   0.001   0.09
+Triangle                       0.999   36.6   0.000   0.00

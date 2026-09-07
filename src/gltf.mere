@@ -202,6 +202,46 @@ module Gltf {
         if str_len uri >= 5 && str_eq (substring uri 0 5) "data:"
         then fail "gltf: a data: URI needs base64, which this reader does not have yet (glTF-Embedded is out of scope)"
         else read_bytes (d.base ++ uri);
+
+  // The bytes of image `i`. glTF gives an image EITHER a `uri` -- a file
+  // beside the document -- OR a `bufferView`, which is how a GLB carries its
+  // textures with no second file. Both are here because a reader with only the
+  // first passes on this corpus, which is all .gltf, and fails on every .glb
+  // anyone actually ships.
+  let image = fn (d: doc) -> fn (i: int) ->
+    match J.at (J.req d.j "images") i with
+    | None -> fail ("gltf: no image " ++ str_of_int i)
+    | Some im ->
+      match J.field im "uri" with
+      | Some u ->
+        let uri = J.str_ u in
+        if str_len uri >= 5 && str_eq (substring uri 0 5) "data:"
+        then fail "gltf: an image in a data: URI needs base64, which this reader does not have yet"
+        else read_bytes (d.base ++ uri)
+      | None ->
+        match J.field im "bufferView" with
+        | None -> fail ("gltf: image " ++ str_of_int i ++ " has neither a uri nor a bufferView")
+        | Some bvi ->
+          let bv = match J.at (J.req d.j "bufferViews") (J.int_ bvi) with
+                   | None -> fail "gltf: image names a bufferView that is not there"
+                   | Some x -> x in
+          let buf = buffer d (J.int_or bv "buffer" 0) in
+          let off = J.int_or bv "byteOffset" 0 in
+          let len = J.int_ (J.req bv "byteLength") in
+          if off + len > bytes_len buf
+          then fail ("gltf: image " ++ str_of_int i ++ " runs past the end of its buffer")
+          else bytes_slice buf off len;
+
+  // How an image calls itself, for an error message. A refusal that says "not a
+  // PNG" without saying WHICH image sends the reader back to the file to guess.
+  let image_name = fn (d: doc) -> fn (i: int) ->
+    let tag = "images[" ++ str_of_int i ++ "]" in
+    match J.at (J.req d.j "images") i with
+    | None -> tag
+    | Some im ->
+      match J.field im "uri" with
+      | Some u -> tag ++ " " ++ J.str_ u
+      | None -> tag ++ " " ++ J.str_or im "mimeType" "(no uri, no mimeType)";
 }
 
 // ---------------------------------------------------------------------------

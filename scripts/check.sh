@@ -21,4 +21,11 @@ case "$out" in
 esac
 
 sh "$ROOT/scripts/northstar_check.sh" || exit 1
+
+# The one gate that compares this renderer against something other than itself. It
+# SKIPS ITSELF when the reference is not installed -- Chrome, Pillow and three.js are
+# not build dependencies of a Mere program -- and says which piece is missing, so a
+# green run is not evidence that this column ran. Its own line reports how many models
+# it compared.
+sh "$ROOT/scripts/reference_check.sh" || exit 1
 echo "check: ok"

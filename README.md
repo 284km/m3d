@@ -279,6 +279,19 @@ RGBA and the 16-bit path had no coverage. `scripts/gen_test_png.py` writes small
 images that reach them, with a **non-identity palette** so a decoder that used
 the index as the colour would fail rather than pass.
 
+The renderer reaches this module through `Render.base_tex`, which resolves a
+primitive's `baseColorTexture` — texture, sampler, image — and decodes it. An
+image is read either from a file beside the document or from a range of the
+binary chunk, because a `.glb` carries its textures the second way and a reader
+with only the first passes on this corpus and fails on everything anyone ships.
+`minFilter` is read and **ignored**: there are no mipmaps, so a texture squeezed
+into fewer pixels than it has texels aliases, and that is the largest remaining
+disagreement with the reference renderer rather than something hidden.
+
+**Until the reference gate went in, this module had no caller at all.** It was
+complete, it had an oracle, and `render.mere` sampled nothing — so the duck
+rendered white and every gate was green. See the fourth column below.
+
 ## The north star
 
 `scripts/northstar_check.sh` asks the question the project exists for: given a
@@ -342,16 +355,78 @@ The regression test in mgz is worth a look for its shape: **a sweep of random
 byte strings does not reproduce the bug**, measured, so the 3,104 bytes that a
 real caller produced are committed as a fixture instead.
 
+## The fourth column: agreement with three.js
+
+Every other gate here compares this renderer against itself, against a second
+reading of the same specification, or against exact arithmetic.
+`scripts/reference_check.sh` points **three.js** at the same glTF file and
+compares the pictures. (`scripts/ref_setup.sh` fetches a pinned three.js; the
+gate skips itself, by name, if that or Chrome or Pillow is missing.)
+
+**It is handed the camera rather than asked to guess it.** Most sample models
+carry no camera, so a viewer invents one from the scene's bounds, and two
+viewers will not invent the same one. This program prints the camera it
+computed — as the *tangent* of the half angle, so not even a `tan` sits between
+the two — and the reference is given those numbers. Otherwise the gate would be
+measuring two framing heuristics.
+
+**It found a real hole immediately.** The texture module was complete, had its
+own PIL oracle, and **nothing called it**: `render.mere` sampled no texture at
+all. Every gate passed, because the silhouette was right and the lighting was
+right and the duck was simply *white*. Base-colour textures are wired in now,
+and glTF images that this reader cannot handle — a `texCoord` other than 0, a
+`data:` URI, a non-PNG — are **refused by name** rather than quietly replaced
+by the material's factor, which is what produced the white duck.
+
+Each model is rendered by the reference **twice**, because stock three.js
+departs from glTF's normative appendix in three ways this renderer deliberately
+does not follow:
+
+- it **compensates for multiple scattering** in the direct specular term, off a
+  DFG lookup table. Single-scatter GGX loses about 45% of its energy at
+  roughness 1, so a rough metal is nearly twice as bright there. That is the
+  whole of `Triangle`'s and `SimpleMeshes`' disagreement — both use glTF's
+  default material, which is metallic 1, rough 1;
+- it **omits the `(1 - F)`** in front of the diffuse lobe, making every
+  dielectric about 4% brighter than the specification asks;
+- it **interpolates F0 toward the base colour** instead of mixing two whole
+  BRDFs, which is the shortcut this project measured at up to 30% wrong and
+  chose not to take.
+
+So the first render is stock — the honest "does it agree with another renderer"
+number, recorded and pinned per model — and the second has the first two of
+those patched back to the appendix. **Against that one, `Triangle` is
+byte-identical: every pixel, every channel.** `SimpleMeshes`, `BoxInterleaved`,
+`BoxVertexColors` and `Box` differ by a single least-significant bit on 0.1% to
+10% of their pixels, which is a float32 GPU and a float64 CPU rounding the same
+shading to the same byte. `BoxTextured`, `Duck` and `Cube` are minification:
+three.js builds mipmaps and this renderer has none. All of it is written down,
+with the numbers, in `scripts/ref/pinned.txt`.
+
+Two things about the gate's shape were learned by breaking it:
+
+**Pinning only against stock three.js would have rewarded a specification
+violation.** Deleting glTF's `(1 - F)` from the shading makes this renderer
+*agree more* with stock three.js — `Box` improves from 1.0 to 0.1 — because
+three.js has the same omission. The patched column is what catches it.
+
+**A gate that frames its own output cannot see a bug the framing absorbs.**
+`Duck`'s root node is a uniform scale of 0.01. Make the loader ignore node
+matrices and the duck becomes a hundred times bigger — *and the auto-camera
+grows with it, to the pixel*, so this program's own picture is byte-identical
+under that bug. Only a second renderer, handed that hundred-times camera while
+drawing the correctly scaled duck, can see it. It comes out as IoU 0.000.
+
+The gate also carries its own proof of life: the reference page paints a
+four-pixel strip below the canvas *after* three.js returns, and a screenshot
+without it is retaken and then refused. Headless Chrome sometimes screenshots
+before the compositor has drawn, and what it writes is a valid PNG of the right
+size in the right background colour — an answer to a different question, which
+this gate produced once before the strip existed.
+
 ## What is not here yet
 
-The fourth column of the north-star table — agreement with a reference
-renderer. three.js reads the same files and the camera this program prints is
-exactly what it needs, so the instrument has been ready since the loader
-landed, and the corpus now has curved geometry in it (`Duck`, and
-`MetalRoughSpheresNoTextures`, which sweeps metallic and roughness across a
-grid — a million triangles). What is left is the comparison itself.
-
-Also owed: near-plane clipping (a triangle with any vertex behind the eye is
+Owed: near-plane clipping (a triangle with any vertex behind the eye is
 dropped whole, which is right for every model in the corpus and wrong for a
 camera inside geometry), JPEG, the window, animation and skinning, and the GPU
 path. Like the rasterizer, the texture and render paths are compared across two

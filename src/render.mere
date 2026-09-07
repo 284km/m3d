@@ -16,6 +16,13 @@ import "./raster.mere";
 import "./shade.mere";
 import "./texture.mere";
 
+// A texture as a material slot uses it: the decoded image plus the sampler
+// state that says how to read outside [0,1] and whether to blend. The sampler
+// is NOT folded into `texture`, because the same image can be referenced by two
+// textures with different wrap modes and decoding it twice to say so would be a
+// lie about what the file contains.
+type texslot = { img: texture, ws: int, wt: int, mag: int };
+
 module Scene {
   // A node's local transform: `matrix` if it has one, otherwise TRS. glTF says
   // a node has one or the other and never both, and the defaults are not all
@@ -237,6 +244,63 @@ module Render {
                  er = er, eg = eg, eb = eb,
                  alpha_mode = mode, cutoff = J.flt_or m "alphaCutoff" 0.5 };
 
+  // A primitive's baseColor texture, decoded, or None when it has none.
+  //
+  // THE IMAGE IS DECODED HERE, ONCE PER PRIMITIVE PER FRAME. Two primitives
+  // sharing one texture decode it twice, and a second frame decodes everything
+  // again. That is wrong for anything animated and invisible for a still, and
+  // the fix is a cache keyed on the image index -- owed, and named here rather
+  // than discovered by someone timing a viewer.
+  //
+  // Everything this cannot do is REFUSED BY NAME. Silently rendering the
+  // material's factor instead is what this renderer did before, and the result
+  // was a white duck that no gate objected to: the silhouette was right, the
+  // lighting was right, and the model was simply the wrong colour. Only a
+  // second renderer looking at the same file caught it.
+  let base_tex = fn (d: doc) -> fn (prim: Json.json) ->
+    match J.field prim "material" with
+    | None -> None
+    | Some mi ->
+      let m = match J.at (J.req d.j "materials") (J.int_ mi) with
+              | None -> fail "gltf: primitive names a material that is not there"
+              | Some x -> x in
+      let pbr = match J.field m "pbrMetallicRoughness" with
+                | None -> Json.JObj Nil | Some x -> x in
+      match J.field pbr "baseColorTexture" with
+      | None -> None
+      | Some bct ->
+        // Only TEXCOORD_0 is read into the rasterizer, so a slot pointing at
+        // TEXCOORD_1 would silently sample the wrong set.
+        let _ = if J.int_or bct "texCoord" 0 != 0
+                then fail ("gltf: baseColorTexture uses TEXCOORD_"
+                           ++ str_of_int (J.int_or bct "texCoord" 0)
+                           ++ ", and this renderer carries only TEXCOORD_0")
+                else () in
+        let ti = J.int_ (J.req bct "index") in
+        let tx = match J.at (J.req d.j "textures") ti with
+                 | None -> fail ("gltf: no texture " ++ str_of_int ti)
+                 | Some x -> x in
+        let si = J.int_ (J.req tx "source") in
+        // A sampler is optional; glTF leaves the defaults to the runtime, and
+        // these are the ones three.js and every other viewer picked: repeat,
+        // and linear magnification.
+        let (ws, wt, mag) =
+          match J.field tx "sampler" with
+          | None -> (Wrap.repeat_, Wrap.repeat_, 9729)
+          | Some sj ->
+            match J.at (J.req d.j "samplers") (J.int_ sj) with
+            | None -> fail "gltf: texture names a sampler that is not there"
+            | Some sm -> (J.int_or sm "wrapS" Wrap.repeat_,
+                          J.int_or sm "wrapT" Wrap.repeat_,
+                          J.int_or sm "magFilter" 9729) in
+        // MINIFICATION IS NOT IMPLEMENTED. `minFilter` is read and ignored:
+        // there are no mipmaps, so a texture squeezed into fewer pixels than it
+        // has texels is point-or-bilinear sampled at full resolution and
+        // aliases. It is the largest remaining disagreement with the reference
+        // renderer on Duck, and it is recorded there rather than hidden.
+        Some (texslot { img = Tex.of_png_data (Gltf.image d si) (Gltf.image_name d si),
+                        ws = ws, wt = wt, mag = mag });
+
   // SHADING IS PER VERTEX HERE, and that is a first slice rather than the
   // answer. The rasterizer interpolates a colour, so a normal cannot reach the
   // pixel; a sphere lit this way shows its triangles at the silhouette and its
@@ -281,6 +345,7 @@ module Render {
                 | Some pos ->
                   let nrm = attr d prim "NORMAL" in
                   let mat = material_of d prim in
+                  let btex = base_tex d prim in
                   let vcount = vec_len pos / 3 in
                   let idx = indices d prim vcount in
                   let tri = vec_len idx / 3 in
@@ -327,8 +392,23 @@ module Render {
                   // where a vertex happens to be.
                   let shader = fn (wp: v3) -> fn (n: v3) -> fn (u: float) -> fn (vv: float) ->
                                fn (vc: v3) ->
-                    let mat2 = material { br = mat.br * vc.x, bg = mat.bg * vc.y,
-                                          bb = mat.bb * vc.z, ba = mat.ba,
+                    // baseColor is factor * vertex colour * texture, all three
+                    // multiplied in LINEAR light. The texture is sRGB-encoded --
+                    // that is the slot's property and not the file's -- so it is
+                    // decoded on the way in, which `sample_srgb` does with a
+                    // table rather than a `pow`, keeping the four backends
+                    // bit-identical.
+                    let tc =
+                      match btex with
+                      | None -> v4 { x = 1.0, y = 1.0, z = 1.0, w = 1.0 }
+                      | Some ts ->
+                        if ts.mag == 9728
+                        then let (a, b, c, e) = Tex.nearest ts.img ts.ws ts.wt u vv in
+                             v4 { x = Srgb.decode a, y = Srgb.decode b, z = Srgb.decode c,
+                                  w = float_of_int e / 255.0 }
+                        else Tex.sample_srgb ts.img ts.ws ts.wt u vv in
+                    let mat2 = material { br = mat.br * vc.x * tc.x, bg = mat.bg * vc.y * tc.y,
+                                          bb = mat.bb * vc.z * tc.z, ba = mat.ba * tc.w,
                                           metallic = mat.metallic, roughness = mat.roughness,
                                           er = mat.er, eg = mat.eg, eb = mat.eb,
                                           alpha_mode = mat.alpha_mode, cutoff = mat.cutoff } in

@@ -1,0 +1,119 @@
+<!doctype html>
+<!-- The reference render. three.js reads the SAME glTF file and is handed the SAME
+     camera m3d printed, so what is compared is two renderers and not two framing
+     heuristics -- most sample models carry no camera, and two viewers inventing one
+     will not invent the same one.
+
+     Everything that would make the comparison about something else is turned off:
+     antialiasing (m3d has none), tone mapping (m3d has none), and the environment
+     (m3d has a constant ambient term and no image-based lighting). What is left is
+     the geometry, the transforms, and the material. -->
+<html><head><title>LOADING</title><style>html,body{margin:0;background:#1a1a1e}canvas{display:block}
+/* A 4-pixel strip below the canvas, painted a distinctive colour ONLY after the render
+   returns. The viewport is one strip taller than the picture, so a screenshot carries
+   its own proof that it is a finished render and not whatever the page happened to look
+   like when the browser's clock ran out. Without it a blank or half-loaded frame is a
+   valid PNG of the right size, and the gate reads it as an answer -- which happened
+   once, on one model, and did not reproduce, which is the worst way for it to happen. */
+#done{height:4px;background:#1a1a1e}</style>
+<script type="importmap">{"imports":{"three":"./three.module.js","three/addons/":"./jsm/"}}</script>
+</head><body><canvas id="c"></canvas><div id="done"></div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const q = new URLSearchParams(location.search);
+const num = (k) => parseFloat(q.get(k));
+const size = parseInt(q.get('size') || '128', 10);
+
+const canvas = document.getElementById('c');
+canvas.width = canvas.height = size;
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, preserveDrawingBuffer: true });
+renderer.setSize(size, size, false);
+renderer.setPixelRatio(1);
+// m3d writes sRGB bytes and applies no tone map; so must this, or the comparison is
+// about tone mapping.
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.NoToneMapping;
+renderer.setClearColor(0x1a1a1e, 1);
+
+// A DIAGNOSTIC SWITCH, NOT THE DEFAULT. This version of three.js compensates for
+// multiple scattering in its DIRECT specular term -- RE_Direct_Physical calls
+// BRDF_GGX_Multiscatter, which reads a DFG lookup table -- and glTF's normative
+// appendix, which m3d implements, does not. A rough metal loses roughly 45% of its
+// energy to single-scatter GGX, so the two renderers disagree by nearly a factor of two
+// exactly where the surface is metallic and rough, and nowhere else.
+//
+// It diverges in a second place too: glTF's appendix multiplies the diffuse lobe by
+// (1 - F), and three.js does not, so every dielectric comes out about 4% brighter than
+// the specification asks -- which on the red box is +3 in the red channel and nothing
+// anywhere else, because green and blue are zero there.
+//
+// ?gltfbrdf=1 patches both, which turns those two claims into something measurable
+// rather than asserted: if the residual COLLAPSES TO ZERO on the models that use no
+// other unimplemented feature, the attribution is right and the remaining models can be
+// read as "these and only these". The gate pins BOTH numbers. The unpatched one is the
+// honest "does it agree with another renderer" column; the patched one says how much of
+// that gap is these two known choices. A patch that fails to apply is fatal, because a
+// silently unpatched render answers the other question and looks the same.
+if (q.get('gltfbrdf') === '1') {
+  const k = 'lights_physical_pars_fragment';
+  const patch = (from, to) => {
+    const before = THREE.ShaderChunk[k];
+    THREE.ShaderChunk[k] = before.replace(from, to);
+    // A string patch that misses is the worst possible outcome: the page renders,
+    // the number looks like an answer, and it is the answer to the unpatched
+    // question. So a miss is fatal and says so.
+    if (THREE.ShaderChunk[k] === before) {
+      document.title = 'ERR patch did not apply: ' + from.slice(0, 60);
+      throw new Error('patch');
+    }
+  };
+  // (1) Single scattering only, as glTF's appendix specifies.
+  patch('reflectedLight.directSpecular += irradiance * BRDF_GGX_Multiscatter(',
+        'reflectedLight.directSpecular += irradiance * BRDF_GGX(');
+  // (2) The (1 - F) that glTF puts in front of the diffuse lobe and three.js does
+  // not, which makes every dielectric about 4% brighter here than in the spec.
+  patch('reflectedLight.directDiffuse += irradiance * BRDF_Lambert( material.diffuseContribution );',
+        '{ vec3 h_ = normalize( directLight.direction + geometryViewDir );'
+      + '  float vh_ = saturate( dot( geometryViewDir, h_ ) );'
+      + '  float x_ = 1.0 - vh_;'
+      + '  float f_ = 0.04 + 0.96 * x_ * x_ * x_ * x_ * x_;'
+      + '  reflectedLight.directDiffuse += irradiance * BRDF_Lambert( material.diffuseContribution ) * ( 1.0 - f_ ); }');
+}
+
+const scene = new THREE.Scene();
+
+// The camera comes from m3d, in the form that avoids a `tan` between the two: the
+// TANGENT of the half angle, which is what a projection matrix is actually built from.
+const tanHalf = num('th');
+const fovDeg = 2 * Math.atan(tanHalf) * 180 / Math.PI;
+const cam = new THREE.PerspectiveCamera(fovDeg, 1, num('zn'), num('zf'));
+cam.position.set(num('ex'), num('ey'), num('ez'));
+cam.up.set(0, 1, 0);
+cam.lookAt(num('tx'), num('ty'), num('tz'));
+
+// m3d's light: a directional one of intensity 3 travelling along (-0.4,-0.7,-0.6), and
+// a constant ambient of 0.15 times the diffuse albedo. three.js points a DirectionalLight
+// FROM its position TOWARD the origin, so the position is the negated direction.
+const dir = new THREE.DirectionalLight(0xffffff, 3.0);
+dir.position.set(0.4, 0.7, 0.6);
+scene.add(dir);
+
+// THE PI. three.js divides both light terms by pi -- its Lambert BRDF is albedo/pi and
+// its irradiance is colour times intensity. m3d's DIRECT term carries the same 1/pi, so
+// the directional light needs no adjustment; m3d's AMBIENT is a flat 0.15 * albedo with
+// no 1/pi, because it stands in for what is not traced rather than for a light. Handing
+// three.js 0.15 would therefore make it pi times darker there, and the comparison would
+// be measuring a units convention instead of the shading. So the ambient is scaled to
+// land on the same number.
+scene.add(new THREE.AmbientLight(0xffffff, 0.15 * Math.PI));
+
+new GLTFLoader().load(q.get('file'), (g) => {
+  scene.add(g.scene);
+  renderer.render(scene, cam);
+  document.getElementById('done').style.background = 'rgb(0,255,13)';
+  document.title = 'RENDERED';
+}, undefined, (e) => { document.title = 'ERR ' + e; });
+window.onerror = (m) => { document.title = 'ERR ' + m; };
+</script></body></html>

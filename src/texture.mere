@@ -44,12 +44,13 @@ module Wrap {
 }
 
 module Tex {
-  // A PNG as RGBA8. The channel expansion mirrors mpng's `rgb8` and adds the
-  // alpha that one drops, which is what a baseColor texture needs for MASK.
-  let of_png = fn (path: str) ->
-    let data = vec_of_bytes (read_bytes path) in
+  // A PNG as RGBA8, from bytes rather than from a path, because a glTF image is
+  // EITHER a file beside the document OR a range of the binary chunk and the
+  // decoder should not have to care which. `where` names the source in an error.
+  let of_png_data = fn (raw: bytes) -> fn (where: str) ->
+    let data = vec_of_bytes raw in
     let hdr = read_header data in
-    if vec_len hdr == 0 then fail ("texture: not a PNG: " ++ path)
+    if vec_len hdr == 0 then fail ("texture: not a PNG: " ++ where)
     else
       let w = vec_get hdr 0 in
       let h = vec_get hdr 1 in
@@ -89,6 +90,10 @@ module Tex {
           go (i + 1) in
       let _ = go 0 in
       texture { w = w, h = h, px = out };
+
+  // The channel expansion above mirrors mpng's `rgb8` and adds the alpha that
+  // one drops, which is what a baseColor texture needs for MASK.
+  let of_png = fn (path: str) -> of_png_data (read_bytes path) path;
 
   // One texel, wrapped. Returns the four bytes as they are stored -- no
   // transfer curve, because whether one applies is the slot's business.
