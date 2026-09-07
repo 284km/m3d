@@ -30,8 +30,10 @@ DOG="${MERE_DOGFOOD:-$(dirname "$(dirname "$MERE_SRC")")/284km}"
 if [ -f "$DOG/mpng/png.mere" ] && [ -f "$DOG/mgz/inflate.mere" ]; then
   mkdir -p "$ROOT/.mere_modules/mpng" "$ROOT/.mere_modules/mgz"
   cp "$DOG/mpng/png.mere" "$ROOT/.mere_modules/mpng/png.mere"
+  cp "$DOG/mpng/encode.mere" "$ROOT/.mere_modules/mpng/encode.mere"
   cp "$DOG/mgz/inflate.mere" "$ROOT/.mere_modules/mgz/inflate.mere"
-  echo "vendored mpng/png.mere and mgz/inflate.mere"
+  cp "$DOG/mgz/deflate.mere" "$ROOT/.mere_modules/mgz/deflate.mere"
+  echo "vendored mpng (read and write) and mgz (inflate and deflate)"
 else
   echo "vendor: mpng or mgz not found under $DOG — set MERE_DOGFOOD" >&2
   exit 1

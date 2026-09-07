@@ -13,4 +13,12 @@ sh "$ROOT/scripts/linalg_check.sh" || exit 1
 sh "$ROOT/scripts/gltf_check.sh" || exit 1
 sh "$ROOT/scripts/raster_check.sh" || exit 1
 sh "$ROOT/scripts/shade_check.sh" || exit 1
+
+out=$("$MERE" "$ROOT/test/render_props.mere" 2>&1) || { echo "check: render_props did not run"; echo "$out" | head -3; exit 1; }
+case "$out" in
+  *"render_props: ok"*) echo "check: the pipeline properties hold (the winding, above all)" ;;
+  *) echo "$out" | grep MISMATCH | head -6; echo "check: a pipeline property failed"; exit 1 ;;
+esac
+
+sh "$ROOT/scripts/northstar_check.sh" || exit 1
 echo "check: ok"

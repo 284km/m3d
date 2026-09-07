@@ -2,14 +2,30 @@
 
 A 3D renderer in [Mere](https://merelang.org/), built to run glTF.
 
-**Right now it is the arithmetic and nothing else.** `src/linalg.mere` is vectors,
-matrices, quaternions and the two camera projections; there is no loader, no
-rasterizer and no window yet. What is here is held to three separate checks,
-and the shape of those checks is the reason this exists in the order it does.
+```
+m3d model.glb --out picture.png --size 512
+```
+
+It reads both glTF containers, walks the scene graph, transforms and rasterizes
+with a z-buffer, shades with glTF's metallic-roughness material, samples PNG
+textures and writes a PNG. Every gate below runs on every commit.
 
 ## Building
 
-Needs a built `mere`. No dependencies of its own.
+Needs a built `mere` and a C compiler. Its Mere dependencies — `contrib/json`,
+[mpng](https://github.com/284km/mpng) and [mgz](https://github.com/284km/mgz) —
+are vendored under `.mere_modules/` and committed, so a checkout builds without
+fetching anything.
+
+```
+mere -c src/main.mere > m3d.c && clang -O2 -w m3d.c -o m3d -lm
+./m3d test/data/gltf/Box/glTF-Binary/Box.glb --out box.png --size 512
+```
+
+**Compiled and not interpreted, and that is not a preference**: the interpreter
+takes minutes per frame where the C backend takes under a second.
+
+The gates:
 
 ```
 MERE=/path/to/mere.exe MERE_SRC=/path/to/mere-checkout sh scripts/check.sh
@@ -263,10 +279,41 @@ RGBA and the 16-bit path had no coverage. `scripts/gen_test_png.py` writes small
 images that reach them, with a **non-identity palette** so a decoder that used
 the index as the colour would fail rather than pass.
 
+## The north star
+
+`scripts/northstar_check.sh` asks the question the project exists for: given a
+glTF file, does a picture come out. Three columns per model — **reads**,
+**draws**, **lit**.
+
+The third earns its place, and it was earned the hard way. An earlier version
+culled every front face and drew the back ones: a box is still a box from the
+inside, and the whole model came out one flat ambient colour. **A silhouette is
+not evidence that the right triangles were drawn.** glTF's front face is
+counter-clockwise, the viewport transform flips y, a flip reverses winding, and
+the rasterizer's convention is that clockwise is the front — get that chain
+wrong and the picture still looks like the model.
+
+"Lit" is decided **per model** and not against a threshold: the same file is
+rendered again with the directional light black, and lit means the light made a
+difference. A fixed threshold cannot do it — glTF's default material is fully
+metallic, so its ambient is zero, and the threshold that passes a lit metal also
+passes a black frame. Two models sat exactly on that line and the column said
+"no" about a renderer that was working.
+
 ## What is not here yet
 
-JPEG, the window, animation and skinning, and the GPU path. Like the
-rasterizer, the texture path is compared across two backends rather than four,
-because it writes into a `ByteBuf`. Also, within the loader: sparse accessors, `data:` URIs (glTF-Embedded),
+**Per-pixel shading.** Shading is per vertex, so a normal never reaches a pixel:
+a sphere shows its triangles at the silhouette and a specular highlight lands on
+a vertex or misses. That is the next slice, and it is also what the fourth
+column of the north-star table waits for — three.js reads the same files and the
+camera this program prints is exactly what it needs, so the instrument is ready
+and the subject is not. Comparing a per-vertex renderer against a per-pixel one
+would measure that difference and nothing else.
+
+Also owed: near-plane clipping (a triangle with any vertex behind the eye is
+dropped whole, which is right for every model in the corpus and wrong for a
+camera inside geometry), JPEG, the window, animation and skinning, and the GPU
+path. Like the rasterizer, the texture and render paths are compared across two
+backends rather than four, because they write into a `ByteBuf`. Also, within the loader: sparse accessors, `data:` URIs (glTF-Embedded),
 and matrix accessors whose columns need 4-byte padding — all three **refused by
 name** rather than mis-read. See `OPEN_QUESTIONS.md`.

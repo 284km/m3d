@@ -1,0 +1,70 @@
+// m3d — draw a glTF file into a PNG.
+//
+// GLUE ONLY, and that is a test of everything under it rather than a style
+// preference: if a decision has to be made here, some module below is missing
+// it. The two things this file legitimately owns are the command line and the
+// disk.
+//
+//   m3d <file.gltf|file.glb> [--out <file.png>] [--size <pixels>]
+//
+// It prints the camera it computed. Most glTF sample models carry no camera, so
+// a viewer has to invent one from the scene's bounds -- and two viewers will
+// not invent the same one. A reference renderer is handed these numbers rather
+// than asked to guess the same way, which is the difference between comparing
+// two renderers and comparing two framing heuristics.
+import "./render.mere";
+import "mpng/encode.mere";
+
+let argv = args ();
+
+let rec find_flag = fn (xs) -> fn (name: str) ->
+  match xs with
+  | Nil -> None
+  | Cons (a, rest) ->
+    if str_eq a name then (match rest with | Nil -> None | Cons (v, _) -> Some v)
+    else find_flag rest name;
+
+let rec first_positional = fn (xs) ->
+  match xs with
+  | Nil -> None
+  | Cons (a, rest) ->
+    if str_len a >= 2 && str_eq (substring a 0 2) "--"
+    then (match rest with | Nil -> None | Cons (_, r2) -> first_positional r2)
+    else Some a;
+
+let path = match first_positional argv with
+  | None -> fail "usage: m3d <file.gltf|file.glb> [--out out.png] [--size 512]"
+  | Some p -> p;
+let out = match find_flag argv "--out" with | None -> "out.png" | Some v -> v;
+let size = match find_flag argv "--size" with | None -> 512 | Some v -> int_of_str v;
+
+let d = Gltf.load path;
+let _ = Gltf.check_supported d;
+// `--no-light` renders with the directional light black -- ambient and emissive
+// only. It is here for the north-star gate, which asks "is this brighter than
+// ambient alone" per model rather than against a threshold: glTF's default
+// material is fully metallic, so its ambient is zero and no single threshold can
+// tell a correct metal from a black frame.
+let want_light = match find_flag argv "--no-light" with
+  | Some _ -> false
+  | None ->
+    let rec has = fn (xs) ->
+      match xs with
+      | Nil -> true
+      | Cons (a, r) -> if str_eq a "--no-light" then false else has r in
+    has argv;
+let (t, depth, drawn, eye, ctr, th, zn, zf) = Render.one_frame_opt d size size want_light;
+
+// The camera, in the form a reference renderer wants: a position, a target, the
+// tangent of the half-angle (not the angle -- the tangent is what the
+// projection is built from, and passing the angle would put a `tan` between the
+// two renderers), and the two planes.
+let f6 = fn (x: float) -> str_of_float x;
+let _ = print ("camera eye " ++ f6 eye.x ++ " " ++ f6 eye.y ++ " " ++ f6 eye.z
+               ++ " target " ++ f6 ctr.x ++ " " ++ f6 ctr.y ++ " " ++ f6 ctr.z
+               ++ " tan_half_yfov " ++ f6 th ++ " znear " ++ f6 zn ++ " zfar " ++ f6 zf);
+let _ = print ("triangles " ++ str_of_int drawn ++ " size " ++ str_of_int size);
+
+let _ = write_bytes out (bytes_of_vec (encode_rgb8 (Render.to_png_rgb t) size size));
+let _ = print ("wrote " ++ out);
+exit 0

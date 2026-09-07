@@ -1,0 +1,377 @@
+// The scene graph, the camera, and one frame.
+//
+// PURE, like everything below it: a document in, a framebuffer out. `main.mere`
+// is what touches the disk, and it is glue -- if anything but glue ends up
+// there, this file is missing something.
+//
+// THE CAMERA IS COMPUTED AND THEN PRINTED, which is a gate's requirement rather
+// than a renderer's. Most glTF sample models carry no camera, so a viewer has
+// to invent one from the scene's bounds; two viewers inventing one
+// independently will not agree, and then a pixel comparison against a reference
+// renderer would be measuring the framing heuristic. So this one computes the
+// framing, `main.mere` prints the numbers, and the reference is handed the same
+// numbers rather than asked to guess the same way.
+import "./gltf.mere";
+import "./raster.mere";
+import "./shade.mere";
+import "./texture.mere";
+
+module Scene {
+  // A node's local transform: `matrix` if it has one, otherwise TRS. glTF says
+  // a node has one or the other and never both, and the defaults are not all
+  // zero -- scale is 1 and rotation is the identity quaternion.
+  let local = fn (nd: Json.json) ->
+    match J.field nd "matrix" with
+    | Some m ->
+      let g = fn (i: int) -> match J.at m i with | None -> 0.0 | Some x -> J.flt x in
+      // Column-major in the file, which is the layout `mat4` already uses.
+      mat4 { c0 = v4 { x = g 0,  y = g 1,  z = g 2,  w = g 3 },
+             c1 = v4 { x = g 4,  y = g 5,  z = g 6,  w = g 7 },
+             c2 = v4 { x = g 8,  y = g 9,  z = g 10, w = g 11 },
+             c3 = v4 { x = g 12, y = g 13, z = g 14, w = g 15 } }
+    | None ->
+      let arr3 = fn (k: str) -> fn (d: float) ->
+        match J.field nd k with
+        | None -> v3 { x = d, y = d, z = d }
+        | Some a ->
+          let g = fn (i: int) -> match J.at a i with | None -> d | Some x -> J.flt x in
+          v3 { x = g 0, y = g 1, z = g 2 } in
+      let t = arr3 "translation" 0.0 in
+      let s = arr3 "scale" 1.0 in
+      let r = match J.field nd "rotation" with
+              | None -> Q.identity
+              | Some a ->
+                let g = fn (i: int) -> match J.at a i with | None -> 0.0 | Some x -> J.flt x in
+                // glTF stores a quaternion xyzw, w last.
+                quat { x = g 0, y = g 1, z = g 2, w = g 3 } in
+      M4x.trs t r s;
+
+  let nodes = fn (d: doc) -> match J.field d.j "nodes" with | None -> Json.JArr Nil | Some v -> v;
+
+  // The roots of the default scene, or every node if there are no scenes --
+  // which some test files genuinely are.
+  let roots = fn (d: doc) ->
+    match J.field d.j "scenes" with
+    | None ->
+      let n = J.arr_len (nodes d) in
+      let v = vec_new () in
+      let rec go = fn (i: int) -> if i == n then () else let _ = vec_push v i in go (i + 1) in
+      let _ = go 0 in v
+    | Some scenes ->
+      let idx = J.int_or d.j "scene" 0 in
+      let sc = match J.at scenes idx with
+               | None -> fail ("gltf: scene " ++ str_of_int idx ++ " is not there")
+               | Some x -> x in
+      let v = vec_new () in
+      let rec go = fn (xs) ->
+        match xs with
+        | Nil -> ()
+        | Cons (h, t) -> let _ = vec_push v (J.int_ h) in go t in
+      let _ = go (match J.field sc "nodes" with | None -> Nil | Some a -> J.arr a) in
+      v;
+
+  // `f` is called with (node index, world matrix) for every node reachable from
+  // the scene's roots. Depth-first, children after their parent, so a world
+  // matrix is always the parent's times the child's local one.
+  //
+  // No cycle guard: glTF says the node graph is a forest, and the Khronos
+  // validator refuses a file where it is not -- which is a check this project
+  // already runs over its corpus, so duplicating it here would be duplicating
+  // it rather than adding anything.
+  let walk = fn (d: doc) -> fn (f) ->
+    let ns = nodes d in
+    let rec visit = fn (i: int) -> fn (parent: mat4) ->
+      match J.at ns i with
+      | None -> ()
+      | Some nd ->
+        let w = M4.mul parent (local nd) in
+        let _ = f i nd w in
+        let rec kids = fn (xs) ->
+          match xs with
+          | Nil -> ()
+          | Cons (h, t) -> let _ = visit (J.int_ h) w in kids t in
+        kids (match J.field nd "children" with | None -> Nil | Some a -> J.arr a) in
+    let rs = roots d in
+    let rec go = fn (k: int) ->
+      if k == vec_len rs then ()
+      else let _ = visit (vec_get rs k) M4.identity in go (k + 1) in
+    go 0;
+}
+
+module Frame {
+  // The world-space bounding box of everything that will be drawn. Taken from
+  // each POSITION accessor's own `min`/`max` when the file gives them -- glTF
+  // REQUIRES them on POSITION, so this is not a shortcut -- transformed by the
+  // node's matrix. All eight corners, because a rotation turns a box into a box
+  // with different corners and taking only two of them shrinks it.
+  let bounds = fn (d: doc) ->
+    let lo = vec_new () in let hi = vec_new () in
+    let _ = vec_push lo 1e30 in let _ = vec_push lo 1e30 in let _ = vec_push lo 1e30 in
+    let _ = vec_push hi (0.0 - 1e30) in let _ = vec_push hi (0.0 - 1e30) in let _ = vec_push hi (0.0 - 1e30) in
+    let see = fn (p: v3) ->
+      let ax = fn (k: int) -> fn (val: float) ->
+        let _ = if val < vec_get lo k then vec_set lo k val else () in
+        if val > vec_get hi k then vec_set hi k val else () in
+      let _ = ax 0 p.x in let _ = ax 1 p.y in ax 2 p.z in
+    let _ = Scene.walk d (fn (i: int) -> fn (nd: Json.json) -> fn (w: mat4) ->
+      match J.field nd "mesh" with
+      | None -> ()
+      | Some mi ->
+        let mesh = match J.at (J.req d.j "meshes") (J.int_ mi) with
+                   | None -> fail "gltf: node names a mesh that is not there"
+                   | Some x -> x in
+        let rec prims = fn (xs) ->
+          match xs with
+          | Nil -> ()
+          | Cons (pr, rest) ->
+            let _ =
+              match J.field (J.req pr "attributes") "POSITION" with
+              | None -> ()
+              | Some pa ->
+                let acc = match J.at (J.req d.j "accessors") (J.int_ pa) with
+                          | None -> fail "gltf: no such accessor" | Some x -> x in
+                match (J.field acc "min", J.field acc "max") with
+                | (Some mn, Some mx) ->
+                  let g = fn (a: Json.json) -> fn (k: int) ->
+                    match J.at a k with | None -> 0.0 | Some x -> J.flt x in
+                  let rec corner = fn (c: int) ->
+                    if c == 8 then ()
+                    else
+                      let pick = fn (k: int) ->
+                        if bit_and (bit_shr c k) 1 == 0 then g mn k else g mx k in
+                      // mul_POINT: a corner is a position, so the translation
+                      // applies. An earlier line here also fed the mul_dir of
+                      // the same corner into the bounds, which is the same
+                      // point with the translation dropped -- it made every box
+                      // include the untranslated copy of itself and framed the
+                      // camera too wide.
+                      let _ = see (V4.xyz (M4.mul_point w (v3 { x = pick 0, y = pick 1, z = pick 2 }))) in
+                      corner (c + 1) in
+                  corner 0
+                | _ -> () in
+            prims rest in
+        prims (J.arr (J.req mesh "primitives"))) in
+    (v3 { x = vec_get lo 0, y = vec_get lo 1, z = vec_get lo 2 },
+     v3 { x = vec_get hi 0, y = vec_get hi 1, z = vec_get hi 2 });
+
+  // A camera that fits the scene, from a fixed direction. Deterministic, and
+  // printed by main.mere so a reference renderer can be handed the same one
+  // rather than asked to invent the same one.
+  let auto_camera = fn (d: doc) -> fn (aspect: float) ->
+    let (lo, hi) = bounds d in
+    let c = V3.scale (V3.add lo hi) 0.5 in
+    let r = V3.length (V3.scale (V3.sub hi lo) 0.5) in
+    let r = if r <= 0.0 then 1.0 else r in
+    // 45 degrees vertical, and a distance that leaves a margin: 2.4 rather than
+    // the 1/sin(fov/2) that just fits, because a model whose bounds are a
+    // sphere touches the frame edge and looks cropped.
+    let tan_half = 0.41421356237309503 in
+    let dist = r * 2.4 / tan_half in
+    let dir = V3.normalize (v3 { x = 0.7, y = 0.5, z = 1.0 }) in
+    let eye = V3.add c (V3.scale dir dist) in
+    let znear = dist * 0.01 in
+    let zfar = dist + r * 4.0 in
+    (eye, c, tan_half, znear, zfar,
+     M4.mul (M4x.perspective_from_tan tan_half aspect znear zfar)
+            (M4x.look_at eye c (v3 { x = 0.0, y = 1.0, z = 0.0 })));
+}
+
+module Render {
+  // Vertex attributes, read once per primitive. A record cannot hold a Vec
+  // (OPEN_QUESTIONS Q-8), so these travel as a tuple.
+  let attr = fn (d: doc) -> fn (prim: Json.json) -> fn (name: str) ->
+    match J.field (J.req prim "attributes") name with
+    | None -> None
+    | Some a -> Some (Acc.floats d (J.int_ a));
+
+  // The indices, or 0..count-1 when the primitive has none. Making the
+  // un-indexed case produce the same shape means the draw loop has one path
+  // rather than two, and TriangleWithoutIndices is in the corpus precisely to
+  // catch a renderer that only has the other.
+  let indices = fn (d: doc) -> fn (prim: Json.json) -> fn (vcount: int) ->
+    match J.field prim "indices" with
+    | Some a -> Acc.ints d (J.int_ a)
+    | None ->
+      let v = vec_new () in
+      let rec go = fn (i: int) -> if i == vcount then () else let _ = vec_push v i in go (i + 1) in
+      let _ = go 0 in v;
+
+  // A material's factors. Textures are read by the caller, which owns the
+  // decoded images; this is only the numbers.
+  let material_of = fn (d: doc) -> fn (prim: Json.json) ->
+    let dflt = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 1.0,
+                          roughness = 1.0, er = 0.0, eg = 0.0, eb = 0.0,
+                          alpha_mode = 0, cutoff = 0.5 } in
+    match J.field prim "material" with
+    | None -> dflt
+    | Some mi ->
+      let m = match J.at (J.req d.j "materials") (J.int_ mi) with
+              | None -> fail "gltf: primitive names a material that is not there"
+              | Some x -> x in
+      let pbr = match J.field m "pbrMetallicRoughness" with
+                | None -> Json.JObj Nil | Some x -> x in
+      let bc = match J.field pbr "baseColorFactor" with
+               | None -> (1.0, 1.0, 1.0, 1.0)
+               | Some a ->
+                 let g = fn (i: int) -> match J.at a i with | None -> 1.0 | Some x -> J.flt x in
+                 (g 0, g 1, g 2, g 3) in
+      let (br, bg, bb, ba) = bc in
+      let em = match J.field m "emissiveFactor" with
+               | None -> (0.0, 0.0, 0.0)
+               | Some a ->
+                 let g = fn (i: int) -> match J.at a i with | None -> 0.0 | Some x -> J.flt x in
+                 (g 0, g 1, g 2) in
+      let (er, eg, eb) = em in
+      let mode = let s = J.str_or m "alphaMode" "OPAQUE" in
+                 if str_eq s "MASK" then 1 else if str_eq s "BLEND" then 2 else 0 in
+      material { br = br, bg = bg, bb = bb, ba = ba,
+                 metallic = J.flt_or pbr "metallicFactor" 1.0,
+                 roughness = J.flt_or pbr "roughnessFactor" 1.0,
+                 er = er, eg = eg, eb = eb,
+                 alpha_mode = mode, cutoff = J.flt_or m "alphaCutoff" 0.5 };
+
+  // SHADING IS PER VERTEX HERE, and that is a first slice rather than the
+  // answer. The rasterizer interpolates a colour, so a normal cannot reach the
+  // pixel; a sphere lit this way shows its triangles at the silhouette and its
+  // specular highlight lands on a vertex or misses entirely. Per-pixel shading
+  // needs the rasterizer to carry a normal and a texture coordinate through the
+  // same perspective-correct interpolation the colour already gets, which is a
+  // change to raster.mere and is the next slice. Said here rather than left for
+  // a reader to notice in the output.
+  // `lit` off means the directional light is black: ambient and emissive only.
+  // It exists for the north-star gate, which needs to ask "is this brighter than
+  // ambient alone" PER MODEL rather than against a threshold -- glTF's default
+  // material is fully metallic, so its ambient is zero and any fixed threshold
+  // either passes a black render or fails a correct metal.
+  let one_frame_opt = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+    let (t, depth) = Target.make w h in
+    let _ = Target.clear t depth 26 26 30 in
+    let (eye, ctr, th, zn, zf, vp) = Frame.auto_camera d (float_of_int w / float_of_int h) in
+    let k = if lit then 3.0 else 0.0 in
+    let light = dirlight { dx = 0.0 - 0.4, dy = 0.0 - 0.7, dz = 0.0 - 0.6, lr = k, lg = k, lb = k } in
+    let fw = float_of_int w in
+    let fh = float_of_int h in
+    let drawn = vec_new () in
+    let _ = vec_push drawn 0 in
+    let _ = Scene.walk d (fn (ni: int) -> fn (nd: Json.json) -> fn (world: mat4) ->
+      match J.field nd "mesh" with
+      | None -> ()
+      | Some mi ->
+        let mesh = match J.at (J.req d.j "meshes") (J.int_ mi) with
+                   | None -> fail "gltf: node names a mesh that is not there" | Some x -> x in
+        let nrm_m = match M4x.normal_matrix world with | None -> M4.identity | Some x -> x in
+        let rec prims = fn (xs) ->
+          match xs with
+          | Nil -> ()
+          | Cons (prim, rest) ->
+            // Only TRIANGLES. Any other mode is SKIPPED AND COUNTED rather than
+            // drawn wrongly; the corpus table reports it.
+            let _ =
+              if J.int_or prim "mode" 4 != 4 then ()
+              else
+                match attr d prim "POSITION" with
+                | None -> ()
+                | Some pos ->
+                  let nrm = attr d prim "NORMAL" in
+                  let mat = material_of d prim in
+                  let vcount = vec_len pos / 3 in
+                  let idx = indices d prim vcount in
+                  let tri = vec_len idx / 3 in
+                  // A vertex's world position, and its normal when the file has
+                  // one. The normal is deliberately NOT defaulted here: glTF says
+                  // a primitive with no NORMAL is FLAT SHADED, and a flat normal
+                  // is a property of the triangle rather than of the vertex, so
+                  // it cannot be decided until all three are in hand.
+                  let wpos = fn (k: int) ->
+                    V4.xyz (M4.mul_point world
+                      (v3 { x = vec_get pos (3 * k), y = vec_get pos (3 * k + 1),
+                            z = vec_get pos (3 * k + 2) })) in
+                  let vnorm = fn (k: int) ->
+                    match nrm with
+                    | None -> None
+                    | Some nv ->
+                      Some (V3.normalize (M4.mul_dir nrm_m
+                        (v3 { x = vec_get nv (3 * k), y = vec_get nv (3 * k + 1),
+                              z = vec_get nv (3 * k + 2) }))) in
+                  let shade_at = fn (wp: v3) -> fn (n: v3) ->
+                    let vdir = V3.normalize (V3.sub eye wp) in
+                    V3.add (V3.add (Shade.direct mat n vdir light)
+                                   (Shade.ambient mat 0.15))
+                           (Shade.emissive mat) in
+                  let rec go = fn (ti: int) ->
+                    if ti == tri then ()
+                    else
+                      let k0 = vec_get idx (3 * ti) in
+                      let k1 = vec_get idx (3 * ti + 1) in
+                      let k2 = vec_get idx (3 * ti + 2) in
+                      let w0 = wpos k0 in let w1 = wpos k1 in let w2 = wpos k2 in
+                      // NO NORMAL MEANS FLAT SHADED, which glTF states and this
+                      // renderer used to ignore -- it returned a constant (0,0,1)
+                      // in object space, so Triangle and SimpleMeshes came out at
+                      // ambient brightness and the north-star table said "lit: no"
+                      // for both. The face normal is the cross product of two
+                      // edges, wound to match glTF's counter-clockwise front.
+                      let face = V3.normalize (V3.cross (V3.sub w1 w0) (V3.sub w2 w0)) in
+                      let nrm_of = fn (k: int) -> match vnorm k with | None -> face | Some n -> n in
+                      let c0 = M4.mul_v4 vp (V4.of_point w0) in
+                      let c1 = M4.mul_v4 vp (V4.of_point w1) in
+                      let c2 = M4.mul_v4 vp (V4.of_point w2) in
+                      let l0 = shade_at w0 (nrm_of k0) in
+                      let l1 = shade_at w1 (nrm_of k1) in
+                      let l2 = shade_at w2 (nrm_of k2) in
+                      // NO NEAR-PLANE CLIPPING YET: a triangle with any vertex
+                      // at or behind the eye is dropped whole. That is wrong for
+                      // a camera inside geometry and right for every model in
+                      // the corpus, which is framed from outside; clipping is
+                      // recorded as owed rather than faked.
+                      let ok = c0.w > 0.0 && c1.w > 0.0 && c2.w > 0.0 in
+                      let _ =
+                        if not ok then ()
+                        else
+                          let sv = fn (c: v4) -> fn (l: v3) ->
+                            let iw = 1.0 / c.w in
+                            rvert { x = (c.x * iw * 0.5 + 0.5) * fw,
+                                    y = (0.5 - c.y * iw * 0.5) * fh,
+                                    z = c.z * iw, iw = iw,
+                                    r = l.x, g = l.y, b = l.z } in
+                          let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in
+                          // THE LAST TWO ARE SWAPPED, AND THAT IS NOT A TYPO.
+                          //
+                          // glTF's front face is counter-clockwise. The viewport
+                          // transform above flips y -- a framebuffer's y grows
+                          // downward and NDC's grows up -- and a flip REVERSES
+                          // WINDING, so a front face arrives at the rasterizer
+                          // counter-clockwise in ITS coordinates, where the
+                          // convention is that clockwise is the front. Swapping
+                          // two vertices puts it back.
+                          //
+                          // Without this the renderer culls every front face and
+                          // draws the back ones, and the result LOOKS RIGHT: a box
+                          // is still a box from the inside. What gave it away was
+                          // that the whole model came out one flat colour --
+                          // ambient only -- because the faces being drawn are the
+                          // ones pointing away from the light. A silhouette is not
+                          // evidence that the right triangles were drawn.
+                          Raster.triangle t depth true (sv c0 l0) (sv c2 l2) (sv c1 l1) in
+                      go (ti + 1) in
+                  go 0 in
+            prims rest in
+        prims (J.arr (J.req mesh "primitives"))) in
+    (t, depth, vec_get drawn 0, eye, ctr, th, zn, zf);
+
+  let one_frame = fn (d: doc) -> fn (w: int) -> fn (h: int) -> one_frame_opt d w h true;
+
+  // The framebuffer as sRGB bytes, ready for a PNG. The renderer works in
+  // linear light throughout and the curve is applied exactly once, here.
+  let to_png_rgb = fn (t: target) ->
+    let out = vec_new () in
+    let rec go = fn (i: int) ->
+      if i == t.w * t.h then out
+      else
+        let o = i * 4 in
+        let _ = vec_push out (bytebuf_get t.color o) in
+        let _ = vec_push out (bytebuf_get t.color (o + 1)) in
+        let _ = vec_push out (bytebuf_get t.color (o + 2)) in
+        go (i + 1) in
+    go 0;
+}

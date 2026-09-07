@@ -83,9 +83,16 @@ def raster(tri, target, cull):
             inv = 1.0 / iw
             def chan(va, vb, vc):
                 return (w0 * va * float(aiw) + w1 * vb * float(biw) + w2 * vc * float(ciw)) * inv
+            # The store encodes: the subject applies the sRGB curve exactly once, where a
+            # float becomes a display byte. The thresholds here are the reference `pow`
+            # form -- the subject reads them out of a generated table built by bisecting
+            # this same reference, so the two agree by construction rather than by both
+            # being tables.
             def q(v):
-                s = v * 255.0
-                return 0 if s <= 0.0 else (255 if s >= 255.0 else int(s + 0.5))
+                if v <= 0.0: return 0
+                if v >= 1.0: return 255
+                sv = 12.92 * v if v <= 0.0031308 else 1.055 * (v ** (1 / 2.4)) - 0.055
+                return int(sv * 255.0 + 0.5)
             target["depth"][i] = z
             target["color"][i] = (q(chan(ar, br, cr)), q(chan(ag, bg, cg)), q(chan(ab, bb, cb)))
 

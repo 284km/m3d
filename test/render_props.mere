@@ -1,0 +1,110 @@
+// Properties of the whole pipeline, which need no reference.
+//
+// THE ONE THAT MATTERS IS THE WINDING, and it is here because it was wrong and
+// the picture looked fine. glTF's front face is counter-clockwise; the viewport
+// transform flips y, which reverses winding; the rasterizer's convention is that
+// clockwise is the front. Get that chain wrong and every front face is culled
+// and every back face is drawn -- and a box is still a box from the inside. The
+// only visible symptom was that the whole model came out ONE FLAT COLOUR,
+// because the faces being drawn are the ones pointing away from the light.
+//
+// A silhouette is not evidence that the right triangles were drawn. This file
+// asks the question the silhouette cannot.
+import "../src/render.mere";
+
+let fails = vec_new ();
+let check = fn (name: str) -> fn (ok: bool) ->
+  if ok then () else let _ = vec_push fails name in print ("MISMATCH " ++ name);
+
+// A minimal document, built here rather than loaded, so the winding is stated
+// in this file and not inherited from a corpus model that might change. One
+// triangle in the z = 0 plane, wound counter-clockwise as seen from +z, with a
+// normal pointing at +z: a front face for a camera on the +z side.
+let doc_of = fn (js: str) ->
+  let p = "/tmp/m3d_render_props.gltf" in
+  let _ = write_file p js in
+  Gltf.load p;
+
+// POSITION (-1,-1,0) (1,-1,0) (0,1,0) and NORMAL (0,0,1) x3, as raw float32
+// little-endian in a data-free buffer... which this reader does not do, so the
+// geometry is instead expressed through a tiny .bin written beside it.
+let gltf_for = fn (i0: int) -> fn (i1: int) -> fn (i2: int) ->
+  let ix = fn (k: int) -> str_of_int k in
+  "\{\"asset\":\{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[\{\"nodes\":[0]}],"
+  ++ "\"nodes\":[\{\"mesh\":0}],"
+  // NO `indices`: the winding is chosen by the order the three positions are
+  // written, below. An earlier version pointed this at an accessor with no
+  // bufferView -- which glTF says reads as ZEROS, a fact this file's own comment
+  // stated while the JSON above went on referencing it. The triangle came out
+  // (v0, v0, v0), degenerate, and nothing drew.
+  ++ "\"meshes\":[\{\"primitives\":[\{\"attributes\":\{\"POSITION\":0,\"NORMAL\":1},\"material\":0}]}],"
+  ++ "\"materials\":[\{\"pbrMetallicRoughness\":\{\"baseColorFactor\":[1.0,1.0,1.0,1.0],\"metallicFactor\":0.0,\"roughnessFactor\":1.0}}],"
+  ++ "\"buffers\":[\{\"uri\":\"m3d_rp.bin\",\"byteLength\":72}],"
+  ++ "\"bufferViews\":[\{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
+  ++ "\{\"buffer\":0,\"byteOffset\":36,\"byteLength\":36}],"
+  ++ "\"accessors\":[\{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\","
+  ++ "\"min\":[-1.0,-1.0,0.0],\"max\":[1.0,1.0,0.0]},"
+  ++ "\{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}]}";
+
+// Rather than indices -- which would need a fourth bufferView and more hex --
+// the winding is chosen by writing the three positions in the order asked for.
+let write_tri = fn (a: int) -> fn (b: int) -> fn (c: int) ->
+  let sb = strbuf_new () in
+  let hexd = "0123456789abcdef" in
+  let put = fn (x: float) ->
+    let bb = f32_bits x in
+    let rec go = fn (k: int) ->
+      if k == 4 then ()
+      else
+        let v = bit_and (bit_shr bb (8 * k)) 255 in
+        let _ = strbuf_push sb (char_at hexd (v / 16)) in
+        let _ = strbuf_push sb (char_at hexd (v % 16)) in
+        go (k + 1) in
+    go 0 in
+  let px = fn (k: int) -> if k == 0 then (0.0 - 1.0) else if k == 1 then 1.0 else 0.0 in
+  let py = fn (k: int) -> if k == 2 then 1.0 else (0.0 - 1.0) in
+  let one = fn (k: int) -> let _ = put (px k) in let _ = put (py k) in put 0.0 in
+  let _ = one a in let _ = one b in let _ = one c in
+  // three normals, all +z
+  let rec nrm = fn (k: int) ->
+    if k == 3 then ()
+    else let _ = put 0.0 in let _ = put 0.0 in let _ = put 1.0 in nrm (k + 1) in
+  let _ = nrm 0 in
+  write_bytes "/tmp/m3d_rp.bin" (bytes_of_hex (strbuf_to_str sb));
+
+// Coverage and the brightest red, so "drawn" and "drawn facing the light" are
+// two answers and not one. The flat box had the first and not the second.
+let render_stats = fn () ->
+  let d = Gltf.load "/tmp/m3d_rp.gltf" in
+  let (t, dep, drawn, e, c, th, zn, zf) = Render.one_frame d 32 32 in
+  let rec go = fn (i: int) -> fn (n: int) -> fn (mx: int) ->
+    if i == 32 * 32 then (n, mx)
+    else
+      let (r, g, b) = Target.get t (i % 32) (i / 32) in
+      let hit = if r == 26 && g == 26 && b == 30 then 0 else 1 in
+      go (i + 1) (n + hit) (if hit == 1 && r > mx then r else mx) in
+  go 0 0 0;
+
+let _ = write_file "/tmp/m3d_rp.gltf" (gltf_for 0 1 2);
+
+// Counter-clockwise seen from +z, and the framing puts the camera there: a
+// FRONT face. Measured at 31 pixels of 1024 with a brightest red of 219 --
+// the thresholds below are under those and not guesses. (The first version of
+// this file guessed `> 50` and failed on a correct renderer.)
+let _ = write_tri 0 1 2;
+let (n_front, r_front) = render_stats ();
+let _ = check "winding.front_face_is_drawn" (n_front > 20);
+// AND IT IS LIT. This is the half the flat box would have failed: the geometry
+// was there and the wrong side of it was facing the camera, so everything came
+// out ambient-only. Ambient alone would be about 100 here.
+let _ = check "winding.the_lit_side_faces_the_camera" (r_front > 180);
+
+// The same triangle wound the other way is a back face and must vanish.
+// Both halves are needed: a renderer that draws everything passes the first
+// check and a renderer that draws nothing passes this one.
+let _ = write_tri 0 2 1;
+let (n_back, r_back) = render_stats ();
+let _ = check "winding.back_face_is_culled" (n_back == 0);
+
+let n = vec_len fails;
+print (if n == 0 then "render_props: ok" else "render_props: " ++ str_of_int n ++ " FAILED")

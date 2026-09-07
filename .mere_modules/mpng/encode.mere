@@ -1,0 +1,253 @@
+// encode.mere — writing PNG.
+//
+// The reverse of png.mere, and the half that has to *choose* something: a PNG
+// encoder picks a filter per scanline, and the choice is what separates a file
+// that compresses from one that does not. The rule here is the one the spec
+// suggests and everybody uses — try all five, keep the one whose filtered bytes
+// have the smallest absolute sum, on the reasoning that DEFLATE does better on
+// numbers near zero.
+//
+// Compression is mgz's `deflate_dynamic`, wrapped in zlib: two bytes of header,
+// the DEFLATE stream, and an Adler-32 of the *unfiltered* input. Chunk CRCs are
+// mgz's `crc32_vec`. Nothing here reimplements either.
+//
+// Exports:
+//   encode_rgb8  pixels width height -> vec   a complete PNG file
+
+import "mgz/deflate.mere";
+
+let bytes_push4be = fn out -> fn (v: int) ->
+  let _ = vec_push out (bit_and (bit_shr v 24) 255) in
+  let _ = vec_push out (bit_and (bit_shr v 16) 255) in
+  let _ = vec_push out (bit_and (bit_shr v 8) 255) in
+  vec_push out (bit_and v 255);
+
+let push_all = fn out -> fn src ->
+  let n = vec_len src in
+  let rec go = fn (i: int) ->
+    if i == n then () else let _ = vec_push out (vec_get src i) in go (i + 1) in
+  go 0;
+
+// Adler-32 (RFC 1950): zlib's checksum, over the uncompressed data. Not CRC-32 —
+// a PNG carries both, one per zlib stream and one per chunk, and they are
+// different algorithms.
+let adler32 = fn data ->
+  let n = vec_len data in
+  let rec go = fn (i: int) -> fn (a: int) -> fn (b: int) ->
+    if i == n then b * 65536 + a
+    else
+      let a2 = (a + vec_get data i) % 65521 in
+      go (i + 1) a2 ((b + a2) % 65521) in
+  go 0 1 0;
+
+// A chunk: length, type, data, CRC over type+data.
+let chunk = fn out -> fn (t0: int) -> fn (t1: int) -> fn (t2: int) -> fn (t3: int) -> fn body ->
+  let _ = bytes_push4be out (vec_len body) in
+  let tagged = vec_new () in
+  let _ = vec_push tagged t0 in
+  let _ = vec_push tagged t1 in
+  let _ = vec_push tagged t2 in
+  let _ = vec_push tagged t3 in
+  let _ = push_all tagged body in
+  let _ = push_all out tagged in
+  bytes_push4be out (crc32_vec tagged);
+
+let paeth_e = fn (a: int) -> fn (b: int) -> fn (c: int) ->
+  let p = a + b - c in
+  let pa = if p >= a then p - a else a - p in
+  let pb = if p >= b then p - b else b - p in
+  let pc = if p >= c then p - c else c - p in
+  if pa <= pb && pa <= pc then a
+  else if pb <= pc then b
+  else c;
+
+// One filtered scanline, for a given filter type. `line` and `prev` are the
+// unfiltered bytes; `prev` is empty for the first row.
+//
+// This parameter is called `row` on purpose, now. With a `let rec row` in
+// png.mere and a parameter called `row` here, the C backend's inner-function
+// lifting used to leave `row` out of this function's capture list and emit a body
+// referring to an identifier it never declared — see PAIN.md P6, fixed upstream in
+// mere v0.1.217. Keeping the name means this file is the shape that found it, and
+// `verify.sh` compiling it is the test that it stays fixed.
+let filter_row = fn (kind: int) -> fn row -> fn prev -> fn (bpp: int) ->
+  let n = vec_len row in
+  let out = vec_new () in
+  let rec go = fn (i: int) ->
+    if i == n then out
+    else
+      let cur = vec_get row i in
+      let left = if i >= bpp then vec_get row (i - bpp) else 0 in
+      let up = if vec_len prev > 0 then vec_get prev i else 0 in
+      let upleft = if vec_len prev > 0 && i >= bpp then vec_get prev (i - bpp) else 0 in
+      let v =
+        if kind == 0 then cur
+        else if kind == 1 then cur - left
+        else if kind == 2 then cur - up
+        else if kind == 3 then cur - (left + up) / 2
+        else cur - paeth_e left up upleft in
+      let _ = vec_push out (bit_and v 255) in
+      go (i + 1) in
+  go 0;
+
+// How unpromising a filtered row looks: bytes are treated as signed, because a
+// byte of 255 is a difference of -1 and cheap, not a large number.
+let row_cost = fn row ->
+  let n = vec_len row in
+  let rec go = fn (i: int) -> fn (acc: int) ->
+    if i == n then acc
+    else
+      let b = vec_get row i in
+      go (i + 1) (acc + (if b < 128 then b else 256 - b)) in
+  go 0 0;
+
+// The best of the five, by that measure.
+let best_filter = fn row -> fn prev -> fn (bpp: int) ->
+  let rec go = fn (kind: int) -> fn (bk: int) -> fn (bc: int) -> fn best ->
+    if kind == 5 then
+      let out = vec_new () in
+      let _ = vec_push out bk in
+      let _ = push_all out best in
+      out
+    else
+      let cand = filter_row kind row prev bpp in
+      let c = row_cost cand in
+      if c < bc then go (kind + 1) kind c cand else go (kind + 1) bk bc best in
+  let first = filter_row 0 row prev bpp in
+  go 1 0 (row_cost first) first;
+
+// Is every pixel grey? Then the file can say so and be a third the size. This is
+// the other decision an encoder makes, after the filters: PNG's colour types are
+// not a description of the data but a claim about it, and the cheapest true claim
+// is the right one.
+let all_grey = fn pixels -> fn (n: int) ->
+  let rec go = fn (i: int) ->
+    if i >= n then true
+    else
+      let p = i * 3 in
+      if vec_get pixels p == vec_get pixels (p + 1)
+         && vec_get pixels p == vec_get pixels (p + 2)
+      then go (i + 1) else false in
+  go 0;
+
+// The distinct colours, up to 257 of them — the moment there are more than 256 the
+// answer is "too many" and counting further is wasted. Returned flat as r,g,b
+// triples, which is also exactly the PLTE chunk's format.
+//
+// A linear scan per pixel, which is O(pixels x colours). That is fine at 256
+// colours and would not be at 2^24; the early exit is what keeps it honest.
+let collect_palette = fn pixels -> fn (n: int) ->
+  let pal = vec_new () in
+  let rec go = fn (i: int) ->
+    if i >= n || vec_len pal > 768 then pal
+    else
+      let p = i * 3 in
+      let r = vec_get pixels p in
+      let g = vec_get pixels (p + 1) in
+      let b = vec_get pixels (p + 2) in
+      let rec seen = fn (k: int) ->
+        if k >= vec_len pal then false
+        else if vec_get pal k == r && vec_get pal (k + 1) == g
+                && vec_get pal (k + 2) == b then true
+        else seen (k + 3) in
+      let _ =
+        if seen 0 then ()
+        else
+          let _ = vec_push pal r in
+          let _ = vec_push pal g in
+          vec_push pal b in
+      go (i + 1) in
+  go 0;
+
+let palette_index = fn pal -> fn (r: int) -> fn (g: int) -> fn (b: int) ->
+  let rec go = fn (k: int) ->
+    if k >= vec_len pal then 0
+    else if vec_get pal k == r && vec_get pal (k + 1) == g
+            && vec_get pal (k + 2) == b then k / 3
+    else go (k + 3) in
+  go 0;
+
+// A complete PNG: 8 bits a sample, no interlacing, one IDAT. The colour type is
+// the cheapest true claim about the pixels — grey if they are all grey, a palette
+// if there are at most 256 distinct colours, RGB otherwise. All three are one
+// byte per pixel except the last, which is three.
+let encode_at_depth = fn pixels -> fn (width: int) -> fn (height: int) -> fn (depth: int) ->
+  let count = width * height in
+  let eight = depth == 8 in
+  let grey = eight && all_grey pixels count in
+  // Only worth asking when the image is not already grey: grey is one byte a
+  // pixel too, and needs no palette chunk.
+  let pal = if grey || eight == false then vec_new () else collect_palette pixels count in
+  let indexed = grey == false && eight && vec_len pal <= 768 && vec_len pal > 0 in
+  let bpp = if grey || indexed then 1 else if eight then 3 else 6 in
+  let stride = width * bpp in
+  // The filtered scanlines, which is what gets compressed.
+  let raw = vec_new () in
+  let rec rows = fn (y: int) -> fn prev ->
+    if y == height then ()
+    else
+      let row = vec_new () in
+      let rec col = fn (x: int) ->
+        if x == stride then ()
+        else
+          // One sample per pixel in grey (the red channel, which the check above
+          // proved is the whole story) and in palette (the index).
+          let _ =
+            if grey then vec_push row (vec_get pixels ((y * width + x) * 3))
+            else if indexed then
+              let p = (y * width + x) * 3 in
+              vec_push row (palette_index pal (vec_get pixels p)
+                              (vec_get pixels (p + 1)) (vec_get pixels (p + 2)))
+            else vec_push row (vec_get pixels (y * stride + x)) in
+          col (x + 1) in
+      let _ = col 0 in
+      let _ = push_all raw (best_filter row prev bpp) in
+      rows (y + 1) row in
+  let _ = rows 0 (vec_new ()) in
+
+  // zlib: 0x78 0x01 is "deflate, 32K window, no preset dictionary", the header
+  // every encoder writes; then the stream; then Adler-32 of the *unfiltered*
+  // bytes... of the filtered scanlines, which is what was compressed.
+  let z = vec_new () in
+  let _ = vec_push z 0x78 in
+  let _ = vec_push z 0x01 in
+  let _ = push_all z (deflate_dynamic raw) in
+  let _ = bytes_push4be z (adler32 raw) in
+
+  let out = vec_new () in
+  let _ = push_all out (let sig = vec_new () in
+                        let rec go = fn i ->
+                          if i >= 8 then sig
+                          else
+                            let b = if i == 0 then 137 else if i == 1 then 80
+                                    else if i == 2 then 78 else if i == 3 then 71
+                                    else if i == 4 then 13 else if i == 5 then 10
+                                    else if i == 6 then 26 else 10 in
+                            let _ = vec_push sig b in
+                            go (i + 1) in
+                        go 0) in
+  let ihdr = vec_new () in
+  let _ = bytes_push4be ihdr width in
+  let _ = bytes_push4be ihdr height in
+  let _ = vec_push ihdr depth in  // bit depth
+  let _ = vec_push ihdr (if grey then 0 else if indexed then 3 else 2) in  // colour type
+  let _ = vec_push ihdr 0 in     // compression: deflate, the only one
+  let _ = vec_push ihdr 0 in     // filter method: the five above, the only set
+  let _ = vec_push ihdr 0 in     // interlace: none
+  let _ = chunk out 73 72 68 82 ihdr in
+  // PLTE has to come before the first IDAT, which is the one ordering rule here.
+  let _ = if indexed then chunk out 80 76 84 69 pal else () in
+  let _ = chunk out 73 68 65 84 z in
+  let _ = chunk out 73 69 78 68 (vec_new ()) in
+  out;
+
+let encode_rgb8 = fn pixels -> fn (width: int) -> fn (height: int) ->
+  encode_at_depth pixels width height 8;
+
+// `depth` is 8 or 16. At 16 the samples in `pixels` are already pairs of bytes,
+// big-endian as PNG stores them, so this only has to say so in the header and let
+// the filters work in bytes — which they always did, since `bpp` is a byte count.
+// Grey and palette are not offered at 16 bits: both are decisions about 8-bit
+// samples, and guessing at the other depth would be inventing a claim.
+let encode16 = fn pixels -> fn (width: int) -> fn (height: int) ->
+  encode_at_depth pixels width height 16;

@@ -20,6 +20,7 @@
 // do. A front face is counter-clockwise in the source and therefore CLOCKWISE
 // once y is flipped, so the sign test below reads the way it does on purpose.
 import "./linalg.mere";
+import "./srgb.mere";
 
 // A vertex as the rasterizer sees it: already projected and viewport-mapped.
 // `iw` is 1/w from the clip-space position and is what makes interpolation
@@ -171,9 +172,15 @@ module Raster {
                     let cr = (w0 * a.r * a.iw + w1 * b.r * b.iw + w2 * c.r * c.iw) * inv in
                     let cg = (w0 * a.g * a.iw + w1 * b.g * b.iw + w2 * c.g * c.iw) * inv in
                     let cb = (w0 * a.b * a.iw + w1 * b.b * b.iw + w2 * c.b * c.iw) * inv in
-                    let q = fn (v: float) ->
-                      let s = v * 255.0 in
-                      if s <= 0.0 then 0 else if s >= 255.0 then 255 else int_of_float (s + 0.5) in
+                    // THE STORE ENCODES, AND ONLY THE STORE. Interpolation
+                    // happens in linear light -- which is the only place it is
+                    // meaningful, because the transfer curve is not linear --
+                    // and the curve is applied exactly once, here, at the point
+                    // where a float becomes a display byte. Quantizing linearly
+                    // instead loses the darks: eight bits of linear light puts
+                    // a quarter of its codes above 0.75 and eleven of them below
+                    // 0.01, which is banding you can see.
+                    let q = Srgb.encode in
                     let o = idx * 4 in
                     let _ = vec_set depth idx z in
                     let _ = bytebuf_set t.color o (q cr) in
