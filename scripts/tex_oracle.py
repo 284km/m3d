@@ -40,12 +40,14 @@ def load(name):
     if im.mode == "I;16":
         d = list(im.getdata())
         return w, h, [(v >> 8, v >> 8, v >> 8, 255) for v in d]
-    if im.mode == "P":
-        pal = im.getpalette()
-        d = list(im.getdata())
-        return w, h, [(pal[3 * i], pal[3 * i + 1], pal[3 * i + 2], 255) for i in d]
-    im = im.convert("RGBA")
-    return w, h, list(im.getdata())
+    # NO HAND-ROLLED PALETTE PATH. There was one -- look the index up in the palette,
+    # alpha 255 -- and it was wrong in the one way that matters: a palette image's
+    # transparency is in a tRNS chunk, so "alpha 255" is an assumption and not a
+    # reading. It also meant the oracle was re-implementing the palette lookup instead
+    # of asking PIL, which is the whole reason for having an oracle. On an image with no
+    # tRNS the two agree exactly; on one with a tRNS the hand path says 255 everywhere
+    # and PIL says 0, 64, 200, 255.
+    return w, h, list(im.convert("RGBA").getdata())
 
 def wrap(mode, i, n):
     if n <= 0: return 0
@@ -91,10 +93,20 @@ def main():
             k = int(t[1]); vals = [int(x) for x in t[2:10]]
             got[cur][t[0]][k] = tuple((vals[2 * i], vals[2 * i + 1]) for i in range(4))
 
+    # ITERATE WHAT THE DUMP ACTUALLY PRODUCED, not a list written here.
+    #
+    # This was a tuple of six names and a message that said "over 6 images" as a
+    # literal. Adding two images to test/tex_dump.mere therefore changed nothing at
+    # all: the dump grew, the oracle compared the same six, and the line still read
+    # "6 images". The two new ones were the tRNS cases -- the whole point of adding
+    # them -- and a hand-maintained list is exactly how a gate stops keeping up with
+    # what it is pointed at.
     bad, checked = [], 0
-    for name in ("grey8", "greya8", "rgb8", "rgba8", "pal8", "grey16"):
-        if name not in got:
-            bad.append(f"{name}: the dump has no such image"); continue
+    names = sorted(got)
+    if not names:
+        print("tex_oracle: FAIL -- the dump named no images at all")
+        return 1
+    for name in names:
         w, h, px = load(name)
         checked += 1
         if got[name]["wh"] != (w, h):
@@ -121,7 +133,8 @@ def main():
     if checked < 100:
         print(f"tex_oracle: FAIL -- only {checked} comparisons, which is not a check")
         return 1
-    print(f"tex_oracle: {checked} comparisons over 6 images, exact, against an independent PNG decoder")
+    print(f"tex_oracle: {checked} comparisons over {len(names)} images "
+          f"({', '.join(names)}), exact, against an independent PNG decoder")
     for b in bad[:8]:
         print("  " + b)
     if bad:

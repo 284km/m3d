@@ -1,0 +1,7 @@
+# TextureSettingsTest -- from KhronosGroup/glTF-Sample-Assets, fetched 2026-09-07
+glTF/CheckAndX.png  19da9a7f987b9a64684500c1de49293c0922f1840f13ce5d38505b8b5fe1c001  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureSettingsTest/glTF/CheckAndX.png
+glTF/CheckAndX_V.png  4f8ea98d173360c29275e04cac8d1d05004b1605d818e6f143aca8f31e4f302d  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureSettingsTest/glTF/CheckAndX_V.png
+glTF/TextureSettingsTest.gltf  dd1f85b4638ffc72f1e09e19b101b7a05d94a0353facced8f59c16a2d9c09447  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureSettingsTest/glTF/TextureSettingsTest.gltf
+glTF/TextureSettingsTest0.bin  1aa2e5e31ae08179eea355945b6fd5d84bd5ffd62a50b93a68c2368d9f345cbe  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureSettingsTest/glTF/TextureSettingsTest0.bin
+glTF/TextureTestLabels.png  14b29323950f10cacfbc4160ea8982aaac6bdea21cf4ec5e8c1589917266415a  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureSettingsTest/glTF/TextureTestLabels.png
+glTF-Binary/TextureSettingsTest.glb  44013a0602cbbdcaf703905ed47cc6b6fb49f067d7de0e1a0a568a5bbfa9d769  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureSettingsTest/glTF-Binary/TextureSettingsTest.glb

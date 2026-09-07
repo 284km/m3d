@@ -32,7 +32,12 @@ type material = {
   er: float, eg: float, eb: float,
   // 0 = OPAQUE, 1 = MASK, 2 = BLEND. MASK compares against `cutoff` and is the
   // only one that changes coverage rather than colour.
-  alpha_mode: int, cutoff: float
+  alpha_mode: int, cutoff: float,
+  // Whether the back of a surface is drawn at all. A material is single-sided
+  // unless it says otherwise, so the DEFAULT IS FALSE -- which is the direction
+  // that leaves holes rather than the one that hides them, and 12 of the 49
+  // models in the corpus set it.
+  double_sided: bool
 };
 
 type dirlight = { dx: float, dy: float, dz: float, lr: float, lg: float, lb: float };

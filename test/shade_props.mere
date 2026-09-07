@@ -16,7 +16,7 @@ let near = fn (name: str) -> fn (tol: float) -> fn (a: float) -> fn (b: float) -
 
 let mat = fn (metal: float) -> fn (rough: float) ->
   material { br = 0.8, bg = 0.5, bb = 0.2, ba = 1.0, metallic = metal, roughness = rough,
-             er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5 };
+             er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5, double_sided = false };
 let white = fn (dx: float) -> fn (dy: float) -> fn (dz: float) ->
   dirlight { dx = dx, dy = dy, dz = dz, lr = 1.0, lg = 1.0, lb = 1.0 };
 let n = v3 { x = 0.0, y = 0.0, z = 1.0 };
@@ -57,7 +57,7 @@ let _ = check "horizon.no_light_from_behind" (below.x == 0.0 && below.y == 0.0 &
 // wrong, not the shader.)
 let bright = fn (metal: float) ->
   material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = metal, roughness = 1.0,
-             er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5 };
+             er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5, double_sided = false };
 let straight = v3 { x = 0.0, y = 0.0, z = 1.0 };
 let dielec = (Shade.direct (bright 0.0) n straight (white 0.0 0.0 (0.0 - 1.0))).x;
 let metalv = (Shade.direct (bright 1.0) n straight (white 0.0 0.0 (0.0 - 1.0))).x;
@@ -67,7 +67,7 @@ let _ = check "metal.still_reflects_something" (metalv > 0.0);
 // other way: F0 is the base colour.
 let blackmetal = material { br = 0.0, bg = 0.0, bb = 0.0, ba = 1.0, metallic = 1.0,
                             roughness = 0.3, er = 0.0, eg = 0.0, eb = 0.0,
-                            alpha_mode = 0, cutoff = 0.5 };
+                            alpha_mode = 0, cutoff = 0.5, double_sided = false };
 let bmv = (Shade.direct blackmetal n straight (white 0.0 0.0 (0.0 - 1.0))).x;
 let _ = check "metal.black_metal_absorbs" (bmv == 0.0);
 
@@ -90,11 +90,11 @@ let _ = check "fresnel.monotone"
 // distinguishes "spreads" from "is dimmer everywhere".
 let peak_r = fn (rough: float) ->
   let m = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 1.0, roughness = rough,
-                     er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5 } in
+                     er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5, double_sided = false } in
   (Shade.direct m n (v3 { x = 0.0, y = 0.0, z = 1.0 }) (white 0.0 0.0 (0.0 - 1.0))).x;
 let off_r = fn (rough: float) ->
   let m = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 1.0, roughness = rough,
-                     er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5 } in
+                     er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5, double_sided = false } in
   let e = V3.normalize (v3 { x = 0.6, y = 0.0, z = 0.8 }) in
   (Shade.direct m n e (white 0.0 0.0 (0.0 - 1.0))).x;
 let _ = check "rough.smoother_is_brighter_at_the_peak" (peak_r 0.05 > peak_r 0.5);
@@ -105,7 +105,7 @@ let _ = check "rough.rougher_is_brighter_off_peak" (off_r 0.5 > off_r 0.05);
 // This is not a full furnace test -- that integrates over the hemisphere -- but
 // it catches a missing 1/pi, which is the usual way a renderer glows.
 let wm = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 0.0, roughness = 1.0,
-                    er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5 };
+                    er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5, double_sided = false };
 let lit = Shade.direct wm n (v3 { x = 0.0, y = 0.0, z = 1.0 }) (white 0.0 0.0 (0.0 - 1.0));
 let _ = check "energy.diffuse_under_unit_light_is_under_one" (lit.x < 1.0);
 let _ = check "energy.diffuse_is_about_one_over_pi" (lit.x > 0.25 && lit.x < 0.45);
@@ -113,7 +113,7 @@ let _ = check "energy.diffuse_is_about_one_over_pi" (lit.x > 0.25 && lit.x < 0.4
 // --- alpha modes -------------------------------------------------------------
 let mk_alpha = fn (mode: int) -> fn (cut: float) ->
   material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 0.0, roughness = 0.5,
-             er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = mode, cutoff = cut };
+             er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = mode, cutoff = cut, double_sided = false };
 // OPAQUE ignores alpha entirely, which is the specification and is not the same
 // as treating it as 1: a texture with alpha 0 still draws.
 let _ = check "alpha.opaque_ignores_it" (Shade.passes_alpha (mk_alpha 0 0.5) 0.0);
@@ -137,7 +137,7 @@ let _ = check "srgb.decode_encode_ends" (Srgb.encode 0.0 == 0 && Srgb.encode 1.0
 let sweep_mid = fn (name: str) -> fn (rough: float) -> fn (base: float) ->
   let mk = fn (metal: float) ->
     material { br = base, bg = base, bb = base, ba = 1.0, metallic = metal, roughness = rough,
-               er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5 } in
+               er = 0.0, eg = 0.0, eb = 0.0, alpha_mode = 0, cutoff = 0.5, double_sided = false } in
   let e = V3.normalize (v3 { x = 0.4, y = 0.1, z = 0.9 }) in
   let li = white (0.0 - l1.x) (0.0 - l1.y) (0.0 - l1.z) in
   let at = fn (metal: float) -> (Shade.direct (mk metal) n e li).x in

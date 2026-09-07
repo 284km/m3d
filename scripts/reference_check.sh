@@ -152,7 +152,14 @@ for d in test/data/gltf/*/; do
   m=$(basename "$d")
   f=$(ls "$d"glTF/*.gltf 2>/dev/null | head -1)
   [ -n "$f" ] || continue
-  log=$("$T/m3d" "$f" --out "$T/$m.mine.png" --size "$SIZE" 2>&1) || {
+  # A BACKGROUND NO SURFACE LANDS ON. "Covered" has to be decidable from the
+  # picture, and against the default dark grey a dark surface is background --
+  # Suzanne read 0.92 on a silhouette measure with nothing wrong with its
+  # geometry, and adding a texture slot MOVED that number, which is how a
+  # silhouette measure tells you it is answering a colour question. Magenta is
+  # not a proof (a magenta emissive surface would still fool it); the exact
+  # answer is two renders on two backgrounds, which is not paid for yet.
+  log=$("$T/m3d" "$f" --out "$T/$m.mine.png" --size "$SIZE" --bg 255,0,255 2>&1) || {
     echo "$m: m3d refused it — $(echo "$log" | tail -1)"; continue; }
   tri=$(echo "$log" | sed -n 's/^triangles \([0-9]*\).*/\1/p')
   [ "${tri:-0}" -gt 0 ] || { echo "$m: no triangles drawn, so there is nothing to compare"; continue; }

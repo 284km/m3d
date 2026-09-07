@@ -8,14 +8,14 @@
      antialiasing (m3d has none), tone mapping (m3d has none), and the environment
      (m3d has a constant ambient term and no image-based lighting). What is left is
      the geometry, the transforms, and the material. -->
-<html><head><title>LOADING</title><style>html,body{margin:0;background:#1a1a1e}canvas{display:block}
+<html><head><title>LOADING</title><style>html,body{margin:0;background:#f0f}canvas{display:block}
 /* A 4-pixel strip below the canvas, painted a distinctive colour ONLY after the render
    returns. The viewport is one strip taller than the picture, so a screenshot carries
    its own proof that it is a finished render and not whatever the page happened to look
    like when the browser's clock ran out. Without it a blank or half-loaded frame is a
    valid PNG of the right size, and the gate reads it as an answer -- which happened
    once, on one model, and did not reproduce, which is the worst way for it to happen. */
-#done{height:4px;background:#1a1a1e}</style>
+#done{height:4px;background:#f0f}</style>
 <script type="importmap">{"imports":{"three":"./three.module.js","three/addons/":"./jsm/"}}</script>
 </head><body><canvas id="c"></canvas><div id="done"></div>
 <script type="module">
@@ -35,7 +35,7 @@ renderer.setPixelRatio(1);
 // about tone mapping.
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.NoToneMapping;
-renderer.setClearColor(0x1a1a1e, 1);
+renderer.setClearColor(0xff00ff, 1);
 
 // A DIAGNOSTIC SWITCH, NOT THE DEFAULT. This version of three.js compensates for
 // multiple scattering in its DIRECT specular term -- RE_Direct_Physical calls

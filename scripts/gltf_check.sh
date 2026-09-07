@@ -30,8 +30,31 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-mere}"
 command -v "$MERE" >/dev/null 2>&1 || { echo "gltf_check: no mere — set MERE=..." >&2; exit 1; }
+CC="${CC:-clang}"
 cd "$ROOT"
 T="${TMPDIR:-/tmp}/m3d_gltf.$$"; mkdir -p "$T"; trap 'rm -rf "$T"' EXIT
+
+# THE SWEEP RUNS COMPILED, AND A SAMPLE RUNS BOTH WAYS.
+#
+# The corpus went from ten models to forty-nine, which is eighty-three files, each read
+# twice -- once for the container comparison and once for the oracle. Interpreted, that
+# is minutes, and a gate nobody will wait for is a gate that gets skipped. So the C
+# backend builds the dumper once and the sweep uses it.
+#
+# That would quietly change WHICH READER is being checked, so a handful of small files
+# are read BOTH ways and required to be byte-identical. That comparison did not exist
+# before -- the gate only ever ran the interpreter, so it never asked whether the two
+# agree -- and it is the reason the swap is safe rather than merely faster.
+DUMP="$MERE test/gltf_dump.mere"
+compiled=""
+if command -v "$CC" >/dev/null 2>&1 && "$MERE" -c test/gltf_dump.mere > "$T/dump.c" 2>"$T/cerr" \
+   && "$CC" -O2 -w "$T/dump.c" -o "$T/dump" -lm 2>>"$T/cerr"; then
+  DUMP="$T/dump"
+  compiled=yes
+else
+  echo "gltf_check: the dumper did not compile, so the sweep runs interpreted (slow)"
+  head -3 "$T/cerr" | sed 's/^/    /'
+fi
 
 fail=0
 pairs=0; single=0; oracled=0
@@ -51,12 +74,12 @@ for d in test/data/gltf/*/; do
   b=$(ls "$d"glTF-Binary/*.glb 2>/dev/null | head -1)
 
   if [ -n "$g" ]; then
-    if ! "$MERE" test/gltf_dump.mere "$g" > "$T/g.txt" 2>&1; then
+    if ! $DUMP "$g" > "$T/g.txt" 2>&1; then
       echo "gltf_check: $m .gltf did not load"; sed 's/^/    /' "$T/g.txt" | head -3; fail=1; continue
     fi
   fi
   if [ -n "$b" ]; then
-    if ! "$MERE" test/gltf_dump.mere "$b" > "$T/b.txt" 2>&1; then
+    if ! $DUMP "$b" > "$T/b.txt" 2>&1; then
       echo "gltf_check: $m .glb did not load"; sed 's/^/    /' "$T/b.txt" | head -3; fail=1; continue
     fi
   fi
@@ -86,7 +109,7 @@ for d in test/data/gltf/*/; do
   if command -v python3 >/dev/null 2>&1; then
     for f in "$g" "$b"; do
       [ -n "$f" ] || continue
-      out=$("$MERE" test/gltf_dump.mere "$f" 2>&1 | python3 scripts/gltf_oracle.py "$f" 2>&1)
+      out=$($DUMP "$f" 2>&1 | python3 scripts/gltf_oracle.py "$f" 2>&1)
       case "$out" in
         *FAIL*) echo "$out" | sed 's/^/  /'; fail=1 ;;
         *) oracled=$((oracled + 1)) ;;
@@ -94,6 +117,28 @@ for d in test/data/gltf/*/; do
     done
   fi
 done
+# The two readers against each other, on files small enough for the interpreter. Without
+# this the compiled sweep above would be the only reader the gate ever runs.
+if [ -n "$compiled" ]; then
+  agreed=0
+  for m in Triangle Box BoxInterleaved SimpleSparseAccessor SimpleMeshes BoxVertexColors; do
+    f=$(ls "test/data/gltf/$m/glTF/"*.gltf 2>/dev/null | head -1)
+    [ -n "$f" ] || continue
+    "$T/dump" "$f" > "$T/c.txt" 2>&1 || continue
+    "$MERE" test/gltf_dump.mere "$f" > "$T/i.txt" 2>&1 || {
+      echo "gltf_check: $m did not load in the interpreter"; fail=1; continue; }
+    if diff -q "$T/c.txt" "$T/i.txt" >/dev/null; then
+      agreed=$((agreed + 1))
+    else
+      echo "gltf_check: $m — the interpreter and the C backend read it differently"
+      diff "$T/c.txt" "$T/i.txt" | head -4
+      fail=1
+    fi
+  done
+  echo "gltf_check: $agreed file(s) read byte-identically by the interpreter and the C backend"
+  [ "$agreed" -ge 4 ] || { echo "gltf_check: too few to call that a check"; fail=1; }
+fi
+
 echo "gltf_check: $pairs model(s) identical across both containers, $single with only one container"
 [ "$pairs" -ge 1 ] || { echo "gltf_check: no model had both containers, so check 1 compared nothing"; fail=1; }
 if command -v python3 >/dev/null 2>&1; then
@@ -137,7 +182,7 @@ PY
 refused=0; total=0
 for c in truncated.glb wrong_length.glb bad_magic.glb version_1.glb unaligned.glb; do
   total=$((total + 1))
-  msg=$("$MERE" test/gltf_dump.mere "$T/$c" 2>&1)
+  msg=$($DUMP "$T/$c" 2>&1)
   case "$msg" in
     *"glb: "*|*"gltf: "*) refused=$((refused + 1)) ;;
     *) echo "gltf_check: $c was NOT refused with a named reason — got: $(echo "$msg" | head -1)"; fail=1 ;;

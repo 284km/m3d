@@ -68,25 +68,62 @@ NORM = {5121: lambda v: v / 255.0,
 
 def read_accessor(doc, bufs, i):
     a = doc['accessors'][i]
-    if 'sparse' in a:
-        return None, None
     ct, kind, count = a['componentType'], a['type'], a['count']
     nc, cs = NC[kind], SIZE[ct]
     norm = a.get('normalized', False)
+    conv = (lambda v: NORM[ct](v)) if (norm and ct in NORM) else (lambda v: float(v))
+
+    # THE BASE, which is the accessor's own bufferView or -- when it has none -- ZEROS.
+    # The specification says so, and it is how a mostly-empty sparse attribute is written.
     if 'bufferView' not in a:
-        return [0] * (count * nc), [0.0] * (count * nc)
-    bv = doc['bufferViews'][a['bufferView']]
-    buf = bufs[bv.get('buffer', 0)]
-    start = bv.get('byteOffset', 0) + a.get('byteOffset', 0)
-    stride = bv.get('byteStride', nc * cs)
-    ints, flts = [], []
-    for k in range(count):
-        base = start + k * stride
-        for c in range(nc):
-            v = struct.unpack_from(FMT[ct], buf, base + c * cs)[0]
-            if ct != 5126:
-                ints.append(v)
-            flts.append(NORM[ct](v) if (norm and ct in NORM) else float(v))
+        ints, flts = [0] * (count * nc), [0.0] * (count * nc)
+    else:
+        bv = doc['bufferViews'][a['bufferView']]
+        buf = bufs[bv.get('buffer', 0)]
+        start = bv.get('byteOffset', 0) + a.get('byteOffset', 0)
+        stride = bv.get('byteStride', nc * cs)
+        ints, flts = [], []
+        for k in range(count):
+            base = start + k * stride
+            for c in range(nc):
+                v = struct.unpack_from(FMT[ct], buf, base + c * cs)[0]
+                if ct != 5126:
+                    ints.append(v)
+                flts.append(conv(v))
+
+    # THE OVERWRITES. This branch used to `return None, None` -- the oracle declined
+    # sparse accessors entirely -- so when the reader learned them, the reader's line
+    # said "exact, by a second reader" about a file whose one interesting accessor
+    # nobody had compared. An oracle that skips the case is not a reader of it.
+    #
+    # The indices have THEIR OWN componentType (SimpleSparseAccessor stores float
+    # positions indexed by unsigned shorts), and the values bufferView is TIGHTLY
+    # PACKED: no byteStride, because a sparse block is not a vertex buffer.
+    if 'sparse' in a:
+        sp = a['sparse']
+        n = sp['count']
+        def where(key, default_ct):
+            o = sp[key]
+            bv = doc['bufferViews'][o['bufferView']]
+            return (bufs[bv.get('buffer', 0)],
+                    bv.get('byteOffset', 0) + o.get('byteOffset', 0),
+                    o.get('componentType', default_ct))
+        ibuf, ioff, ict = where('indices', 5125)
+        vbuf, voff, _ = where('values', ct)
+        ics = SIZE[ict]
+        if ints == []:
+            ints = None
+        for k in range(n):
+            e = struct.unpack_from(FMT[ict], ibuf, ioff + k * ics)[0]
+            if not 0 <= e < count:
+                raise SystemExit(f"gltf_oracle: sparse index {e} outside {count} elements")
+            for c in range(nc):
+                v = struct.unpack_from(FMT[ct], vbuf, voff + (k * nc + c) * cs)[0]
+                if ints is not None:
+                    ints[e * nc + c] = v
+                flts[e * nc + c] = conv(v)
+        return ints, flts
+
     return (ints if ct != 5126 else None), flts
 
 def bits(x):

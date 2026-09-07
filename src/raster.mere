@@ -218,14 +218,21 @@ type svert = {
   sx: float, sy: float, sz: float, siw: float,
   wx: float, wy: float, wz: float,
   nx: float, ny: float, nz: float,
+  // TWO TEXTURE COORDINATE SETS, because glTF gives every material slot its own
+  // `texCoord` index and two of the corpus's models use the second one -- an
+  // occlusion map on TEXCOORD_1, an emissive map on TEXCOORD_1. A renderer that
+  // carried one set would sample those with the wrong coordinates, which is a
+  // picture rather than an error.
   su: float, sv: float,
+  su1: float, sv1: float,
   cr: float, cg: float, cb: float
 };
 
 module RasterS {
   // `shade` is called with the interpolated world position, the interpolated
-  // and RE-NORMALIZED normal, the texture coordinate and the vertex colour, and
-  // returns linear light.
+  // and RE-NORMALIZED normal, BOTH texture coordinate sets and the vertex
+  // colour, and returns linear light -- OR `None`, meaning this pixel is not
+  // drawn at all, which is glTF's MASK alpha mode.
   //
   // Re-normalized because interpolating three unit vectors does not give a unit
   // vector -- it gives one that is short by however much they diverge, and a
@@ -282,18 +289,31 @@ module RasterS {
                                                z = pc a.nz b.nz c.nz }) in
                     let uu = pc a.su b.su c.su in
                     let vv = pc a.sv b.sv c.sv in
+                    let uu1 = pc a.su1 b.su1 c.su1 in
+                    let vv1 = pc a.sv1 b.sv1 c.sv1 in
                     let vc = v3 { x = pc a.cr b.cr c.cr,
                                   y = pc a.cg b.cg c.cg,
                                   z = pc a.cb b.cb c.cb } in
+                    // THE SHADER MAY DECLINE A PIXEL, and that is what glTF's
+                    // MASK alpha mode is: not a colour but a coverage decision,
+                    // taken per pixel after the texture has been sampled.
+                    //
+                    // A DECLINED PIXEL MUST NOT WRITE DEPTH. It is a hole, and a
+                    // hole that occludes is worse than no hole at all -- whatever
+                    // is behind it disappears, which looks like a z-buffer bug a
+                    // long way from here.
+                    //
                     // Annotated because the closure is a parameter and its
                     // result type has nothing to be inferred from at this call.
-                    let lit = (shade wp n uu vv vc : v3) in
-                    let o = idx * 4 in
-                    let _ = vec_set depth idx z in
-                    let _ = bytebuf_set t.color o (Srgb.encode lit.x) in
-                    let _ = bytebuf_set t.color (o + 1) (Srgb.encode lit.y) in
-                    let _ = bytebuf_set t.color (o + 2) (Srgb.encode lit.z) in
-                    bytebuf_set t.color (o + 3) 255
+                    match (shade wp n uu vv uu1 vv1 vc : v3 option) with
+                    | None -> ()
+                    | Some lit ->
+                      let o = idx * 4 in
+                      let _ = vec_set depth idx z in
+                      let _ = bytebuf_set t.color o (Srgb.encode lit.x) in
+                      let _ = bytebuf_set t.color (o + 1) (Srgb.encode lit.y) in
+                      let _ = bytebuf_set t.color (o + 2) (Srgb.encode lit.z) in
+                      bytebuf_set t.color (o + 3) 255
                   else ()
                 else () in
               col (x + 1) in

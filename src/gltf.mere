@@ -186,6 +186,40 @@ module Gltf {
           | Cons (h, t) -> J.str_ h ++ ", " ++ join t in
         fail ("gltf: this file requires extensions that are not implemented: " ++ join names);
 
+  // A glTF URI IS PERCENT-ENCODED, and a filename is not.
+  //
+  // The specification says a uri is a URI, so a space arrives as `%20` and every
+  // reserved character as its own escape. Handing that to the filesystem asks
+  // for a file whose name literally contains a percent sign and two digits, and
+  // Khronos ships `Box With Spaces` precisely so that a loader which skips this
+  // step fails on something rather than nothing.
+  //
+  // `+` IS NOT A SPACE HERE. That is form encoding, a different specification,
+  // and a file called `a+b.png` is a real file.
+  //
+  // A stray `%` with fewer than two hex digits after it is left alone rather
+  // than dropped: the name is then wrong in a way the filesystem will report,
+  // which beats silently asking for a different file.
+  let unhex = fn (c: int) ->
+    if c >= 48 && c <= 57 then c - 48
+    else if c >= 97 && c <= 102 then c - 87
+    else if c >= 65 && c <= 70 then c - 55
+    else 0 - 1;
+
+  let uri_decode = fn (u: str) ->
+    let n = str_len u in
+    let rec go = fn (i: int) -> fn (acc: str) ->
+      if i >= n then acc
+      else
+        let c = ord (char_at u i) in
+        if c == 37 && i + 2 < n then
+          let hi = unhex (ord (char_at u (i + 1))) in
+          let lo = unhex (ord (char_at u (i + 2))) in
+          if hi >= 0 && lo >= 0 then go (i + 3) (acc ++ chr (hi * 16 + lo))
+          else go (i + 1) (acc ++ char_at u i)
+        else go (i + 1) (acc ++ char_at u i) in
+    go 0 "";
+
   // The bytes of buffer `i`. Buffer 0 of a GLB has no uri and is the BIN chunk;
   // everything else is a file beside the document. A `data:` URI is refused by
   // name rather than mis-read as a filename.
@@ -201,7 +235,7 @@ module Gltf {
         let uri = J.str_ u in
         if str_len uri >= 5 && str_eq (substring uri 0 5) "data:"
         then fail "gltf: a data: URI needs base64, which this reader does not have yet (glTF-Embedded is out of scope)"
-        else read_bytes (d.base ++ uri);
+        else read_bytes (d.base ++ uri_decode uri);
 
   // The bytes of image `i`. glTF gives an image EITHER a `uri` -- a file
   // beside the document -- OR a `bufferView`, which is how a GLB carries its
@@ -217,7 +251,7 @@ module Gltf {
         let uri = J.str_ u in
         if str_len uri >= 5 && str_eq (substring uri 0 5) "data:"
         then fail "gltf: an image in a data: URI needs base64, which this reader does not have yet"
-        else read_bytes (d.base ++ uri)
+        else read_bytes (d.base ++ uri_decode uri)
       | None ->
         match J.field im "bufferView" with
         | None -> fail ("gltf: image " ++ str_of_int i ++ " has neither a uri nor a bufferView")
@@ -322,9 +356,9 @@ module Acc {
     let a = match J.at (J.req d.j "accessors") i with
             | None -> fail ("gltf: no accessor " ++ str_of_int i)
             | Some x -> x in
-    let _ = match J.field a "sparse" with
-            | None -> ()
-            | Some _ -> fail "gltf: sparse accessors are not implemented" in
+    // `sparse` is handled by `floats` and `ints`, which overwrite elements after
+    // reading the base -- so `plan` describes the BASE and nothing here refuses.
+
     let ct = J.int_ (J.req a "componentType") in
     let kind = J.str_ (J.req a "type") in
     let _ = check_matrix_padding kind ct in
@@ -354,6 +388,42 @@ module Acc {
       span { buf = buf, start = start, stride = stride,
              ct = ct, nc = nc, count = count, norm = norm };
 
+  // A SPARSE ACCESSOR IS A BASE PLUS A LIST OF OVERWRITES, and both halves are
+  // real: the base is the accessor's own bufferView, or -- when it has none --
+  // ZEROS, which the specification says explicitly and is how a mostly-empty
+  // attribute is written. Then `count` elements named by `indices` are replaced
+  // by the ones in `values`.
+  //
+  // THE INDICES HAVE THEIR OWN COMPONENT TYPE, which is not the accessor's:
+  // `SimpleSparseAccessor` stores float positions indexed by unsigned shorts.
+  // Reading the indices with the accessor's componentType is the mistake that
+  // makes a sparse accessor look like a corrupt one.
+  //
+  // The values bufferView is TIGHTLY PACKED -- no byteStride, because a sparse
+  // block is not a vertex buffer -- so element k starts at k * nc * comp_size.
+  let sparse_of = fn (d: doc) -> fn (i: int) ->
+    let a = match J.at (J.req d.j "accessors") i with
+            | None -> fail ("gltf: no accessor " ++ str_of_int i)
+            | Some x -> x in
+    match J.field a "sparse" with
+    | None -> None
+    | Some sp ->
+      let n = J.int_ (J.req sp "count") in
+      let sub = fn (key: str) ->
+        match J.field sp key with
+        | None -> fail ("gltf: a sparse accessor with no `" ++ key ++ "`")
+        | Some o ->
+          let bvi = J.int_ (J.req o "bufferView") in
+          let bv = match J.at (J.req d.j "bufferViews") bvi with
+                   | None -> fail "gltf: sparse names a bufferView that is not there"
+                   | Some x -> x in
+          (Gltf.buffer d (J.int_or bv "buffer" 0),
+           J.int_or bv "byteOffset" 0 + J.int_or o "byteOffset" 0,
+           J.int_or o "componentType" 5125) in
+      let (ibuf, ioff, ict) = sub "indices" in
+      let (vbuf, voff, _) = sub "values" in
+      Some (n, ibuf, ioff, ict, vbuf, voff);
+
   // `count * n_components` doubles, elements in order and components in order.
   let floats = fn (d: doc) -> fn (i: int) ->
     let p = plan d i in
@@ -372,6 +442,30 @@ module Acc {
         let _ = comp 0 in
         elem (k + 1) in
     let _ = elem 0 in
+    let _ =
+      match sparse_of d i with
+      | None -> ()
+      | Some (n, ibuf, ioff, ict, vbuf, voff) ->
+        let ics = comp_size ict in
+        let vcs = comp_size p.ct in
+        let rec over = fn (k: int) ->
+          if k == n then ()
+          else
+            let e = read_int_comp ibuf (ioff + k * ics) ict in
+            let _ = if e < 0 || e >= p.count
+                    then fail ("gltf: a sparse index (" ++ str_of_int e
+                               ++ ") is outside its accessor's " ++ str_of_int p.count
+                               ++ " elements")
+                    else () in
+            let rec comp = fn (c: int) ->
+              if c == p.nc then ()
+              else
+                let _ = vec_set out (e * p.nc + c)
+                          (read_comp vbuf (voff + (k * p.nc + c) * vcs) p.ct p.norm) in
+                comp (c + 1) in
+            let _ = comp 0 in
+            over (k + 1) in
+        over 0 in
     out;
 
   // The same, as integers -- for indices and joint numbers, where turning them
@@ -393,5 +487,29 @@ module Acc {
         let _ = comp 0 in
         elem (k + 1) in
     let _ = elem 0 in
+    let _ =
+      match sparse_of d i with
+      | None -> ()
+      | Some (n, ibuf, ioff, ict, vbuf, voff) ->
+        let ics = comp_size ict in
+        let vcs = comp_size p.ct in
+        let rec over = fn (k: int) ->
+          if k == n then ()
+          else
+            let e = read_int_comp ibuf (ioff + k * ics) ict in
+            let _ = if e < 0 || e >= p.count
+                    then fail ("gltf: a sparse index (" ++ str_of_int e
+                               ++ ") is outside its accessor's " ++ str_of_int p.count
+                               ++ " elements")
+                    else () in
+            let rec comp = fn (c: int) ->
+              if c == p.nc then ()
+              else
+                let _ = vec_set out (e * p.nc + c)
+                          (read_int_comp vbuf (voff + (k * p.nc + c) * vcs) p.ct) in
+                comp (c + 1) in
+            let _ = comp 0 in
+            over (k + 1) in
+        over 0 in
     out;
 }

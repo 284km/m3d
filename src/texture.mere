@@ -59,15 +59,53 @@ module Tex {
       let bpp = pixel_bytes colour depth in
       // A 16-bit sample is big-endian, so its high byte IS the 8-bit value.
       let step = if depth == 16 then 2 else 1 in
+      // BELOW 8 BITS A GREY SAMPLE IS A LEVEL OUT OF ITS OWN MAXIMUM -- 0..15 at
+      // 4 bits -- so it scales by 255/(2^d - 1), which is exact at every depth
+      // PNG allows. A PALETTE SAMPLE IS AN INDEX and must not be scaled: 17
+      // times an index looks up a different colour. mpng's `rgb8` makes the same
+      // distinction; this function exists beside it because a baseColor texture
+      // needs the alpha that one drops, and the two now have to agree about
+      // this. `decode` has already undone the PACKING -- one sample a byte --
+      // which is mpng's job and was mpng's bug: a 4-bit row is half the bytes
+      // its stride was assumed to be, and two of Khronos's core sample models
+      // are 4-bit palettes.
+      let gscale =
+        if colour == 3 || depth >= 8 then 1
+        else if depth == 1 then 255 else if depth == 2 then 85 else 17 in
       let pixels = decode data in
       let pal = palette data in
+      // tRNS, WHICH IS WHERE A CUTOUT'S ALPHA LIVES. A palette PNG has no alpha
+      // channel; its transparent entries are listed in a tRNS chunk instead, one
+      // byte each, and THE CHUNK MAY BE SHORTER THAN THE PALETTE -- RFC 2083
+      // makes every entry past its end opaque.
+      //
+      // Reading it as 255 everywhere is what this file did, and the visible
+      // result was that glTF's MASK alpha mode had nothing to cut: two of the
+      // corpus's models draw their labels as opaque rectangles, which a
+      // silhouette comparison against another renderer showed as 0.6.
+      //
+      // For grey and RGB the chunk is a COLOUR KEY instead -- a sample value
+      // that is fully transparent -- and the samples are two bytes each, big
+      // endian, whatever the image's own depth is.
+      let tr = trns data in
+      let key_alpha = fn (nch: int) -> fn (at: int) ->
+        // The low byte of each big-endian sample is the one to compare at depth
+        // 8; at 16 the decoded samples are two bytes and `p` already steps by
+        // two, so the same comparison is against the high byte. Only depth 8 is
+        // reachable here for colour types 0 and 2 with a tRNS in the corpus, and
+        // the 16-bit case is left to compare the high byte rather than pretend.
+        let rec same = fn (i: int) ->
+          if i == nch then true
+          else if bytebuf_get pixels (at + i * step) != vec_get tr (i * 2 + 1) then false
+          else same (i + 1) in
+        if vec_len tr < nch * 2 then 255 else if same 0 then 0 else 255 in
       let out = bytebuf_new (w * h * 4) in
       let rec go = fn (i: int) ->
         if i == w * h then ()
         else
           let p = i * bpp in
           let o = i * 4 in
-          let s0 = bytebuf_get pixels p in
+          let s0 = bytebuf_get pixels p * gscale in
           let put = fn (r: int) -> fn (g: int) -> fn (b: int) -> fn (a: int) ->
             let _ = bytebuf_set out o r in
             let _ = bytebuf_set out (o + 1) g in
@@ -77,16 +115,19 @@ module Tex {
             if colour == 3 then
               // An index past the end of PLTE is a broken file; black beats a
               // crash, which is the choice mpng already made.
-              let e = s0 * 3 in
+              let ix = bytebuf_get pixels p in
+              let e = ix * 3 in
+              let a = if ix < vec_len tr then vec_get tr ix else 255 in
               if e + 2 < vec_len pal
-              then put (vec_get pal e) (vec_get pal (e + 1)) (vec_get pal (e + 2)) 255
-              else put 0 0 0 255
-            else if colour == 0 then put s0 s0 s0 255
+              then put (vec_get pal e) (vec_get pal (e + 1)) (vec_get pal (e + 2)) a
+              else put 0 0 0 a
+            else if colour == 0 then put s0 s0 s0 (key_alpha 1 p)
             else if colour == 4 then put s0 s0 s0 (bytebuf_get pixels (p + step))
             else if colour == 6 then
-              put s0 (bytebuf_get pixels (p + step)) (bytebuf_get pixels (p + step * 2))
-                  (bytebuf_get pixels (p + step * 3))
-            else put s0 (bytebuf_get pixels (p + step)) (bytebuf_get pixels (p + step * 2)) 255 in
+              put (bytebuf_get pixels p) (bytebuf_get pixels (p + step))
+                  (bytebuf_get pixels (p + step * 2)) (bytebuf_get pixels (p + step * 3))
+            else put (bytebuf_get pixels p) (bytebuf_get pixels (p + step))
+                     (bytebuf_get pixels (p + step * 2)) (key_alpha 3 p) in
           go (i + 1) in
       let _ = go 0 in
       texture { w = w, h = h, px = out };

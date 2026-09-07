@@ -5,7 +5,7 @@
 // it. The two things this file legitimately owns are the command line and the
 // disk.
 //
-//   m3d <file.gltf|file.glb> [--out <file.png>] [--size <pixels>]
+//   m3d <file.gltf|file.glb> [--out <file.png>] [--size <pixels>] [--bg R,G,B]
 //
 // It prints the camera it computed. Most glTF sample models carry no camera, so
 // a viewer has to invent one from the scene's bounds -- and two viewers will
@@ -33,7 +33,7 @@ let rec first_positional = fn (xs) ->
     else Some a;
 
 let path = match first_positional argv with
-  | None -> fail "usage: m3d <file.gltf|file.glb> [--out out.png] [--size 512]"
+  | None -> fail "usage: m3d <file.gltf|file.glb> [--out out.png] [--size 512] [--bg 26,26,30]"
   | Some p -> p;
 let out = match find_flag argv "--out" with | None -> "out.png" | Some v -> v;
 let size = match find_flag argv "--size" with | None -> 512 | Some v -> int_of_str v;
@@ -53,7 +53,18 @@ let want_light = match find_flag argv "--no-light" with
       | Nil -> true
       | Cons (a, r) -> if str_eq a "--no-light" then false else has r in
     has argv;
-let (t, depth, drawn, eye, ctr, th, zn, zf) = Render.one_frame_opt d size size want_light;
+// `--bg R,G,B` for a gate that has to tell "covered" from "not covered": with
+// the default dark grey, a dark surface reads as background. See the note on
+// `one_frame_bg` in render.mere for why this is a flag and not a constant.
+let bg = match find_flag argv "--bg" with
+         | None -> v3 { x = 26.0, y = 26.0, z = 30.0 }
+         | Some v ->
+           match str_split v "," with
+           | Cons (r, Cons (g, Cons (b, Nil))) ->
+             v3 { x = float_of_int (int_of_str r), y = float_of_int (int_of_str g),
+                  z = float_of_int (int_of_str b) }
+           | _ -> fail "m3d: --bg wants three numbers, as R,G,B";
+let (t, depth, drawn, eye, ctr, th, zn, zf) = Render.one_frame_bg d size size want_light bg;
 
 // The camera, in the form a reference renderer wants: a position, a target, the
 // tangent of the half-angle (not the angle -- the tangent is what the

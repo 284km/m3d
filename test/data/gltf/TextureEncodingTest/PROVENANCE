@@ -1,0 +1,13 @@
+# TextureEncodingTest -- from KhronosGroup/glTF-Sample-Assets, fetched 2026-09-07
+glTF/0_136_0.png  7310c0157395b5732c24711abbbc644ae273587de38077045470c9c7ea129bdb  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureEncodingTest/glTF/0_136_0.png
+glTF/0_136_0_gamma.png  ec86d9a12c304702f5f6fc21a03d425bdf8608d8a70a8b0eca5f4ff5521afdff  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureEncodingTest/glTF/0_136_0_gamma.png
+glTF/0_136_0_icc.png  c50df4c3a6c536e27bec21132dcafa2eb0b3c6a5570fe88e7f60aebaa296e8dd  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureEncodingTest/glTF/0_136_0_icc.png
+glTF/0_136_255.png  0fa99fc5d9a46991a583302bb176867463bc03f13d40ca72ca4ffdbf5f6aa3f9  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureEncodingTest/glTF/0_136_255.png
+glTF/0_136_255_gamma.png  f581f51829831a1435e2b1c4e8e1e060c2c91a17fb0403c1c1ae98ebedd9fc5d  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureEncodingTest/glTF/0_136_255_gamma.png
+glTF/0_136_255_icc.png  00681909c34b627cc7ef05da0112f0f384318813ce0726e148d3647a160f619e  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureEncodingTest/glTF/0_136_255_icc.png
+glTF/Plane.bin  68eb0aaba58264604648e828ba7536b3c52333659445200f56d90b23b05a2f36  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureEncodingTest/glTF/Plane.bin
+glTF/SlotLabels.png  4a4f3a1ecc2bf5085962db72f1b81d7523aa364484fe7049b3c196955cee9cf6  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureEncodingTest/glTF/SlotLabels.png
+glTF/Sphere.bin  92bfff23a1cff625d3c012b4a2db0cfb2c30c92775195ee261247fec602f26f4  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureEncodingTest/glTF/Sphere.bin
+glTF/TestLabels.png  8d963c30e101bee83df3db342b80d2905b52b076220b2aed76ce9908a15500b6  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureEncodingTest/glTF/TestLabels.png
+glTF/TextureEncodingTest.gltf  7985fb99097900fc8df7ef5e90d750e329db51ecd4174a2b01dc5d727489570c  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureEncodingTest/glTF/TextureEncodingTest.gltf
+glTF-Binary/TextureEncodingTest.glb  c2f654bdf918e3cce93db3f8d8c1b008b90d3089e756c9b38149e9306b1338f4  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/TextureEncodingTest/glTF-Binary/TextureEncodingTest.glb

@@ -1,0 +1,6 @@
+# SimpleSkin -- from KhronosGroup/glTF-Sample-Assets, fetched 2026-09-07
+glTF/SimpleSkin.gltf  8d92e9888340eb98e82a65a1f8b037d9a1d9f09e5fd0b6ba6d40fd93700b3239  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/SimpleSkin/glTF/SimpleSkin.gltf
+glTF/SimpleSkin_animation.bin  ff21b1bc3d0abbe53f7665060ec6c22d873b6e85a7669171a2b6b8ae01c39347  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/SimpleSkin/glTF/SimpleSkin_animation.bin
+glTF/SimpleSkin_geometry.bin  35f0ca6bc07976c0aadc163d4737758989cfcc9870a99800004c4478fe698b63  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/SimpleSkin/glTF/SimpleSkin_geometry.bin
+glTF/SimpleSkin_inverseBindMatrices.bin  5844ab221cd2ad367420a248f6387b46e5f8498604427730a37ee96b4d4ec599  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/SimpleSkin/glTF/SimpleSkin_inverseBindMatrices.bin
+glTF/SimpleSkin_skinningData.bin  413bc8a8c0da673df767874e6f05f0b00c9261756a08586b9d555bd5535414b5  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/SimpleSkin/glTF/SimpleSkin_skinningData.bin

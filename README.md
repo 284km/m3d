@@ -424,12 +424,106 @@ before the compositor has drawn, and what it writes is a valid PNG of the right
 size in the right background colour — an answer to a different question, which
 this gate produced once before the strip existed.
 
+## What 49 models found that 10 did not
+
+The corpus was ten models. The north star of this project is the **66 Khronos tags
+`core`**, and pointing the four columns at 49 of them — everything under a 2 MB
+cap, written down in `test/data/gltf/CORPUS.md` along with what the cap costs —
+turned up six real defects in an afternoon. Every one of them was found by a
+model Khronos wrote specifically to find it.
+
+**PNG bit depths below 8 were unreadable.** A 4-bit palette row of 1000 pixels is
+500 bytes; the stride came out 1000, and the unfilter loop walked off the end of
+the image. Two core models are 4-bit palettes. Fixed in
+[mpng](https://github.com/284km/mpng): the bytes a row occupies *in the file* are
+not the bytes it occupies in the *decoded output*, and those had been one
+function. Below 8 bits the filters reconstruct in packed bytes and the expansion
+happens afterwards — the other order decodes 8-bit images perfectly and every
+4-bit one into noise, because `left` would be a different byte from the one the
+encoder subtracted.
+
+**A glTF URI is percent-encoded and a filename is not.** `Box%20With%20Spaces.png`
+went to the filesystem verbatim. `+` is *not* a space here — that is form
+encoding, and `a+b.png` is a real file.
+
+**`doubleSided` was ignored**, so the back faces of twelve of the 49 were holes.
+The half that matters is the normal: a back face's points away from the eye and
+glTF says to negate it there, and without that the far side of a surface is lit
+from behind and comes out at ambient — a dark shape that reads as a hole which
+happens not to be transparent.
+
+**A mirroring transform reverses the winding order** (glTF 3.7.4) and did not, so
+`NegativeScaleTest` was inside out — and still looked like the model, which is
+the second time that particular trap has been sprung here.
+
+**Four of the five texture slots were missing.** metallicRoughness (roughness in
+*green*, metallic in *blue* — the other ordering is a different format's and
+produces a plausible picture), occlusion (which multiplies the *ambient* term
+only; applying it to the directional light is what makes creases look painted
+on), emissive, and a second texture-coordinate set, because glTF gives every slot
+its own `texCoord` and two models use the second one. `MultiUVTest` went from a
+colour error of **137 to 2.4**.
+
+**A palette PNG's transparency is a separate chunk.** No alpha channel exists, so
+`tRNS` lists it one byte per entry — and the chunk may be *shorter* than the
+palette, every entry past its end being opaque. Reading 255 everywhere left
+glTF's MASK alpha mode with nothing to cut, and two models drew their labels as
+opaque rectangles.
+
+Two of those were found only because the reference gate compares silhouettes, and
+two only because it compares colour. And two more things came out of the gates
+themselves:
+
+**mpng's own suite had a `refuse_*` arm with no input**, since the file was
+written. An IHDR naming a colour/depth pair RFC 2083 does not define is now
+refused by name, so that arm is a check rather than a place one could go.
+
+**The texture oracle was not asking PIL about palette images.** It looked the
+index up in the palette by hand and hardcoded alpha 255 — re-implementing the
+thing an oracle exists to avoid re-implementing, and wrong in exactly the way
+`tRNS` exposes. It also compared a hand-written list of six names while the dump
+produced eight, and printed "over 6 images" as a literal, so adding the two
+`tRNS` cases changed nothing at all. It now iterates what it was given and says
+which.
+
+**And the silhouette measure was answering a colour question.** Against the
+default dark background a dark surface reads as no surface: `Suzanne` sat at IoU
+0.919 with nothing wrong with its geometry, and *adding a texture slot moved that
+number*, which is how a silhouette measure tells you what it is really
+comparing. Both renderers now clear to magenta, through a new `--bg R,G,B`.
+Magenta is not a proof — a magenta emissive surface would still fool it — and the
+exact answer is two renders on two backgrounds, which is not paid for and is said
+so in the code.
+
 ## What is not here yet
 
-Owed: near-plane clipping (a triangle with any vertex behind the eye is
-dropped whole, which is right for every model in the corpus and wrong for a
-camera inside geometry), JPEG, the window, animation and skinning, and the GPU
-path. Like the rasterizer, the texture and render paths are compared across two
-backends rather than four, because they write into a `ByteBuf`. Also, within the loader: sparse accessors, `data:` URIs (glTF-Embedded),
-and matrix accessors whose columns need 4-byte padding — all three **refused by
-name** rather than mis-read. See `OPEN_QUESTIONS.md`.
+Ranked by what the corpus table says, rather than by what seems interesting:
+
+- **JPEG.** Six models are refused outright — five for their base colour and, now
+  that normal maps are resolved, `CompareNormal` for its normal map. mbrowse has
+  a 615-line baseline decoder; extracting it into a package is the job.
+- **Normal mapping.** Resolved and sampled but not yet applied, which is the
+  ~8-unit residual on `NormalTangentTest` and `NormalTangentMirrorTest`. Three of
+  the five models that use one have no `TANGENT` — which is exactly what
+  `NormalTangentTest` is for, and means generating a tangent frame from the UVs.
+- **Skinning** (six models; `RecursiveSkeletons` is at IoU 0.199, drawing its
+  bind pose where the reference draws the skin) and **morph targets** (four;
+  `SimpleMorph` at 0.336).
+- **Mipmaps.** `minFilter` is read and ignored, so a minified texture aliases.
+  It is the whole of the textured models' remaining colour residual.
+- **Primitive modes** other than triangles — `PrimitiveModeNormalsTest` has
+  points and a line strip, skipped and counted, at IoU 0.587.
+- **Animation**, beyond the fact that every animated model renders its base pose
+  and agrees with the reference there.
+- **Near-plane clipping**: a triangle with any vertex behind the eye is dropped
+  whole, which is right for every model in the corpus and wrong for a camera
+  inside geometry.
+- **The window and the GPU path.**
+
+Within the loader: **sparse accessors**, **`data:` URIs** (glTF-Embedded) and
+matrix accessors whose columns need 4-byte padding — all **refused by name**
+rather than mis-read.
+
+Like the rasterizer, the texture and render paths are compared across two
+backends rather than four, because they write into a `ByteBuf`. See
+`OPEN_QUESTIONS.md`.

@@ -20,12 +20,23 @@ Three numbers per model:
 
 An unpinned model is a FAILURE, not a pass. A gate that silently accepts whatever it is
 shown for a model nobody has looked at is not checking that model.
+
+A pin may carry trailing text, and when it does that text is a REASON: the feature this
+renderer has not implemented, which is why that model's silhouette disagrees. It is the
+only thing that waives the absolute IoU floor, so "not implemented yet" has to be written
+down as a sentence rather than absorbed into a number.
 """
-import os, sys, warnings
+import os, re, sys, warnings
 warnings.filterwarnings("ignore")
 from PIL import Image
 
-BG = (26, 26, 30)                 # the clear colour both renderers are given
+# The clear colour both renderers are given -- a saturated magenta, chosen so that
+# "covered" is decidable. Against a dark background a dark surface reads as no surface,
+# and the silhouette measure then answers a colour question instead of a geometry one:
+# Suzanne sat at 0.92 with nothing wrong with its geometry, and adding a texture slot
+# moved that number. Magenta is not proof -- a magenta emissive surface would still fool
+# it -- and the exact answer is two renders on two backgrounds, which is not paid for.
+BG = (255, 0, 255)
 IOU_FLOOR = 0.95                  # below this, no pin makes it acceptable
 IOU_SLACK = 0.005                 # a pin may not fall by more than this
 MAE_SLACK_STOCK = 1.0             # ... nor may the stock colour pin rise by more than this
@@ -97,9 +108,30 @@ def read_pins():
             line = line.split("#")[0].strip()
             if not line:
                 continue
-            t = line.split()
-            if len(t) == 5:
-                pins[t[0]] = tuple(float(x) for x in t[1:])
+            # A TAB SEPARATES THE NAME FROM THE NUMBERS, and nothing else does.
+            #
+            # `line.split()` was the obvious reading, and it silently dropped
+            # `Box With Spaces` -- the model Khronos ships to break exactly that
+            # assumption -- leaving it unpinnable and therefore permanently failing, in
+            # a way that read as a missing pin. "Everything up to two or more spaces"
+            # was the next attempt and it dropped `TextureLinearInterpolationTest`,
+            # which is thirty characters and fills the column, leaving one space after
+            # it. Both were guesses about layout. A tab is not a guess: these names come
+            # from directory names and cannot contain one.
+            if "\t" not in line:
+                continue
+            name, _, rest = line.partition("\t")
+            t = rest.split()
+            if len(t) < 4:
+                continue
+            try:
+                nums = tuple(float(x) for x in t[:4])
+            except ValueError:
+                continue
+            # A row may carry trailing text, and when it does that text is a REASON:
+            # the feature this renderer has not implemented yet. It is the only thing
+            # that lets a row sit below the absolute IoU floor -- see below.
+            pins[name.strip()] = (nums, " ".join(t[4:]))
     return pins
 
 
@@ -129,13 +161,23 @@ def main():
     m_patch, pct = mae(a, c, [x and covered(q) for x, q in zip(ca, c)])
 
     problems = []
-    if iou < IOU_FLOOR:
-        problems.append(f"IoU {iou:.3f} is below the absolute floor {IOU_FLOOR}")
     pins = read_pins()
     if name not in pins:
         problems.append("unpinned — put a line in scripts/ref/pinned.txt")
+        if iou < IOU_FLOOR:
+            problems.append(f"IoU {iou:.3f} is below the absolute floor {IOU_FLOOR}")
     else:
-        pi, ps, pp, pd = pins[name]
+        (pi, ps, pp, pd), reason = pins[name]
+        # THE FLOOR CAN ONLY BE WAIVED BY NAMING WHAT IT IS WAITING ON. Some models
+        # disagree about their silhouette because this renderer does not implement a
+        # feature they use -- skinning, morph targets -- and pinning those rows at
+        # whatever they happen to measure would quietly turn "not implemented" into
+        # "as expected". A row below the floor must say which feature, in the pin file,
+        # and when that feature lands the sentence becomes false in a place someone
+        # reads.
+        if iou < IOU_FLOOR and not reason:
+            problems.append(f"IoU {iou:.3f} is below the absolute floor {IOU_FLOOR} "
+                            f"and the pin gives no reason")
         if iou < pi - IOU_SLACK:
             problems.append(f"IoU fell from its pin {pi:.3f}")
         if m_stock > ps + MAE_SLACK_STOCK:

@@ -21,7 +21,12 @@ import "./texture.mere";
 // is NOT folded into `texture`, because the same image can be referenced by two
 // textures with different wrap modes and decoding it twice to say so would be a
 // lie about what the file contains.
-type texslot = { img: texture, ws: int, wt: int, mag: int };
+type texslot = { img: texture, ws: int, wt: int, mag: int,
+                 // WHICH COORDINATE SET, from the slot's own `texCoord`. It is a
+                 // property of the SLOT and not of the mesh: MultiUVTest puts its
+                 // base colour on TEXCOORD_0 and its emissive on TEXCOORD_1, in
+                 // one material.
+                 uvset: int };
 
 module Scene {
   // A node's local transform: `matrix` if it has one, otherwise TRS. glTF says
@@ -215,7 +220,7 @@ module Render {
   let material_of = fn (d: doc) -> fn (prim: Json.json) ->
     let dflt = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 1.0,
                           roughness = 1.0, er = 0.0, eg = 0.0, eb = 0.0,
-                          alpha_mode = 0, cutoff = 0.5 } in
+                          alpha_mode = 0, cutoff = 0.5, double_sided = false } in
     match J.field prim "material" with
     | None -> dflt
     | Some mi ->
@@ -242,64 +247,124 @@ module Render {
                  metallic = J.flt_or pbr "metallicFactor" 1.0,
                  roughness = J.flt_or pbr "roughnessFactor" 1.0,
                  er = er, eg = eg, eb = eb,
-                 alpha_mode = mode, cutoff = J.flt_or m "alphaCutoff" 0.5 };
+                 alpha_mode = mode, cutoff = J.flt_or m "alphaCutoff" 0.5,
+                 double_sided = J.bool_or m "doubleSided" false };
 
-  // A primitive's baseColor texture, decoded, or None when it has none.
+  // One texture slot of a primitive's material, decoded, or None when the
+  // material does not use it.
   //
-  // THE IMAGE IS DECODED HERE, ONCE PER PRIMITIVE PER FRAME. Two primitives
-  // sharing one texture decode it twice, and a second frame decodes everything
-  // again. That is wrong for anything animated and invisible for a still, and
-  // the fix is a cache keyed on the image index -- owed, and named here rather
-  // than discovered by someone timing a viewer.
+  // THE IMAGE IS DECODED HERE, ONCE PER SLOT PER PRIMITIVE PER FRAME. Two
+  // primitives sharing one texture decode it twice, and a second frame decodes
+  // everything again. That is wrong for anything animated and invisible for a
+  // still, and the fix is a cache keyed on the image index -- owed, and named
+  // here rather than discovered by someone timing a viewer.
   //
   // Everything this cannot do is REFUSED BY NAME. Silently rendering the
-  // material's factor instead is what this renderer did before, and the result
-  // was a white duck that no gate objected to: the silhouette was right, the
-  // lighting was right, and the model was simply the wrong colour. Only a
-  // second renderer looking at the same file caught it.
-  let base_tex = fn (d: doc) -> fn (prim: Json.json) ->
-    match J.field prim "material" with
+  // material's factor instead is what this renderer did before it had textures
+  // at all, and the result was a white duck that no gate objected to: the
+  // silhouette was right, the lighting was right, and the model was simply the
+  // wrong colour. Only a second renderer looking at the same file caught it.
+  //
+  // `where` is the JSON object holding the slot -- `pbrMetallicRoughness` for
+  // baseColor and metallicRoughness, the material itself for the other three.
+  let slot_tex = fn (d: doc) -> fn (holder: Json.json) -> fn (slot: str) ->
+    match J.field holder slot with
     | None -> None
+    | Some sj ->
+      let uvset = J.int_or sj "texCoord" 0 in
+      // Only TEXCOORD_0 and TEXCOORD_1 are carried through the rasterizer, so a
+      // slot pointing at a third set would silently sample the wrong one.
+      let _ = if uvset > 1
+              then fail ("gltf: " ++ slot ++ " uses TEXCOORD_" ++ str_of_int uvset
+                         ++ ", and this renderer carries only 0 and 1")
+              else () in
+      let ti = J.int_ (J.req sj "index") in
+      let tx = match J.at (J.req d.j "textures") ti with
+               | None -> fail ("gltf: no texture " ++ str_of_int ti)
+               | Some x -> x in
+      let si = J.int_ (J.req tx "source") in
+      // A sampler is optional; glTF leaves the defaults to the runtime, and
+      // these are the ones three.js and every other viewer picked: repeat,
+      // and linear magnification.
+      let (ws, wt, mag) =
+        match J.field tx "sampler" with
+        | None -> (Wrap.repeat_, Wrap.repeat_, 9729)
+        | Some sjx ->
+          match J.at (J.req d.j "samplers") (J.int_ sjx) with
+          | None -> fail "gltf: texture names a sampler that is not there"
+          | Some sm -> (J.int_or sm "wrapS" Wrap.repeat_,
+                        J.int_or sm "wrapT" Wrap.repeat_,
+                        J.int_or sm "magFilter" 9729) in
+      // MINIFICATION IS NOT IMPLEMENTED. `minFilter` is read and ignored:
+      // there are no mipmaps, so a texture squeezed into fewer pixels than it
+      // has texels is point-or-bilinear sampled at full resolution and
+      // aliases. It is the largest remaining disagreement with the reference
+      // renderer on the textured models, and it is recorded there rather than
+      // hidden.
+      Some (texslot { img = Tex.of_png_data (Gltf.image d si) (Gltf.image_name d si),
+                      ws = ws, wt = wt, mag = mag, uvset = uvset });
+
+  // Sampling a slot: the colour space and the coordinate set are both properties
+  // OF THE SLOT rather than of the file or the mesh.
+  //
+  // glTF says baseColor and emissive are sRGB-encoded and that
+  // metallicRoughness, occlusion and normal are not. Decoding a roughness map
+  // through the transfer curve makes every surface smoother than the file says,
+  // everywhere, and reads as a lighting choice rather than as a bug -- so
+  // `srgb` is a parameter with no default and the caller states it per slot.
+  //
+  // Neither path puts a pixel through `pow`: the sRGB decode is a table lookup,
+  // which is what keeps the four backends bit-identical through all of this.
+  //
+  // WRITTEN HERE RATHER THAN INSIDE THE SHADER, and that is not a style
+  // preference: as a closure nested in the per-pixel one it captured the shader's
+  // parameters, and the C backend lifted it to a function whose argument list
+  // named locals the call site did not have -- `use of undeclared identifier
+  // 'mu_fw'`, on 95 KB of emitted C. At module level it captures nothing. The
+  // compiler bug is real and filed; this shape does not depend on it.
+  let slot_sample = fn (ts: texslot) -> fn (srgb: bool) ->
+                    fn (u: float) -> fn (v: float) -> fn (u1: float) -> fn (v1: float) ->
+    let su = if ts.uvset == 1 then u1 else u in
+    let sv = if ts.uvset == 1 then v1 else v in
+    if ts.mag == 9728 then
+      let (a, b, c, e) = Tex.nearest ts.img ts.ws ts.wt su sv in
+      let f = fn (x: int) -> if srgb then Srgb.decode x else float_of_int x / 255.0 in
+      v4 { x = f a, y = f b, z = f c, w = float_of_int e / 255.0 }
+    else if srgb then Tex.sample_srgb ts.img ts.ws ts.wt su sv
+    else Tex.sample_linear ts.img ts.ws ts.wt su sv;
+
+  // `occlusionTexture.strength`, which scales how far the map may darken: the
+  // specification's own formula is 1 + strength * (sampled - 1), so a strength of
+  // 0 disables the map and 1 applies it whole. Defaults to 1.
+  let occ_str = fn (d: doc) -> fn (prim: Json.json) ->
+    match J.field prim "material" with
+    | None -> 1.0
+    | Some mi ->
+      match J.at (J.req d.j "materials") (J.int_ mi) with
+      | None -> 1.0
+      | Some m ->
+        match J.field m "occlusionTexture" with
+        | None -> 1.0
+        | Some oj -> J.flt_or oj "strength" 1.0;
+
+  // The five slots glTF's metallic-roughness material has. `pbr` and the
+  // material are two different holders and the specification puts particular
+  // slots in each; getting that wrong finds nothing, because a slot looked for
+  // in the wrong object is simply absent.
+  let mat_slots = fn (d: doc) -> fn (prim: Json.json) ->
+    match J.field prim "material" with
+    | None -> (None, None, None, None, None)
     | Some mi ->
       let m = match J.at (J.req d.j "materials") (J.int_ mi) with
               | None -> fail "gltf: primitive names a material that is not there"
               | Some x -> x in
       let pbr = match J.field m "pbrMetallicRoughness" with
                 | None -> Json.JObj Nil | Some x -> x in
-      match J.field pbr "baseColorTexture" with
-      | None -> None
-      | Some bct ->
-        // Only TEXCOORD_0 is read into the rasterizer, so a slot pointing at
-        // TEXCOORD_1 would silently sample the wrong set.
-        let _ = if J.int_or bct "texCoord" 0 != 0
-                then fail ("gltf: baseColorTexture uses TEXCOORD_"
-                           ++ str_of_int (J.int_or bct "texCoord" 0)
-                           ++ ", and this renderer carries only TEXCOORD_0")
-                else () in
-        let ti = J.int_ (J.req bct "index") in
-        let tx = match J.at (J.req d.j "textures") ti with
-                 | None -> fail ("gltf: no texture " ++ str_of_int ti)
-                 | Some x -> x in
-        let si = J.int_ (J.req tx "source") in
-        // A sampler is optional; glTF leaves the defaults to the runtime, and
-        // these are the ones three.js and every other viewer picked: repeat,
-        // and linear magnification.
-        let (ws, wt, mag) =
-          match J.field tx "sampler" with
-          | None -> (Wrap.repeat_, Wrap.repeat_, 9729)
-          | Some sj ->
-            match J.at (J.req d.j "samplers") (J.int_ sj) with
-            | None -> fail "gltf: texture names a sampler that is not there"
-            | Some sm -> (J.int_or sm "wrapS" Wrap.repeat_,
-                          J.int_or sm "wrapT" Wrap.repeat_,
-                          J.int_or sm "magFilter" 9729) in
-        // MINIFICATION IS NOT IMPLEMENTED. `minFilter` is read and ignored:
-        // there are no mipmaps, so a texture squeezed into fewer pixels than it
-        // has texels is point-or-bilinear sampled at full resolution and
-        // aliases. It is the largest remaining disagreement with the reference
-        // renderer on Duck, and it is recorded there rather than hidden.
-        Some (texslot { img = Tex.of_png_data (Gltf.image d si) (Gltf.image_name d si),
-                        ws = ws, wt = wt, mag = mag });
+      (slot_tex d pbr "baseColorTexture",
+       slot_tex d pbr "metallicRoughnessTexture",
+       slot_tex d m "normalTexture",
+       slot_tex d m "occlusionTexture",
+       slot_tex d m "emissiveTexture");
 
   // SHADING IS PER VERTEX HERE, and that is a first slice rather than the
   // answer. The rasterizer interpolates a colour, so a normal cannot reach the
@@ -314,9 +379,25 @@ module Render {
   // ambient alone" PER MODEL rather than against a threshold -- glTF's default
   // material is fully metallic, so its ambient is zero and any fixed threshold
   // either passes a black render or fails a correct metal.
-  let one_frame_opt = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+  // The background is a PARAMETER, and that is not a preference.
+  //
+  // Anything comparing this renderer's output with another's has to decide which
+  // pixels the model covers, and with a dark grey background a dark surface is
+  // indistinguishable from no surface. It showed up as Suzanne -- a dense, dark
+  // mesh -- reading 0.92 on a silhouette measure that had nothing wrong with the
+  // geometry: parts of it landed within a few levels of the clear colour and
+  // stopped counting as covered. Adding a texture slot moved the number, which is
+  // the tell that a SILHOUETTE measure was answering a COLOUR question.
+  //
+  // So a gate can ask for a background no plausible surface lands on. A saturated
+  // magenta is not proof -- a magenta emissive surface would still fool it -- and
+  // the only exact answer is to render twice on two backgrounds and take the
+  // pixels that stay put. That costs a second render on both sides and is not
+  // paid for yet; this is written down rather than assumed away.
+  let one_frame_bg = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+                     fn (bg: v3) ->
     let (t, depth) = Target.make w h in
-    let _ = Target.clear t depth 26 26 30 in
+    let _ = Target.clear t depth (int_of_float bg.x) (int_of_float bg.y) (int_of_float bg.z) in
     let (eye, ctr, th, zn, zf, vp) = Frame.auto_camera d (float_of_int w / float_of_int h) in
     let k = if lit then 3.0 else 0.0 in
     let light = dirlight { dx = 0.0 - 0.4, dy = 0.0 - 0.7, dz = 0.0 - 0.6, lr = k, lg = k, lb = k } in
@@ -331,6 +412,9 @@ module Render {
         let mesh = match J.at (J.req d.j "meshes") (J.int_ mi) with
                    | None -> fail "gltf: node names a mesh that is not there" | Some x -> x in
         let nrm_m = match M4x.normal_matrix world with | None -> M4.identity | Some x -> x in
+        // A mirroring transform reverses the winding order (glTF 3.7.4). Decided
+        // per node, once, from the global transform's determinant.
+        let flip = M4x.determinant world < 0.0 in
         let rec prims = fn (xs) ->
           match xs with
           | Nil -> ()
@@ -345,11 +429,13 @@ module Render {
                 | Some pos ->
                   let nrm = attr d prim "NORMAL" in
                   let mat = material_of d prim in
-                  let btex = base_tex d prim in
+                  let occ_strength = occ_str d prim in
+                  let (btex, mrtex, nmtex, octex, emtex) = mat_slots d prim in
                   let vcount = vec_len pos / 3 in
                   let idx = indices d prim vcount in
                   let tri = vec_len idx / 3 in
                   let uv = attr d prim "TEXCOORD_0" in
+                  let uv1 = attr d prim "TEXCOORD_1" in
                   let col0 = attr d prim "COLOR_0" in
                   let col0_n = match J.field (J.req prim "attributes") "COLOR_0" with
                                | None -> 3
@@ -377,6 +463,10 @@ module Render {
                     match uv with
                     | None -> (0.0, 0.0)
                     | Some t2 -> (vec_get t2 (2 * k), vec_get t2 (2 * k + 1)) in
+                  let vuv1 = fn (k: int) ->
+                    match uv1 with
+                    | None -> (0.0, 0.0)
+                    | Some t2 -> (vec_get t2 (2 * k), vec_get t2 (2 * k + 1)) in
                   // COLOR_0 is VEC3 or VEC4 and MULTIPLIES the base colour; the
                   // stride differs between the two and reading a VEC4 as a VEC3
                   // walks off by one vertex per vertex.
@@ -391,31 +481,63 @@ module Render {
                   // lands where the surface points at the light rather than
                   // where a vertex happens to be.
                   let shader = fn (wp: v3) -> fn (n: v3) -> fn (u: float) -> fn (vv: float) ->
-                               fn (vc: v3) ->
+                               fn (u1: float) -> fn (vv1: float) -> fn (vc: v3) ->
+                    let sample_s = fn (ts: texslot) -> slot_sample ts true u vv u1 vv1 in
+                    let sample_l = fn (ts: texslot) -> slot_sample ts false u vv u1 vv1 in
                     // baseColor is factor * vertex colour * texture, all three
-                    // multiplied in LINEAR light. The texture is sRGB-encoded --
-                    // that is the slot's property and not the file's -- so it is
-                    // decoded on the way in, which `sample_srgb` does with a
-                    // table rather than a `pow`, keeping the four backends
-                    // bit-identical.
-                    let tc =
-                      match btex with
-                      | None -> v4 { x = 1.0, y = 1.0, z = 1.0, w = 1.0 }
-                      | Some ts ->
-                        if ts.mag == 9728
-                        then let (a, b, c, e) = Tex.nearest ts.img ts.ws ts.wt u vv in
-                             v4 { x = Srgb.decode a, y = Srgb.decode b, z = Srgb.decode c,
-                                  w = float_of_int e / 255.0 }
-                        else Tex.sample_srgb ts.img ts.ws ts.wt u vv in
+                    // multiplied in LINEAR light.
+                    let tc = match btex with
+                             | None -> v4 { x = 1.0, y = 1.0, z = 1.0, w = 1.0 }
+                             | Some ts -> sample_s ts in
+                    // metallicRoughness packs TWO CHANNELS OF ONE IMAGE:
+                    // ROUGHNESS IN GREEN, METALLIC IN BLUE. Not red and green --
+                    // that ordering is a different format's, it produces a
+                    // plausible picture, and red here is unused and often zero,
+                    // which would make everything a perfect mirror.
+                    let mr = match mrtex with
+                             | None -> v4 { x = 1.0, y = 1.0, z = 1.0, w = 1.0 }
+                             | Some ts -> sample_l ts in
+                    // Occlusion multiplies the AMBIENT TERM ONLY, and its
+                    // strength defaults to 1. It stands for light that never
+                    // arrived from the environment; applying it to the
+                    // directional light would darken a surface the light can
+                    // plainly see, which is the mistake that makes creases look
+                    // painted on.
+                    let occ = match octex with
+                              | None -> 1.0
+                              | Some ts -> 1.0 + occ_strength * ((sample_l ts).x - 1.0) in
+                    // Emissive is sRGB-encoded and MULTIPLIES the factor, which
+                    // defaults to zero -- so a model with an emissive texture and
+                    // no emissiveFactor emits nothing, and that is the
+                    // specification rather than an oversight.
+                    let em = match emtex with
+                             | None -> v3 { x = 1.0, y = 1.0, z = 1.0 }
+                             | Some ts -> let c = sample_s ts in
+                                          v3 { x = c.x, y = c.y, z = c.z } in
                     let mat2 = material { br = mat.br * vc.x * tc.x, bg = mat.bg * vc.y * tc.y,
                                           bb = mat.bb * vc.z * tc.z, ba = mat.ba * tc.w,
-                                          metallic = mat.metallic, roughness = mat.roughness,
-                                          er = mat.er, eg = mat.eg, eb = mat.eb,
-                                          alpha_mode = mat.alpha_mode, cutoff = mat.cutoff } in
-                    let vdir = V3.normalize (V3.sub eye wp) in
-                    V3.add (V3.add (Shade.direct mat2 n vdir light)
-                                   (Shade.ambient mat2 0.15))
-                           (Shade.emissive mat2) in
+                                          metallic = mat.metallic * mr.z,
+                                          roughness = mat.roughness * mr.y,
+                                          er = mat.er * em.x, eg = mat.eg * em.y,
+                                          eb = mat.eb * em.z,
+                                          alpha_mode = mat.alpha_mode, cutoff = mat.cutoff,
+                                          double_sided = mat.double_sided } in
+                    // MASK IS A COVERAGE DECISION AND IT BELONGS HERE, after the
+                    // texture: the alpha it tests is the factor times the sampled
+                    // texel, so it cannot be decided per vertex or per primitive.
+                    //
+                    // `Shade.passes_alpha` was written and property-tested and had
+                    // NO CALLER -- the second time this project found a complete,
+                    // tested module that nothing used, and the second time a
+                    // reference renderer was what noticed. Two models drew their
+                    // masked-out labels as solid rectangles and every gate here
+                    // was green.
+                    if not (Shade.passes_alpha mat2 mat2.ba) then None
+                    else
+                      let vdir = V3.normalize (V3.sub eye wp) in
+                      Some (V3.add (V3.add (Shade.direct mat2 n vdir light)
+                                           (Shade.ambient mat2 (0.15 * occ)))
+                                   (Shade.emissive mat2)) in
                   let rec go = fn (ti: int) ->
                     if ti == tri then ()
                     else
@@ -443,23 +565,10 @@ module Render {
                       let _ =
                         if not ok then ()
                         else
-                          let sv = fn (c: v4) -> fn (wp: v3) -> fn (n: v3) ->
-                                   fn (k: int) ->
-                            let iw = 1.0 / c.w in
-                            let (uu, vv) = vuv k in
-                            let (cr, cg, cb) = vcol k in
-                            svert { sx = (c.x * iw * 0.5 + 0.5) * fw,
-                                    sy = (0.5 - c.y * iw * 0.5) * fh,
-                                    sz = c.z * iw, siw = iw,
-                                    wx = wp.x, wy = wp.y, wz = wp.z,
-                                    nx = n.x, ny = n.y, nz = n.z,
-                                    su = uu, sv = vv,
-                                    cr = cr, cg = cg, cb = cb } in
-                          let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in
                           // THE LAST TWO ARE SWAPPED, AND THAT IS NOT A TYPO.
                           //
                           // glTF's front face is counter-clockwise. The viewport
-                          // transform above flips y -- a framebuffer's y grows
+                          // transform below flips y -- a framebuffer's y grows
                           // downward and NDC's grows up -- and a flip REVERSES
                           // WINDING, so a front face arrives at the rasterizer
                           // counter-clockwise in ITS coordinates, where the
@@ -473,10 +582,50 @@ module Render {
                           // ambient only -- because the faces being drawn are the
                           // ones pointing away from the light. A silhouette is not
                           // evidence that the right triangles were drawn.
-                          RasterS.triangle t depth true
-                            (sv c0 w0 (nrm_of k0) k0)
-                            (sv c2 w2 (nrm_of k2) k2)
-                            (sv c1 w1 (nrm_of k1) k1)
+                          //
+                          // A NEGATIVE-DETERMINANT TRANSFORM FLIPS IT BACK, and
+                          // glTF says so in as many words: when the determinant of
+                          // a node's global transform is negative, the winding
+                          // order must be reversed. A mirroring scale turns every
+                          // front face into a back one, so without this the whole
+                          // model is inside out -- and it still looks like the
+                          // model, which is why Khronos ships NegativeScaleTest.
+                          let (ca, cb2, cc) = if flip then (c0, c1, c2) else (c0, c2, c1) in
+                          let (wa, wb2, wc) = if flip then (w0, w1, w2) else (w0, w2, w1) in
+                          let (ka, kb2, kc) = if flip then (k0, k1, k2) else (k0, k2, k1) in
+                          let sx_of = fn (c: v4) -> (c.x / c.w * 0.5 + 0.5) * fw in
+                          let sy_of = fn (c: v4) -> (0.5 - c.y / c.w * 0.5) * fh in
+                          // Which side of this triangle is facing the eye, decided
+                          // where the rasterizer decides it: on the projected
+                          // area, in the order actually submitted.
+                          let sarea = Raster.edge (sx_of ca) (sy_of ca) (sx_of cb2) (sy_of cb2)
+                                                  (sx_of cc) (sy_of cc) in
+                          // A DOUBLE-SIDED MATERIAL DRAWS THE BACK OF A SURFACE,
+                          // and the back's normal points away from the eye --
+                          // glTF says to negate it there. Without that the far
+                          // side of a leaf or a sheet of paper is lit from behind
+                          // and comes out at ambient: a dark shape that reads as a
+                          // hole rather than as a surface.
+                          let nsign = if sarea < 0.0 then 0.0 - 1.0 else 1.0 in
+                          let sv = fn (c: v4) -> fn (wp: v3) -> fn (n: v3) ->
+                                   fn (k: int) ->
+                            let iw = 1.0 / c.w in
+                            let (uu, vv) = vuv k in
+                            let (uu1, vv1) = vuv1 k in
+                            let (cr, cg, cb) = vcol k in
+                            svert { sx = (c.x * iw * 0.5 + 0.5) * fw,
+                                    sy = (0.5 - c.y * iw * 0.5) * fh,
+                                    sz = c.z * iw, siw = iw,
+                                    wx = wp.x, wy = wp.y, wz = wp.z,
+                                    nx = n.x * nsign, ny = n.y * nsign, nz = n.z * nsign,
+                                    su = uu, sv = vv,
+                                    su1 = uu1, sv1 = vv1,
+                                    cr = cr, cg = cg, cb = cb } in
+                          let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in
+                          RasterS.triangle t depth (not mat.double_sided)
+                            (sv ca wa (nrm_of ka) ka)
+                            (sv cb2 wb2 (nrm_of kb2) kb2)
+                            (sv cc wc (nrm_of kc) kc)
                             shader in
                       go (ti + 1) in
                   go 0 in
@@ -484,6 +633,9 @@ module Render {
         prims (J.arr (J.req mesh "primitives"))) in
     (t, depth, vec_get drawn 0, eye, ctr, th, zn, zf);
 
+  let dflt_bg = v3 { x = 26.0, y = 26.0, z = 30.0 };
+  let one_frame_opt = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+    one_frame_bg d w h lit dflt_bg;
   let one_frame = fn (d: doc) -> fn (w: int) -> fn (h: int) -> one_frame_opt d w h true;
 
   // The framebuffer as sRGB bytes, ready for a PNG. The renderer works in

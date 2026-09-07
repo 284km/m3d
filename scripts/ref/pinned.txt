@@ -1,12 +1,23 @@
-# Pinned agreement with three.js, at 192x192. scripts/reference_check.sh renders each
-# model with m3d and twice with three.js -- stock, and patched to glTF's normative BRDF
-# (?gltfbrdf=1) -- and holds these numbers.
+# Pinned agreement with three.js, at 192x192, over the 43 corpus models both renderers
+# draw. `scripts/reference_check.sh` renders each with m3d and twice with three.js --
+# stock, and patched to glTF's normative BRDF (?gltfbrdf=1) -- and holds these numbers.
 #
-#   model   IoU   MAE-vs-stock   MAE-vs-glTF-BRDF   %-of-shared-pixels-that-differ
+#   model <TAB> IoU   MAE-vs-stock   MAE-vs-glTF-BRDF   %-of-shared-pixels-that-differ  [reason]
+#
+# The separator after the name is a TAB, and it has to be: one model is called
+# `Box With Spaces` and another's name is thirty characters wide and fills the column.
+# Splitting on whitespace dropped the first and "two or more spaces" dropped the second.
+#
+# A TRAILING REASON IS THE ONLY THING THAT WAIVES THE ABSOLUTE IoU FLOOR. Three models
+# disagree about their silhouette because this renderer does not implement a feature they
+# use, and pinning those rows at whatever they measure would turn "not implemented" into
+# "as expected". The sentence has to be written, and when the feature lands it becomes
+# false somewhere a person reads.
 #
 # IoU is the gate: same geometry, same transforms, same camera, so which pixels are
-# covered has one answer. It is under 1.000 only where a curved silhouette makes the two
-# rasterizers round a boundary pixel differently.
+# covered has one answer. Both renderers clear to MAGENTA -- see the note in compare.py:
+# against a dark background a dark surface reads as no surface, and Suzanne sat at 0.919
+# with nothing wrong with its geometry until this changed.
 #
 # MAE-vs-stock is RECORDED, not designed. Stock three.js departs from glTF's appendix in
 # three ways this renderer deliberately does not follow, and each shows up here as a
@@ -14,46 +25,79 @@
 #
 #   * MULTIPLE-SCATTERING COMPENSATION in the direct specular term (BRDF_GGX_Multiscatter,
 #     off a DFG lookup table). Single-scatter GGX loses about 45% of its energy at
-#     roughness 1, so a rough metal is nearly twice as bright in three.js. This is the
-#     whole of Triangle's 36.6 and SimpleMeshes' 36.9 -- both use glTF's default material,
-#     which is metallic 1, rough 1 -- and much of MetalRoughSpheres'.
+#     roughness 1, so a rough metal is nearly twice as bright in three.js. That is the
+#     whole of Triangle's 36.6, and of every other 36-37 in this column: those models use
+#     glTF's default material, which is metallic 1, rough 1.
 #   * THE MISSING (1 - F) in front of the diffuse lobe, which makes every dielectric about
 #     4% brighter than the specification asks. On Box that is +3 in the red channel and
 #     exactly nothing in green and blue, because they are zero there.
 #   * F0 INTERPOLATED TOWARD THE BASE COLOUR instead of glTF's mix of two whole BRDFs.
 #     That one is not a one-line patch, so it stays in the right-hand columns too, and it
-#     is what MetalRoughSpheres' remaining 8.8 is: a grid that sweeps metallic across
+#     is what MetalRoughSpheres' remaining 8.9 is: a grid that sweeps metallic across
 #     exactly the range where the shortcut and the specification disagree.
 #
-# The last two columns have the first two patched out, and are where the claim lives.
-# THE SHARE OF DIFFERING PIXELS IS THE SHARP NUMBER, and the mean is here for scale. A
-# mean of 0.00 was what this file first pinned as "byte-identical" on three models, and
-# only one of them was: the other two differed on 0.5% and 0.09% of their pixels by a
-# single bit, which two decimal places of a mean cannot show. A percentage cannot round
-# its way out of being wrong.
+# The last two columns have the first two patched out. THE SHARE OF DIFFERING PIXELS IS
+# THE SHARP NUMBER and the mean is here for scale: a mean of 0.00 was once pinned as
+# "byte-identical" on three models and only one of them was, the other two differing on
+# 0.5% and 0.09% of their pixels by a single bit. A percentage cannot round its way out
+# of being wrong.
 #
-#   TRIANGLE IS BYTE-IDENTICAL -- every pixel, every channel -- and its 0 is held with no
-#   slack at all, because the entire value of such a pin is that one changed pixel breaks
-#   it. It is the strongest statement this project can make about its shading: an
-#   independent renderer, handed the same file and the same camera and asked for the same
-#   BRDF, produces the same bytes.
+#   FOUR MODELS ARE BYTE-IDENTICAL -- AnimatedTriangle, SimpleMaterial, Triangle and
+#   TriangleWithoutIndices -- every pixel, every channel, and their 0 is held with no
+#   slack at all. It is the strongest statement this project can make about its shading:
+#   an independent renderer, handed the same file and the same camera and asked for the
+#   same BRDF, produces the same bytes.
 #
-#   SimpleMeshes (0.09%), BoxInterleaved (0.53%), BoxVertexColors (6.4%) and Box (9.6%)
-#   differ by ONE least-significant bit, spread over the interior rather than the
-#   silhouette: a float32 GPU and a float64 CPU rounding the same shading to the same
-#   byte and disagreeing by one. The means -- 0.001 to 0.065 -- are the scale of it.
+#   The 0.03% to 13% rows differ by ONE least-significant bit, spread over the interior
+#   rather than the silhouette: a float32 GPU and a float64 CPU rounding the same shading
+#   to the same byte and disagreeing by one.
 #
-#   BoxTextured (25%), Duck (25%) and Cube (99.7%) are MINIFICATION. three.js builds
-#   mipmaps; m3d has none and samples the full-resolution image, so a texture squeezed
-#   into fewer pixels than it has texels aliases. These are the only entries here that
-#   are a missing feature of THIS renderer rather than a divergence of the other one.
+#   The rows in the tens of percent are what is still owed, and each has a name:
+#   MINIFICATION on every textured model (three.js builds mipmaps; this renderer samples
+#   the full-resolution image and aliases), NORMAL MAPPING on NormalTangentTest,
+#   NormalTangentMirrorTest and TwoSidedPlane (the slot is resolved and sampled, and not
+#   yet applied), and the metallic sweep on MetalRoughSpheres and Cube.
 #
-Box                            1.000   1.0    0.065   9.57
-BoxInterleaved                 1.000   5.9    0.003   0.53
-BoxTextured                    1.000   4.8    3.136   25.03
-BoxVertexColors                1.000   17.3   0.027   6.39
-Cube                           1.000   8.7    8.883   99.66
-Duck                           0.998   2.1    0.507   24.83
-MetalRoughSpheresNoTextures    0.990   10.7   8.790   75.36
-SimpleMeshes                   0.999   36.9   0.001   0.09
-Triangle                       0.999   36.6   0.000   0.00
+AnimatedCube	                   1.000   8.6    8.794   99.64
+AnimatedMorphCube	              1.000   2.7    0.005   0.03
+AnimatedTriangle	               0.999   36.6   0.000   0.00
+Box	                            1.000   1.0    0.065   9.57
+Box With Spaces	                1.000   6.9    6.393   32.90
+BoxAnimated	                    1.000   2.3    0.051   1.82
+BoxInterleaved	                 1.000   5.9    0.003   0.53
+BoxTextured	                    1.000   4.8    3.136   25.03
+BoxTexturedNonPowerOfTwo	       1.000   4.6    2.871   23.71
+BoxVertexColors	                1.000   17.3   0.027   6.39
+Cameras	                        0.999   49.7   0.001   0.05
+Cube	                           1.000   8.7    8.883   99.66
+Duck	                           0.999   2.2    0.613   24.90
+Fox	                            0.998   3.6    2.355   23.34
+InterpolationTest	              0.998   3.5    0.725   2.42
+MetalRoughSpheresNoTextures	    0.993   10.8   8.878   75.45
+MorphStressTest	                0.997   10.3   9.674   88.10
+MultipleScenes	                 1.000   37.3   0.002   0.18
+MultiUVTest	                    1.000   17.9   2.384   26.73
+NegativeScaleTest	              0.999   6.5    4.977   21.10
+NormalTangentMirrorTest	        0.994   8.9    8.449   48.86
+NormalTangentTest	              0.996   9.3    8.343   53.69
+OrientationTest	                1.000   5.2    0.091   2.24
+PrimitiveModeNormalsTest	       0.606   15.6   12.048  21.11   POINTS and LINE_STRIP primitives are skipped and counted; three.js draws them
+RecursiveSkeletons	             0.199   34.1   1.489   49.22   skinning is not implemented, so this draws its bind pose where the reference draws the skin
+RiggedFigure	                   0.999   2.8    0.067   0.98
+RiggedSimple	                   1.000   2.0    0.052   12.76
+SimpleMaterial	                 0.999   2.3    0.000   0.00
+SimpleMeshes	                   0.999   36.9   0.001   0.09
+SimpleMorph	                    0.336   37.1   0.001   0.09    morph targets are not implemented, so this draws its base mesh
+SimpleSkin	                     1.000   37.3   0.002   0.23
+SimpleSparseAccessor	           0.999   37.2   0.001   0.12
+SimpleTexture	                  1.000   3.4    2.473   72.49
+Suzanne	                        1.000   12.4   12.269  98.70
+TextureCoordinateTest	          1.000   3.3    2.034   20.19
+TextureEncodingTest	            0.995   14.1   10.954  29.40
+TextureLinearInterpolationTest	 0.996   2.9    3.058   7.03
+TextureSettingsTest	            1.000   7.0    5.519   19.25
+Triangle	                       0.999   36.6   0.000   0.00
+TriangleWithoutIndices	         0.999   36.6   0.000   0.00
+TwoSidedPlane	                  0.999   4.2    3.999   99.02
+Unicode❤♻Test	                  1.000   2.3    1.141   22.36
+VertexColorTest	                1.000   5.2    4.687   32.29

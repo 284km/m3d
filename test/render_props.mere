@@ -28,17 +28,21 @@ let doc_of = fn (js: str) ->
 // POSITION (-1,-1,0) (1,-1,0) (0,1,0) and NORMAL (0,0,1) x3, as raw float32
 // little-endian in a data-free buffer... which this reader does not do, so the
 // geometry is instead expressed through a tiny .bin written beside it.
-let gltf_for = fn (i0: int) -> fn (i1: int) -> fn (i2: int) ->
-  let ix = fn (k: int) -> str_of_int k in
+// `node_extra` and `mat_extra` are spliced into the node and the material, which
+// is how the mirroring scale and the doubleSided flag get in WITHOUT A SECOND
+// COPY of this JSON to keep in step with the first.
+let gltf_full = fn (node_extra: str) -> fn (mat_extra: str) -> fn (alpha: str) ->
   "\{\"asset\":\{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[\{\"nodes\":[0]}],"
-  ++ "\"nodes\":[\{\"mesh\":0}],"
+  ++ "\"nodes\":[\{\"mesh\":0" ++ node_extra ++ "}],"
   // NO `indices`: the winding is chosen by the order the three positions are
   // written, below. An earlier version pointed this at an accessor with no
   // bufferView -- which glTF says reads as ZEROS, a fact this file's own comment
   // stated while the JSON above went on referencing it. The triangle came out
   // (v0, v0, v0), degenerate, and nothing drew.
   ++ "\"meshes\":[\{\"primitives\":[\{\"attributes\":\{\"POSITION\":0,\"NORMAL\":1},\"material\":0}]}],"
-  ++ "\"materials\":[\{\"pbrMetallicRoughness\":\{\"baseColorFactor\":[1.0,1.0,1.0,1.0],\"metallicFactor\":0.0,\"roughnessFactor\":1.0}}],"
+  ++ "\"materials\":[\{\"pbrMetallicRoughness\":\{\"baseColorFactor\":[1.0,1.0,1.0," ++ alpha
+  ++ "],\"metallicFactor\":0.0,\"roughnessFactor\":1.0}"
+  ++ mat_extra ++ "}],"
   ++ "\"buffers\":[\{\"uri\":\"m3d_rp.bin\",\"byteLength\":72}],"
   ++ "\"bufferViews\":[\{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
   ++ "\{\"buffer\":0,\"byteOffset\":36,\"byteLength\":36}],"
@@ -46,9 +50,12 @@ let gltf_for = fn (i0: int) -> fn (i1: int) -> fn (i2: int) ->
   ++ "\"min\":[-1.0,-1.0,0.0],\"max\":[1.0,1.0,0.0]},"
   ++ "\{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}]}";
 
+let gltf_with = fn (node_extra: str) -> fn (mat_extra: str) ->
+  gltf_full node_extra mat_extra "1.0";
+
 // Rather than indices -- which would need a fourth bufferView and more hex --
 // the winding is chosen by writing the three positions in the order asked for.
-let write_tri = fn (a: int) -> fn (b: int) -> fn (c: int) ->
+let write_tri_n = fn (a: int) -> fn (b: int) -> fn (c: int) -> fn (nz: float) ->
   let sb = strbuf_new () in
   let hexd = "0123456789abcdef" in
   let put = fn (x: float) ->
@@ -65,12 +72,17 @@ let write_tri = fn (a: int) -> fn (b: int) -> fn (c: int) ->
   let py = fn (k: int) -> if k == 2 then 1.0 else (0.0 - 1.0) in
   let one = fn (k: int) -> let _ = put (px k) in let _ = put (py k) in put 0.0 in
   let _ = one a in let _ = one b in let _ = one c in
-  // three normals, all +z
+  // three normals, all along z -- WHICH WAY IS THE CALLER'S BUSINESS, because a
+  // surface seen from behind has its outward normal pointing away, and a back
+  // face whose normal faces the camera is a file that cannot exist.
   let rec nrm = fn (k: int) ->
     if k == 3 then ()
-    else let _ = put 0.0 in let _ = put 0.0 in let _ = put 1.0 in nrm (k + 1) in
+    else let _ = put 0.0 in let _ = put 0.0 in let _ = put nz in nrm (k + 1) in
   let _ = nrm 0 in
   write_bytes "/tmp/m3d_rp.bin" (bytes_of_hex (strbuf_to_str sb));
+
+// The ordinary case: an outward normal pointing at a camera on the +z side.
+let write_tri = fn (a: int) -> fn (b: int) -> fn (c: int) -> write_tri_n a b c 1.0;
 
 // Coverage and the brightest red, so "drawn" and "drawn facing the light" are
 // two answers and not one. The flat box had the first and not the second.
@@ -85,7 +97,7 @@ let render_stats = fn () ->
       go (i + 1) (n + hit) (if hit == 1 && r > mx then r else mx) in
   go 0 0 0;
 
-let _ = write_file "/tmp/m3d_rp.gltf" (gltf_for 0 1 2);
+let _ = write_file "/tmp/m3d_rp.gltf" (gltf_with "" "");
 
 // Counter-clockwise seen from +z, and the framing puts the camera there: a
 // FRONT face. Measured at 31 pixels of 1024 with a brightest red of 219 --
@@ -106,6 +118,141 @@ let _ = write_tri 0 2 1;
 let (n_back, r_back) = render_stats ();
 let _ = check "winding.back_face_is_culled" (n_back == 0);
 
+// --- a mirroring transform reverses the winding order ------------------------
+// glTF 3.7.4, in as many words: when the determinant of a node's global
+// transform is negative, the winding order of the triangles MUST be reversed.
+//
+// Without it a mirrored model is inside out -- every front face culled, every
+// back one drawn -- AND IT STILL LOOKS LIKE THE MODEL, which is the same trap
+// the plain winding chain set and the reason Khronos ships NegativeScaleTest.
+//
+// Both directions are asserted, because either alone passes for a renderer that
+// ignores the determinant in the convenient way: the CCW triangle must still be
+// a FRONT face under the mirror, and the CW one must still be a BACK face.
+// Dropping the rule swaps exactly those two answers.
+let mirror = ",\"scale\":[-1.0,1.0,1.0]";
+let _ = write_file "/tmp/m3d_rp.gltf" (gltf_with mirror "");
+let _ = write_tri 0 1 2;
+let (n_mf, r_mf) = render_stats ();
+let _ = check "mirror.front_face_survives_the_mirror" (n_mf > 20);
+let _ = check "mirror.and_is_still_the_lit_side" (r_mf > 180);
+let _ = write_tri 0 2 1;
+let (n_mb, r_mb) = render_stats ();
+let _ = check "mirror.back_face_is_still_culled" (n_mb == 0);
+
+// --- doubleSided draws the back, and lights it ------------------------------
+// A single-sided material is the default, so this is the flag that ADDS pixels;
+// twelve of the corpus's forty-nine models set it, and without it their back
+// faces are holes.
+//
+// THE SECOND HALF IS THE ONE THAT MATTERS. A back face's normal points away
+// from the eye, and glTF says to negate it there. Draw the back without doing
+// that and the surface is lit from behind: it comes out at ambient, a dark shape
+// that reads as a hole which happens not to be transparent. `r_back_lit > 180`
+// is the same threshold the front face is held to, so the two sides have to be
+// lit alike -- which is the whole claim.
+let two_sided = ",\"doubleSided\":true";
+let _ = write_file "/tmp/m3d_rp.gltf" (gltf_with "" two_sided);
+// A CONSISTENT back face: wound the other way AND with its outward normal
+// pointing away from the camera, which is what the far side of a real surface
+// looks like. Handing the renderer a back face whose normal faces the camera is
+// asking about a file that cannot exist -- it was written that way first, and the
+// lighting check below failed on a renderer that was right.
+let _ = write_tri_n 0 2 1 (0.0 - 1.0);
+let (n_ds, r_ds) = render_stats ();
+let _ = check "double_sided.the_back_is_drawn" (n_ds > 20);
+let _ = check "double_sided.and_the_back_is_lit_not_ambient" (r_ds > 180);
+// And it is the FLAG doing it, not the renderer having stopped culling: the
+// same triangle with the flag off is still gone. Without this the pair above
+// would pass for a renderer that had simply lost its back-face test.
+let _ = write_file "/tmp/m3d_rp.gltf" (gltf_with "" "");
+let (n_ds_off, r_ds_off) = render_stats ();
+let _ = check "double_sided.is_off_by_default" (n_ds_off == 0);
+
+// --- MASK cuts coverage ------------------------------------------------------
+// `Shade.passes_alpha` was written, property-tested, and CALLED BY NOTHING --
+// the second complete module in this project with no caller, and the second one
+// a reference renderer noticed rather than a gate here. Two corpus models drew
+// their masked-out labels as solid rectangles and every gate was green.
+//
+// MASK is a COVERAGE decision, so it is counted rather than looked at. The four
+// cases below are the whole of what the specification says, and each of the last
+// three is what stops the first from being passed by something simpler:
+//
+//   MASK above the cutoff draws        -- or nothing is ever drawn
+//   MASK below the cutoff draws NOTHING -- the actual claim
+//   OPAQUE below the cutoff still draws -- glTF says OPAQUE IGNORES alpha
+//                                          ENTIRELY, which is not the same as
+//                                          treating it as 1, and a renderer that
+//                                          cut on alpha regardless would pass the
+//                                          first two
+//   BLEND below the cutoff still draws  -- BLEND changes colour, not coverage
+let mask_m = ",\"alphaMode\":\"MASK\",\"alphaCutoff\":0.5";
+let blend_m = ",\"alphaMode\":\"BLEND\"";
+let with_alpha = fn (mat_extra: str) -> fn (alpha: str) ->
+  let _ = write_file "/tmp/m3d_rp.gltf" (gltf_full "" mat_extra alpha) in
+  render_stats ();
+
+let _ = write_tri 0 1 2;
+let (n_m_hi, r_m_hi) = with_alpha mask_m "1.0";
+let _ = check "mask.above_the_cutoff_is_drawn" (n_m_hi > 20);
+let (n_m_lo, r_m_lo) = with_alpha mask_m "0.4";
+let _ = check "mask.below_the_cutoff_draws_nothing" (n_m_lo == 0);
+let (n_o_lo, r_o_lo) = with_alpha "" "0.4";
+let _ = check "mask.opaque_ignores_alpha_entirely" (n_o_lo > 20);
+let (n_b_lo, r_b_lo) = with_alpha blend_m "0.4";
+let _ = check "mask.blend_does_not_cut_coverage" (n_b_lo > 20);
+
+// AND A DECLINED PIXEL MUST NOT WRITE DEPTH. A masked-out pixel is a hole, and a
+// hole that occludes is worse than no hole: whatever is behind it disappears,
+// which looks like a z-buffer bug a long way from the material that caused it.
+//
+// This one is here because the code CLAIMED it in a comment and nothing checked
+// it -- poisoning the rasterizer to write depth on a declined pixel passed every
+// property above. It needs two triangles at two depths, which the one-triangle
+// document cannot express, so it is asked of the rasterizer directly.
+let depth_not_written = fn () ->
+  let sv = fn (k: int) -> fn (z: float) ->
+    // A big triangle covering the middle of the frame, at a chosen depth.
+    let sx = fn (i: int) -> if i == 0 then 2.0 else if i == 1 then 30.0 else 16.0 in
+    let sy = fn (i: int) -> if i == 2 then 30.0 else 2.0 in
+    svert { sx = sx k, sy = sy k, sz = z, siw = 1.0, su1 = 0.0, sv1 = 0.0,
+            wx = 0.0, wy = 0.0, wz = 0.0, nx = 0.0, ny = 0.0, nz = 1.0,
+            su = 0.0, sv = 0.0, cr = 1.0, cg = 1.0, cb = 1.0 } in
+  // NEAR and declined: every pixel returns None.
+  let declined = fn (w: v3) -> fn (n: v3) -> fn (u: float) -> fn (v: float) ->
+                 fn (u1: float) -> fn (v1: float) -> fn (c: v3) -> (None : v3 option) in
+  // FAR and drawn.
+  let drawn = fn (w: v3) -> fn (n: v3) -> fn (u: float) -> fn (v: float) ->
+              fn (u1: float) -> fn (v1: float) -> fn (c: v3) ->
+    Some (v3 { x = 1.0, y = 1.0, z = 1.0 }) in
+  let paint = fn (near) -> fn (far) ->
+    let (t2, d2) = Target.make 32 32 in
+    let _ = Target.clear t2 d2 0 0 0 in
+    let _ = match near with
+            | None -> ()
+            | Some sh -> RasterS.triangle t2 d2 false (sv 0 0.1) (sv 1 0.1) (sv 2 0.1) sh in
+    let _ = match far with
+            | None -> ()
+            | Some sh -> RasterS.triangle t2 d2 false (sv 0 0.9) (sv 1 0.9) (sv 2 0.9) sh in
+    let rec count = fn (i: int) -> fn (n: int) ->
+      if i == 32 * 32 then n
+      else
+        let (r, g, b) = Target.get t2 (i % 32) (i / 32) in
+        count (i + 1) (n + (if r == 0 && g == 0 && b == 0 then 0 else 1)) in
+    count 0 0 in
+  // THREE NUMBERS, because one of them alone is passed by a triangle that covers
+  // nothing: the same geometry with a drawing shader must cover pixels, with a
+  // declining shader must cover none, and a farther triangle behind the declining
+  // one must still show. Removing the near triangle entirely passes the third on
+  // its own, which is how a vacuous property looks.
+  (paint (Some drawn) None, paint (Some declined) None, paint (Some declined) (Some drawn));
+
+let (n_covers, n_declines, n_behind) = depth_not_written ();
+let _ = check "mask.the_test_geometry_covers_pixels" (n_covers > 20);
+let _ = check "mask.a_declining_shader_draws_none_of_them" (n_declines == 0);
+let _ = check "mask.a_declined_pixel_does_not_occlude" (n_behind > 20);
+
 // --- per-pixel shading actually differs from per-vertex ----------------------
 // EVERY MODEL IN THE CORPUS IS FLAT-FACED, so the north-star table cannot see
 // this change at all: when a triangle's three normals are equal, interpolating
@@ -125,7 +272,7 @@ let two_ways = fn () ->
   let _ = Target.clear t2 d2 0 0 0 in
   let mat = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 0.0,
                        roughness = 0.25, er = 0.0, eg = 0.0, eb = 0.0,
-                       alpha_mode = 0, cutoff = 0.5 } in
+                       alpha_mode = 0, cutoff = 0.5, double_sided = false } in
   let li = dirlight { dx = 0.0, dy = 0.0, dz = 0.0 - 1.0, lr = 4.0, lg = 4.0, lb = 4.0 } in
   let eye = v3 { x = 0.0, y = 0.0, z = 10.0 } in
   // Normals fanned wide apart, so the interpolated one at the centre is a long
@@ -151,12 +298,13 @@ let two_ways = fn () ->
   // Per pixel, through the attribute-carrying one.
   let pv = fn (k: int) ->
     let n = ns k in let w = wp k in
-    svert { sx = sx k, sy = sy k, sz = 0.0, siw = 1.0,
+    svert { sx = sx k, sy = sy k, sz = 0.0, siw = 1.0, su1 = 0.0, sv1 = 0.0,
             wx = w.x, wy = w.y, wz = w.z, nx = n.x, ny = n.y, nz = n.z,
             su = 0.0, sv = 0.0, cr = 1.0, cg = 1.0, cb = 1.0 } in
-  let shader = fn (w: v3) -> fn (n: v3) -> fn (u: float) -> fn (v: float) -> fn (c: v3) ->
+  let shader = fn (w: v3) -> fn (n: v3) -> fn (u: float) -> fn (v: float) ->
+               fn (u1: float) -> fn (v1: float) -> fn (c: v3) ->
     let vd = V3.normalize (V3.sub eye w) in
-    V3.add (Shade.direct mat n vd li) (Shade.ambient mat 0.15) in
+    Some (V3.add (Shade.direct mat n vd li) (Shade.ambient mat 0.15)) in
   let _ = RasterS.triangle t2 d2 false (pv 0) (pv 1) (pv 2) shader in
   (t1, t2);
 
@@ -180,7 +328,7 @@ let same_normals = fn () ->
   let _ = Target.clear t2 d2 0 0 0 in
   let mat = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 0.0,
                        roughness = 0.25, er = 0.0, eg = 0.0, eb = 0.0,
-                       alpha_mode = 0, cutoff = 0.5 } in
+                       alpha_mode = 0, cutoff = 0.5, double_sided = false } in
   let li = dirlight { dx = 0.0, dy = 0.0, dz = 0.0 - 1.0, lr = 4.0, lg = 4.0, lb = 4.0 } in
   let eye = v3 { x = 0.0, y = 0.0, z = 10.0 } in
   let n = v3 { x = 0.0, y = 0.0, z = 1.0 } in
@@ -194,12 +342,14 @@ let same_normals = fn () ->
   let gv = fn (k: int) -> rvert { x = sx k, y = sy k, z = 0.0, iw = 1.0,
                                   r = l.x, g = l.y, b = l.z } in
   let _ = Raster.triangle t1 d1 false (gv 0) (gv 1) (gv 2) in
-  let pv = fn (k: int) -> svert { sx = sx k, sy = sy k, sz = 0.0, siw = 1.0,
+  let pv = fn (k: int) -> svert { sx = sx k, sy = sy k, sz = 0.0, siw = 1.0, su1 = 0.0, sv1 = 0.0,
                                   wx = w.x, wy = w.y, wz = w.z,
                                   nx = n.x, ny = n.y, nz = n.z,
                                   su = 0.0, sv = 0.0, cr = 1.0, cg = 1.0, cb = 1.0 } in
-  let shader = fn (ww: v3) -> fn (nn: v3) -> fn (u: float) -> fn (v: float) -> fn (c: v3) ->
-    V3.add (Shade.direct mat nn (V3.normalize (V3.sub eye ww)) li) (Shade.ambient mat 0.15) in
+  let shader = fn (ww: v3) -> fn (nn: v3) -> fn (u: float) -> fn (v: float) ->
+               fn (u1: float) -> fn (v1: float) -> fn (c: v3) ->
+    Some (V3.add (Shade.direct mat nn (V3.normalize (V3.sub eye ww)) li)
+                 (Shade.ambient mat 0.15)) in
   let _ = RasterS.triangle t2 d2 false (pv 0) (pv 1) (pv 2) shader in
   let rec cmp = fn (i: int) -> fn (bad: int) ->
     if i == 32 * 32 then bad

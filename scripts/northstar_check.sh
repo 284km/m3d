@@ -14,11 +14,18 @@
 # silhouette is not evidence that the right triangles were drawn, so the table asks
 # separately.
 #
-# What is NOT here yet is the fourth column -- agreement with a reference renderer.
-# three.js reads the same files and the camera this program prints is exactly what it
-# needs, so the instrument is ready; what is not ready is the subject, because shading is
-# still per vertex and a reference renderer shades per pixel. Comparing them now would
-# measure that difference and nothing else. Said here rather than left as a gap.
+# The fourth column -- agreement with a reference renderer -- is `reference_check.sh`, and
+# it is a separate gate rather than a fourth column here because it needs Chrome and
+# three.js and this one needs nothing but a C compiler. The two are not interchangeable:
+# THIS gate owns the framing heuristic, which that one is deliberately blind to (it is
+# handed the camera), and that one owns everything the auto-camera absorbs, which this
+# one cannot see (ignore every node matrix and Duck's picture is byte-identical, because
+# the camera scales with the bug).
+#
+# What this gate does NOT do is pin its numbers. `max 232 vs 108 unlit` is a report, not
+# an assertion, so wiring base-colour textures into the renderer moved every textured
+# model's brightness and this table said nothing. The pins live in
+# scripts/ref/pinned.txt instead. Recorded here rather than left to be assumed.
 #
 # Usage:  MERE=/path/to/mere.exe sh scripts/northstar_check.sh
 set -u
@@ -39,7 +46,19 @@ if ! "$CC" -O2 -w "$T/m.c" -o "$T/m3d" -lm 2>> "$T/err"; then
   echo "northstar: the emitted C did not compile"; grep 'error:' "$T/err" | head -4; exit 1
 fi
 
+# MODELS THIS LOADER CANNOT READ, AND WHY -- listed, not tolerated.
+#
+# Six corpus models carry JPEG textures and there is no JPEG decoder here, so the loader
+# refuses them by name. That is the right behaviour and it is still a gap, so the gate
+# holds the list EXACTLY: a refusal that is not on it fails, and a model on it that has
+# started reading ALSO fails. The second half is the one that matters -- a list of known
+# failures with no way to notice that one is fixed becomes a list of things nobody looks
+# at, and the day JPEG lands this line is what says so.
+KNOWN_REFUSALS="CesiumMan CesiumMilkTruck CompareMetallic CompareNormal CompareRoughness MorphPrimitivesTest"
+KNOWN_REASON="a JPEG texture, and there is no JPEG decoder here yet"
+
 fail=0; total=0; read_ok=0; drew=0; lit=0; nomesh=0
+refused=""
 printf '%-22s %-6s %-6s %-6s %s\n' model reads draws lit note
 for d in test/data/gltf/*/; do
   m=$(basename "$d")
@@ -49,9 +68,24 @@ for d in test/data/gltf/*/; do
   total=$((total + 1))
   out="$T/$m.png"
   if ! log=$("$T/m3d" "$f" --out "$out" --size 128 2>&1); then
-    printf '%-22s %-6s %-6s %-6s %s\n' "$m" no - - "$(echo "$log" | head -1 | cut -c1-46)"
-    fail=1; continue
+    why=$(echo "$log" | head -1 | cut -c1-46)
+    case " $KNOWN_REFUSALS " in
+      *" $m "*)
+        printf '%-22s %-6s %-6s %-6s %s\n' "$m" "no*" - - "$why"
+        refused="$refused $m" ;;
+      *)
+        printf '%-22s %-6s %-6s %-6s %s\n' "$m" no - - "$why"
+        fail=1 ;;
+    esac
+    continue
   fi
+  # A model on the known-refusal list that now reads is not good news the gate may
+  # swallow: the list is wrong and has to be edited.
+  case " $KNOWN_REFUSALS " in
+    *" $m "*)
+      echo "northstar: $m is on the known-refusal list and now READS — take it off the list"
+      fail=1 ;;
+  esac
   read_ok=$((read_ok + 1))
   tri=$(echo "$log" | sed -n 's/^triangles \([0-9]*\).*/\1/p')
   # A file with no mesh at all draws nothing and that is the right answer. Synthetic is
@@ -61,44 +95,66 @@ for d in test/data/gltf/*/; do
     printf '%-22s %-6s %-6s %-6s %s\n' "$m" yes n/a n/a "no mesh in the document"
     nomesh=$((nomesh + 1)); continue
   fi
-  stats=$(python3 - "$out" <<'PY'
-import sys, warnings
-warnings.filterwarnings("ignore")
-from PIL import Image
-im = Image.open(sys.argv[1]).convert("RGB")
-px = list(im.getdata())
-bg = (26, 26, 30)
-hit = [p for p in px if p != bg]
-# The brightest channel among drawn pixels. Ambient alone on a mid-grey material lands
-# near 100; a lit surface is well above it.
-print(len(hit), max((max(p) for p in hit), default=0))
-PY
-)
-  cov=$(echo "$stats" | cut -d' ' -f1)
-  bright=$(echo "$stats" | cut -d' ' -f2)
   # PER MODEL, not against a threshold. The same model is rendered again with the
   # directional light black, and "lit" means the light made a difference. A fixed
   # threshold cannot do this: glTF's default material is fully metallic, so its ambient
   # is zero, and 130 either passes a black frame or fails a correct dull metal --
   # SimpleMeshes and Triangle sat exactly there and the column said "no" about a
   # renderer that was working.
+  #
+  # AND IT COUNTS PIXELS THAT CHANGED, NOT THE BRIGHTEST ONE. Comparing maxima is what
+  # this did, and it CANNOT SEE A LIGHT ON A BRIGHT SURFACE: three models have textures
+  # bright enough that ambient alone already saturates their brightest pixel, so
+  # `max 255 vs 255 unlit` read as "the light did nothing" about a renderer that was
+  # working -- the same failure as the fixed threshold, one level up. How many pixels
+  # got brighter cannot saturate away.
   "$T/m3d" "$f" --out "$T/${m}_dark.png" --size 128 --no-light >/dev/null 2>&1
-  dark=$(python3 - "$T/${m}_dark.png" <<'PY2'
+  stats=$(python3 - "$out" "$T/${m}_dark.png" <<'PY'
 import sys, warnings
 warnings.filterwarnings("ignore")
 from PIL import Image
-px = list(Image.open(sys.argv[1]).convert("RGB").getdata())
-hit = [p for p in px if p != (26, 26, 30)]
-print(max((max(p) for p in hit), default=0))
-PY2
+BG = (26, 26, 30)
+lit = list(Image.open(sys.argv[1]).convert("RGB").getdata())
+dark = list(Image.open(sys.argv[2]).convert("RGB").getdata())
+hit = [(a, b) for a, b in zip(lit, dark) if a != BG or b != BG]
+brighter = sum(1 for a, b in hit if max(a) > max(b))
+print(len(hit), brighter, max((max(a) for a, _ in hit), default=0),
+      max((max(b) for _, b in hit), default=0))
+PY
 )
+  cov=$(echo "$stats" | cut -d' ' -f1)
+  brighter=$(echo "$stats" | cut -d' ' -f2)
+  bright=$(echo "$stats" | cut -d' ' -f3)
+  dark=$(echo "$stats" | cut -d' ' -f4)
   dcol=no; lcol=no
   [ "${cov:-0}" -gt 20 ] && { dcol=yes; drew=$((drew + 1)); }
-  [ "${bright:-0}" -gt "$((${dark:-0} + 8))" ] && { lcol=yes; lit=$((lit + 1)); }
-  printf '%-22s %-6s %-6s %-6s %s\n' "$m" yes "$dcol" "$lcol" "$tri tri, $cov px, max $bright vs $dark unlit"
+  # ANY pixel getting brighter, and the count is printed so a weak response is visible
+  # rather than hidden. Not a fraction: a fraction is a number somebody invents, and
+  # this renderer is deterministic, so there is no noise for a floor to sit above. The
+  # bug this column exists for -- every front face culled, the whole model one flat
+  # ambient colour -- produces EXACTLY ZERO, which is what is being tested.
+  #
+  # A fifth of the covered pixels was the first threshold here and it failed
+  # TextureLinearInterpolationTest, whose swatches are mostly EMISSIVE: they emit their
+  # own light and a directional one cannot brighten them, so 58 of 2101 pixels
+  # responding is the right answer about a correct renderer. Tuning the fraction until
+  # that model passed would have been fitting the threshold to the answer.
+  [ "${brighter:-0}" -gt 0 ] && { lcol=yes; lit=$((lit + 1)); }
+  printf '%-22s %-6s %-6s %-6s %s\n' "$m" yes "$dcol" "$lcol" \
+    "$tri tri, $cov px, $brighter brighter, max $bright vs $dark unlit"
 done
 
+nref=0
+for m in $refused; do nref=$((nref + 1)); done
+nknown=0
+for m in $KNOWN_REFUSALS; do nknown=$((nknown + 1)); done
 echo "northstar: $read_ok of $total read, $drew drew, $lit lit ($nomesh with no geometry)"
+if [ "$nref" -gt 0 ]; then
+  echo "northstar: $nref refused* — each one $KNOWN_REASON"
+fi
+[ "$nref" = "$nknown" ] || {
+  echo "northstar: $nknown model(s) are on the known-refusal list but $nref were refused"
+  fail=1; }
 # A run that rendered nothing is not a run that passed.
 [ "$total" -ge 3 ] || { echo "northstar: only $total model(s) in the corpus, which is not a check"; fail=1; }
 [ "$drew" = "$((read_ok - nomesh))" ] || { echo "northstar: $((read_ok - nomesh - drew)) model(s) with geometry read but drew nothing"; fail=1; }

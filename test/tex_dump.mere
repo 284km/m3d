@@ -15,7 +15,12 @@
 import "../src/texture.mere";
 
 let names = Cons ("grey8", Cons ("greya8", Cons ("rgb8", Cons ("rgba8",
-            Cons ("pal8", Cons ("grey16", Nil))))));
+            Cons ("pal8", Cons ("grey16",
+            // The two tRNS images. A palette PNG carries no alpha channel, so a
+            // cutout's transparency is a separate chunk -- and for grey and RGB
+            // the same chunk means a colour KEY instead of a table. Neither had
+            // any coverage here, and the reader was answering 255 for both.
+            Cons ("pal8_trns", Cons ("grey8_trns", Nil))))))));
 
 let bits = fn (x: float) -> str_of_int (float_bits_hi x) ++ " " ++ str_of_int (float_bits_lo x);
 
