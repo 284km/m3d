@@ -64,7 +64,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-mere}"
 command -v "$MERE" >/dev/null 2>&1 || { echo "screen: no mere — set MERE=..." >&2; exit 1; }
-CC="${CC:-clang}"
+. "$ROOT/scripts/ccflags.sh"
 cd "$ROOT"
 
 # SKIP BY NAME, three ways. SDL2 is not a build dependency of a Mere program and the
@@ -84,11 +84,11 @@ SDLFLAGS="$(sdl2-config --cflags --libs)"
 "$MERE" -c src/view.mere > "$T/view.c" 2>"$T/view.err" \
   || { echo "screen: view.mere did not compile"; head -12 "$T/view.err"; exit 1; }
 # shellcheck disable=SC2086
-$CC -O2 -w "$T/view.c" -o "$T/view" -lm $SDLFLAGS 2>"$T/view.cc" \
+$CC $CFLAGS_M3D "$T/view.c" -o "$T/view" -lm $SDLFLAGS 2>"$T/view.cc" \
   || { echo "screen: the emitted C did not build against SDL2"; head -12 "$T/view.cc"; exit 1; }
 "$MERE" -c src/main.mere > "$T/main.c" 2>"$T/main.err" \
   || { echo "screen: main.mere did not compile"; head -12 "$T/main.err"; exit 1; }
-$CC -O2 -w "$T/main.c" -o "$T/m3d" -lm 2>/dev/null \
+$CC $CFLAGS_M3D "$T/main.c" -o "$T/m3d" -lm 2>/dev/null \
   || { echo "screen: main.mere's C did not build"; exit 1; }
 
 # A SPREAD, not the whole corpus: the window path does not depend on the model, so the

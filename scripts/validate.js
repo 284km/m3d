@@ -18,7 +18,16 @@ const path = require('path');
 const validator = require('gltf-validator');
 
 async function one(file) {
-  const bytes = new Uint8Array(fs.readFileSync(file));
+  // A PATH THAT CANNOT BE READ IS A FAILURE WITH A NAME, not a stack trace. This threw
+  // `EISDIR` for months because the caller split `Box With Spaces` into five arguments,
+  // and an uncaught exception says where node was rather than which file was wrong.
+  let bytes;
+  try {
+    bytes = new Uint8Array(fs.readFileSync(file));
+  } catch (e) {
+    console.log(`  ${file}: cannot be read — ${e.code || e.message}`);
+    return false;
+  }
   const dir = path.dirname(file);
   const report = await validator.validateBytes(bytes, {
     uri: file,

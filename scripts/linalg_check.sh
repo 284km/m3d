@@ -30,7 +30,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-mere}"
 command -v "$MERE" >/dev/null 2>&1 || { echo "linalg_check: no mere — set MERE=..." >&2; exit 1; }
-CC="${CC:-clang}"
+. "$ROOT/scripts/ccflags.sh"
 T="${TMPDIR:-/tmp}/m3d_linalg.$$"; mkdir -p "$T"; trap 'rm -rf "$T"' EXIT
 cd "$ROOT"
 
@@ -40,12 +40,14 @@ backends="interp"
 run_interp() { "$MERE" "$1" 2>&1; }
 run_c() {
   "$MERE" -c "$1" > "$T/x.c" 2>"$T/err" || return 1
-  "$CC" -O2 -w "$T/x.c" -o "$T/x" -lm 2>>"$T/err" || return 1
+  # shellcheck disable=SC2086
+  "$CC" $CFLAGS_M3D "$T/x.c" -o "$T/x" -lm 2>>"$T/err" || return 1
   "$T/x" 2>&1
 }
 run_llvm() {
   "$MERE" -ll "$1" > "$T/x.ll" 2>"$T/err" || return 1
-  "$CC" -O2 -w "$T/x.ll" -o "$T/xl" -lm 2>>"$T/err" || return 1
+  # shellcheck disable=SC2086
+  "$CC" $CFLAGS_M3D "$T/x.ll" -o "$T/xl" -lm 2>>"$T/err" || return 1
   "$T/xl" 2>&1
 }
 run_wasm() {

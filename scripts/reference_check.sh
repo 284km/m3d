@@ -65,7 +65,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-mere}"
-CC="${CC:-clang}"
+. "$ROOT/scripts/ccflags.sh"
 SIZE="${SIZE:-192}"
 PORT="${PORT:-8731}"
 cd "$ROOT"
@@ -93,7 +93,8 @@ srv=""
 cleanup() { [ -n "$srv" ] && kill "$srv" 2>/dev/null; rm -rf "$T"; }
 trap cleanup EXIT INT TERM
 
-"$MERE" -c src/main.mere > "$T/m.c" 2>"$T/e" && "$CC" -O2 -w "$T/m.c" -o "$T/m3d" -lm 2>>"$T/e" \
+# shellcheck disable=SC2086
+"$MERE" -c src/main.mere > "$T/m.c" 2>"$T/e" && "$CC" $CFLAGS_M3D "$T/m.c" -o "$T/m3d" -lm 2>>"$T/e" \
   || { echo "reference_check: m3d did not build"; head -5 "$T/e"; exit 1; }
 
 # A module script cannot be loaded from file:// -- the browser refuses it as

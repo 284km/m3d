@@ -20,9 +20,18 @@ checkout builds without fetching anything. Only the viewer needs SDL2, and only
 `scripts/screen_check.sh` needs it to run.
 
 ```
-mere -c src/main.mere > m3d.c && clang -O2 -w m3d.c -o m3d -lm
+mere -c src/main.mere > m3d.c && clang -O2 -w -fbracket-depth=4096 m3d.c -o m3d -lm
 ./m3d test/data/gltf/Box/glTF-Binary/Box.glb --out box.png --size 512
 ```
+
+**`-fbracket-depth` is not optional on stock clang, and it is why every CI run was red
+for the life of this project.** Mere emits a program's top-level `let`s as one nested
+statement expression, so the bracket nesting of the emitted `main()` grows with the
+number of bindings in the program and everything it imports — about two levels per
+binding, measured, and m3d's `main()` is at 533. Clang's default limit is 256: Ubuntu's
+clang 18 enforces it, Apple's clang does not, and gcc has no such limit.
+`scripts/ccflags.sh` is where the gates get the flag, and it adds it only if the
+compiler accepts it.
 
 **Compiled and not interpreted, and that is not a preference**: the interpreter
 takes minutes per frame where the C backend takes under a second.
@@ -737,7 +746,7 @@ frame, using [`contrib/window`](https://github.com/merelang/mere) over SDL2:
 
 ```
 mere -c src/view.mere > view.c
-clang -O2 -w view.c -o m3d-view -lm $(sdl2-config --cflags --libs)
+clang -O2 -w -fbracket-depth=4096 view.c -o m3d-view -lm $(sdl2-config --cflags --libs)
 ./m3d-view test/data/gltf/Duck/glTF/Duck.gltf --size 512
 ./m3d-view test/data/gltf/Duck/glTF/Duck.gltf --orbit 45,20,1.5 --check
 ```

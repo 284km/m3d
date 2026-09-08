@@ -36,7 +36,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-mere}"
 command -v "$MERE" >/dev/null 2>&1 || { echo "bench: no mere — set MERE=..." >&2; exit 1; }
-CC="${CC:-clang}"
+. "$ROOT/scripts/ccflags.sh"
 cd "$ROOT"
 
 command -v "$CC" >/dev/null 2>&1 \
@@ -51,7 +51,7 @@ SDLFLAGS="$(sdl2-config --cflags --libs)"
 "$MERE" -c src/view.mere > "$T/view.c" 2>"$T/e" \
   || { echo "bench: view.mere did not compile"; head -10 "$T/e"; exit 1; }
 # shellcheck disable=SC2086
-$CC -O2 -w "$T/view.c" -o "$T/view" -lm $SDLFLAGS 2>"$T/cc" \
+$CC $CFLAGS_M3D "$T/view.c" -o "$T/view" -lm $SDLFLAGS 2>"$T/cc" \
   || { echo "bench: the emitted C did not build against SDL2"; head -10 "$T/cc"; exit 1; }
 
 # PEAK RSS IS SPELLED AND SCALED DIFFERENTLY ON EACH PLATFORM, so both are handled and

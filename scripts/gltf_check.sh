@@ -30,7 +30,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-mere}"
 command -v "$MERE" >/dev/null 2>&1 || { echo "gltf_check: no mere — set MERE=..." >&2; exit 1; }
-CC="${CC:-clang}"
+. "$ROOT/scripts/ccflags.sh"
 cd "$ROOT"
 T="${TMPDIR:-/tmp}/m3d_gltf.$$"; mkdir -p "$T"; trap 'rm -rf "$T"' EXIT
 
@@ -48,7 +48,7 @@ T="${TMPDIR:-/tmp}/m3d_gltf.$$"; mkdir -p "$T"; trap 'rm -rf "$T"' EXIT
 DUMP="$MERE test/gltf_dump.mere"
 compiled=""
 if command -v "$CC" >/dev/null 2>&1 && "$MERE" -c test/gltf_dump.mere > "$T/dump.c" 2>"$T/cerr" \
-   && "$CC" -O2 -w "$T/dump.c" -o "$T/dump" -lm 2>>"$T/cerr"; then
+   && "$CC" $CFLAGS_M3D "$T/dump.c" -o "$T/dump" -lm 2>>"$T/cerr"; then
   DUMP="$T/dump"
   compiled=yes
 else
@@ -149,10 +149,22 @@ else
 fi
 
 # 3. the outside opinion on whether these are legal glTF
+#
+# THE FILE LIST IS NUL-SEPARATED, and that is not fastidiousness: this used to be an
+# unquoted `$files` from `ls`, and the corpus contains `Box With Spaces` -- the model
+# Khronos ships so that a loader which skips percent-decoding fails on something. Word
+# splitting turned its path into five arguments, one of which is `test/data/gltf/Box`,
+# a DIRECTORY, and the validator died with EISDIR before checking anything.
+#
+# Nobody saw it locally, because without `npm install gltf-validator` this column SKIPS
+# and every local run said so in one quiet line. It only ever ran on CI, where it was
+# the reason -- along with the bracket depth in scripts/ccflags.sh -- that the gate
+# never went green.
 if [ -d node_modules/gltf-validator ] && command -v node >/dev/null 2>&1; then
-  files=$(ls test/data/gltf/*/glTF/*.gltf test/data/gltf/*/glTF-Binary/*.glb 2>/dev/null)
-  # shellcheck disable=SC2086
-  node scripts/validate.js $files || fail=1
+  nfiles=$(find test/data/gltf -type f \( -path '*/glTF/*.gltf' -o -path '*/glTF-Binary/*.glb' \) | wc -l)
+  [ "$nfiles" -ge 40 ] || { echo "gltf_check: the validator was handed $nfiles file(s), which is not the corpus"; fail=1; }
+  find test/data/gltf -type f \( -path '*/glTF/*.gltf' -o -path '*/glTF-Binary/*.glb' \) -print0 \
+    | xargs -0 node scripts/validate.js || fail=1
 else
   echo "gltf_check: SKIP the Khronos validator — run 'npm install gltf-validator'"
 fi

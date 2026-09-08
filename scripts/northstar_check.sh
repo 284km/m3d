@@ -32,7 +32,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-mere}"
 command -v "$MERE" >/dev/null 2>&1 || { echo "northstar: no mere — set MERE=..." >&2; exit 1; }
-CC="${CC:-clang}"
+. "$ROOT/scripts/ccflags.sh"
 command -v "$CC" >/dev/null 2>&1 || { echo "northstar: SKIP — no $CC, and the interpreter is far too slow for this"; exit 0; }
 cd "$ROOT"
 T="${TMPDIR:-/tmp}/m3d_ns.$$"; mkdir -p "$T"; trap 'rm -rf "$T"' EXIT
@@ -42,7 +42,8 @@ T="${TMPDIR:-/tmp}/m3d_ns.$$"; mkdir -p "$T"; trap 'rm -rf "$T"' EXIT
 if ! "$MERE" -c src/main.mere > "$T/m.c" 2> "$T/err"; then
   echo "northstar: src/main.mere did not emit"; sed 's/^/    /' "$T/err" | head -4; exit 1
 fi
-if ! "$CC" -O2 -w "$T/m.c" -o "$T/m3d" -lm 2>> "$T/err"; then
+# shellcheck disable=SC2086
+if ! "$CC" $CFLAGS_M3D "$T/m.c" -o "$T/m3d" -lm 2>> "$T/err"; then
   echo "northstar: the emitted C did not compile"; grep 'error:' "$T/err" | head -4; exit 1
 fi
 
