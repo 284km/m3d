@@ -5,11 +5,21 @@
 # copied into six scripts becomes six rules, and this one was wrong in all of them for
 # the whole life of the project without a single local run noticing.
 #
-# WHY THERE IS A FLAG AT ALL. Mere emits a program's top-level `let`s as ONE nested
-# statement expression -- `({ a; ({ b; ({ c; ... }) }) })` -- so the bracket nesting of
-# the emitted `main()` grows with the number of bindings in the program AND in
-# everything it imports. Measured: about two levels per binding (a file of 300 trivial
-# top-level lets emits a depth of 609), and m3d's own `main()` sits at 533.
+# WHY THERE IS A FLAG AT ALL -- AND WHY IT IS NOW A GUARD RATHER THAN A REQUIREMENT.
+#
+# Mere used to emit a chain of `let`s as one statement expression per binding, nested --
+# `({ a; ({ b; ({ c; ... }) }) })` -- so the bracket nesting of the emitted `main()` grew
+# with the number of bindings in the program AND in everything it imports. This
+# repository is where that was found, and mere v0.1.449 fixed it: the chain now collects
+# into a single statement expression, and m3d's emitted C compiles on Ubuntu's clang 18
+# WITH NO FLAG, where before it failed at the first gate of every CI run this project
+# ever had.
+#
+# The flag stays because the shape can come back from a direction this fix did not
+# touch: any right-nested chain -- a long list literal, a long `++` -- still nests one
+# level per element, and mere-ruby is still over the limit for exactly that reason. A
+# guard that costs nothing against a failure that is invisible on the machine this is
+# developed on.
 #
 # Clang's default limit is 256. Ubuntu's clang 18 enforces it and Apple's clang does
 # not, so `clang -O2 -w m3d.c` builds on a Mac and fails on a Linux runner with

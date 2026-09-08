@@ -24,14 +24,16 @@ mere -c src/main.mere > m3d.c && clang -O2 -w -fbracket-depth=4096 m3d.c -o m3d 
 ./m3d test/data/gltf/Box/glTF-Binary/Box.glb --out box.png --size 512
 ```
 
-**`-fbracket-depth` is not optional on stock clang, and it is why every CI run was red
-for the life of this project.** Mere emits a program's top-level `let`s as one nested
-statement expression, so the bracket nesting of the emitted `main()` grows with the
-number of bindings in the program and everything it imports — about two levels per
-binding, measured, and m3d's `main()` is at 533. Clang's default limit is 256: Ubuntu's
-clang 18 enforces it, Apple's clang does not, and gcc has no such limit.
-`scripts/ccflags.sh` is where the gates get the flag, and it adds it only if the
-compiler accepts it.
+**`-fbracket-depth` used to be mandatory here, and it is why every CI run was red for
+the life of this project.** Mere emitted a chain of `let`s as one nested statement
+expression per binding, so the bracket nesting of the emitted `main()` grew with the
+number of bindings in the program and everything it imports; clang's default limit is
+256, Ubuntu's clang 18 enforces it and Apple's does not, so this built on a Mac and
+failed on a runner. **Fixed upstream in mere v0.1.449** — found from here — and m3d's
+emitted C now builds on the CI image with no flag at all. The line above keeps it, and
+`scripts/ccflags.sh` still adds it when the compiler accepts it, as a guard: any
+*right-nested* chain (a long list literal, a long `++`) still nests one level per
+element, and that is a direction the fix did not touch.
 
 **Compiled and not interpreted, and that is not a preference**: the interpreter
 takes minutes per frame where the C backend takes under a second.
