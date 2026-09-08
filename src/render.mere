@@ -1405,52 +1405,32 @@ module Render {
                     // byte runs 0..1. `scale` multiplies X AND Y ONLY -- glTF says
                     // so, and it is what makes a scale of 0 flatten the surface
                     // rather than zero the normal.
-                    // ONLY WHERE THE FILE SUPPLIES TANGENTS, for now.
+                    // WITH THE FILE'S TANGENTS, OR WITH A FRAME DERIVED FROM THE
+                    // TEXTURE COORDINATES WHEN IT HAS NONE, which is what glTF asks
+                    // for. The derivation is `Tangent.of_triangle` in linalg.mere,
+                    // per triangle, and the pixel makes it orthonormal against its
+                    // own normal.
                     //
-                    // glTF says a renderer SHOULD derive a tangent frame from the
-                    // texture coordinates when TANGENT is absent, and the code
-                    // below can do it -- `fa` and `fb` are computed for that case
-                    // and the frame is their cross with the pixel's normal. IT IS
-                    // NOT RIGHT YET, measured: against the reference it makes
-                    // NormalTangentTest worse (4.26 to 5.25) while making
-                    // CompareNormal better (5.72 to 4.37), which is not the
-                    // signature of a sign error or of a working implementation.
+                    // THE SIGN OF THE BITANGENT WAS WHAT KEPT THIS OFF FOR TWO
+                    // SLICES. `Tangent.of_triangle` returns dP/du and dP/dv; glTF's
+                    // texture origin is the top left, so v grows DOWN the image and
+                    // the tangent space's second axis is -dP/dv. Applying +dP/dv is
+                    // worse than not applying the map at all, and BOTH derivations
+                    // written here measured the same wrong answer to within 1%,
+                    // which is what finally said the derivation was not the problem.
                     //
-                    // What went wrong is HOW IT WAS DEBUGGED, not just the maths:
-                    // a corpus-wide mean is the weakest possible instrument for a
-                    // per-pixel frame, and two rounds of adjusting a sign against
-                    // it moved three numbers in three directions. The next step is
-                    // a purpose-built input -- one flat quad, a known map, a known
-                    // UV layout, an answer computable by hand -- and not more
-                    // tuning against an aggregate.
-                    //
-                    // So the three models without tangents keep the numbers they
-                    // had, and that is stated rather than pinned as progress.
+                    // A PIXEL-WISE MEAN COULD NOT SEE IT: it rewards blur, so "no
+                    // bumps" beat "bumps lit from the wrong side". Two instruments
+                    // that could -- the CORRELATION between the map's effect here and
+                    // in the reference (0.51 with the wrong sign, 0.996 with the
+                    // right one), and NormalTangentMirrorTest with its TANGENT
+                    // stripped, where the derived frame must reproduce the frame the
+                    // file ships (MAE 3.79 wrong, 0.000 right, on a model whose whole
+                    // purpose is a mirrored half).
                     let n =
                       match nmtex with
                       | None -> n0
-                      // ONLY WHERE THE FILE SUPPLIES TANGENTS.
-                      //
-                      // The derived path below is written, and it is verified only
-                      // against ITSELF: the property in test/render_props.mere shows
-                      // that on a quad with axis-aligned UVs the derived frame
-                      // equals the SUPPLIED one -- m3d against m3d, which is
-                      // self-consistency and not an oracle.
-                      //
-                      // Against the oracle it is worse on all three corpus models
-                      // that need it: NormalTangentTest 4.26 to 4.66, CompareNormal
-                      // 5.72 to 8.10, Box With Spaces 0.26 to 0.41. So it stays off.
-                      //
-                      // THERE MAY BE NO SINGLE RIGHT ANSWER HERE. glTF says to use
-                      // MikkTSpace when TANGENT is absent; three.js uses per-pixel
-                      // SCREEN-SPACE DERIVATIVES; this computes per-triangle affine
-                      // gradients. Three algorithms, and agreement between any two
-                      // of them is not conformance to the third. Establishing which
-                      // to aim at needs an instrument that sees THE FRAME rather
-                      // than the picture -- the picture is a lossy view of it, and
-                      // two rounds of adjusting a sign against a corpus-wide mean
-                      // moved three numbers in three directions.
-                      | Some ts -> if not has_tangent then n0 else
+                      | Some ts ->
                         let c = slot_sample ts false u vv u1 vv1 in
                         let mx = (c.x * 2.0 - 1.0) * nm_scale in
                         let my = (c.y * 2.0 - 1.0) * nm_scale in
@@ -1459,10 +1439,10 @@ module Render {
                         // primitive's business. With TANGENT, `fa` and `fb` are the
                         // interpolated tangent and bitangent and want re-normalizing
                         // -- interpolating two unit vectors gives short ones.
-                        // Without, they are the derived pair and the frame is their
-                        // cross with THIS PIXEL'S normal, which is what makes it
-                        // correct on a curved mesh: a cross product with N is
-                        // perpendicular to N by construction.
+                        // Without, they are the triangle's derived pair, and the
+                        // frame is made orthonormal against THIS PIXEL'S normal,
+                        // which is what makes it right on a curved mesh: the
+                        // interpolated normal is not the triangle's.
                         // NOT `t` AND `b`. Naming the tangent `t` here made the
                         // C backend's closure lifting give the OUTER `t` -- the
                         // render target, bound in `one_frame_bg` -- this local's
@@ -1473,17 +1453,16 @@ module Render {
                         let (tan_v, bit_v) =
                           if has_tangent then (V3.normalize fa, V3.normalize fb)
                           else
-                            let t0 = V3.cross fa n0 in
-                            let b0 = V3.cross fb n0 in
-                            // ONE SHARED SCALE, not two normalizations: the ratio
-                            // of |T| to |B| is a property of the texture
-                            // coordinates and dividing each by its own length
-                            // would throw it away. three.js takes the larger of
-                            // the two, and so does this.
-                            let d2 = f_max (V3.dot t0 t0) (V3.dot b0 b0) in
-                            if d2 <= 0.0 then (t0, b0)
-                            else let sc = 1.0 / sqrt d2 in
-                                 (V3.scale t0 sc, V3.scale b0 sc) in
+                            // GRAM-SCHMIDT AGAINST THIS PIXEL'S NORMAL. The pair from
+                            // `Tangent.of_triangle` is the surface's, and on a curved
+                            // mesh the interpolated normal is not the triangle's -- so
+                            // T is made perpendicular to the normal here rather than
+                            // being trusted as it stands, and B is rebuilt from the two
+                            // with the handedness the texture coordinates imply.
+                            match Tangent.orthonormal n0 fa fb with
+                            | None -> (v3 { x = 0.0, y = 0.0, z = 0.0 },
+                                       v3 { x = 0.0, y = 0.0, z = 0.0 })
+                            | Some (tn, bn, _w) -> (tn, bn) in
                         let nn = V3.add (V3.add (V3.scale tan_v mx) (V3.scale bit_v my))
                                         (V3.scale n0 mz) in
                         if V3.dot nn nn <= 0.0 then n0 else V3.normalize nn in
@@ -1603,40 +1582,34 @@ module Render {
                           // and cross and dot products, and the world-to-eye
                           // transform of a look-at camera is a rotation and a
                           // translation, both of which those survive.
-                          let ex1 = sx_of cb2 - sx_of ca in
-                          let ey1 = sy_of ca - sy_of cb2 in
-                          let ex2 = sx_of cc - sx_of ca in
-                          let ey2 = sy_of ca - sy_of cc in
-                          let sdet = ex1 * ey2 - ex2 * ey1 in
                           let (fa, fb) =
                             match tang with
                             // With tangents there is nothing to derive.
                             | Some _ -> (v3 { x = 0.0, y = 0.0, z = 0.0 },
                                          v3 { x = 0.0, y = 0.0, z = 0.0 })
                             | None ->
-                              // A degenerate screen triangle has no frame, and
-                              // zero is the answer that makes the normal map do
-                              // nothing rather than divide by zero.
-                              if sdet == 0.0 then (v3 { x = 0.0, y = 0.0, z = 0.0 },
-                                                   v3 { x = 0.0, y = 0.0, z = 0.0 })
-                              else
-                                let inv = 1.0 / sdet in
-                                let (u0, v0) = vuv ka in
-                                let (u1, v1) = vuv kb2 in
-                                let (u2, v2) = vuv kc in
-                                let dp = fn (a1: v3) -> fn (a2: v3) ->
-                                  // dA/dx and dA/dy from the two edge values.
-                                  (V3.scale (V3.sub (V3.scale a1 ey2) (V3.scale a2 ey1)) inv,
-                                   V3.scale (V3.sub (V3.scale a2 ex1) (V3.scale a1 ex2)) inv) in
-                                let (q0, q1) = dp (V3.sub wb2 wa) (V3.sub wc wa) in
-                                let du = fn (b1: float) -> fn (b2: float) ->
-                                  ((b1 * ey2 - b2 * ey1) * inv, (b2 * ex1 - b1 * ex2) * inv) in
-                                let (sx0, sx1) = du (u1 - u0) (u2 - u0) in
-                                let (sy0, sy1) = du (v1 - v0) (v2 - v0) in
-                                // cross(q1,N)*a + cross(N,q0)*b is cross(q1*a - q0*b, N),
-                                // so the two vectors below are all the pixel needs.
-                                (V3.sub (V3.scale q1 sx0) (V3.scale q0 sx1),
-                                 V3.sub (V3.scale q1 sy0) (V3.scale q0 sy1)) in
+                              let (u0, v0) = vuv ka in
+                              let (u1, v1) = vuv kb2 in
+                              let (u2, v2) = vuv kc in
+                              // COLLINEAR TEXTURE COORDINATES HAVE NO FRAME, and zero
+                              // is the answer that makes the normal map do nothing
+                              // rather than divide by zero.
+                              //
+                              // THE BITANGENT IS NEGATED, and that is glTF's V AXIS and
+                              // not a sign that was tuned until the picture improved.
+                              // `Tangent.of_triangle` returns dP/du and dP/dv, which is
+                              // what the mathematics says; glTF puts the texture origin
+                              // at the TOP LEFT, so v grows downward and the tangent
+                              // space's second axis -- the one a normal map's green
+                              // channel means -- is -dP/dv. Measured against three.js on
+                              // CompareNormal at 512x512: with +dP/dv the effect of the
+                              // map correlates 0.51 with the reference's and MAE is
+                              // 7.97; with -dP/dv the correlation is 0.996 and MAE is
+                              // 0.417, against 5.59 for not applying the map at all.
+                              match Tangent.of_triangle wa wb2 wc u0 v0 u1 v1 u2 v2 with
+                              | None -> (v3 { x = 0.0, y = 0.0, z = 0.0 },
+                                         v3 { x = 0.0, y = 0.0, z = 0.0 })
+                              | Some (tv, bv) -> (tv, V3.scale bv (0.0 - 1.0)) in
                           let sv = fn (c: v4) -> fn (wp: v3) -> fn (n: v3) ->
                                    fn (k: int) ->
                             let iw = 1.0 / c.w in

@@ -750,21 +750,31 @@ let _ = check "normalmap.the_tangent_w_flips_the_bitangent" (h_nm_neg != h_nm_on
 // leaves all four checks above passing and breaks this one.
 let _ = check "normalmap.equals_baking_that_normal_into_the_geometry" (nm_baked () == h_nm_on);
 
-// WITHOUT TANGENT THE MAP IS NOT APPLIED, and that is a decision rather than an
-// omission. The code to derive a frame from the texture coordinates is in
-// render.mere and it is turned off: it agrees with the SUPPLIED frame on this
-// quad -- which is m3d against m3d, self-consistency and not an oracle -- and it
-// disagrees more with three.js on all three corpus models that need it.
+// WITHOUT TANGENT THE FRAME IS DERIVED FROM THE TEXTURE COORDINATES, and this quad
+// says WHICH frame with no room left to argue.
 //
-// glTF names MikkTSpace for this case, three.js uses per-pixel screen-space
-// derivatives, and that code computes per-triangle affine gradients: three
-// algorithms, and agreement between two of them is not conformance to the third.
+// T = dP/du = (1,0,0). This quad's v grows with world +y, so dP/dv = (0,1,0) -- and
+// the frame the derivation must produce is (T, -dP/dv, N), because glTF puts the
+// texture origin at the TOP LEFT: v grows DOWN the image, and a normal map's green
+// channel means up it. So the derived frame here is T = (1,0,0), B = (0,-1,0), which
+// is exactly the SUPPLIED frame with w = -1 and exactly the mirror of w = +1.
 //
-// This property pins the decision, so switching the path on has to come with a
-// deliberate edit here rather than happening quietly.
+// THE PAIR PINS THE CONVENTION AND NOT ONLY THE MECHANISM. A renderer that derives
+// the frame with the other sign passes the first of the two and fails the second;
+// neither sign can pass both.
+//
+// AND THE SIGN IS WHAT WAS WRONG, WHICH THIS QUAD ON ITS OWN COULD NOT HAVE SAID:
+// with v growing upward, +dP/dv IS the w = +1 frame, so the first version agreed with
+// this document and disagreed with three.js on every corpus model that needed it. Two
+// oracles settled it -- three.js on CompareNormal at 512x512 (the effect of the map
+// correlating 0.51 with the reference's, then 0.996; MAE 7.97, then 0.42, against 5.59
+// for not applying it at all) and the file's own tangents on NormalTangentMirrorTest,
+// whose mirrored half is built to make the sign visible (MAE 3.79, then 0.000).
 let h_nm_derived = nm_at "1.0" false 1.0;
 let h_nm_none = nm_at "0.0" false 1.0;
-let _ = check "normalmap.without_tangents_the_map_is_left_alone" (h_nm_derived == h_nm_none);
+let _ = check "normalmap.without_tangents_the_map_is_still_applied" (h_nm_derived != h_nm_none);
+let _ = check "normalmap.the_derived_frame_is_the_one_the_v_axis_implies" (h_nm_derived == h_nm_neg);
+let _ = check "normalmap.the_derived_frame_is_not_the_other_handedness" (h_nm_derived != h_nm_on);
 
 
 // --- points and lines --------------------------------------------------------

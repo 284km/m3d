@@ -64,19 +64,22 @@
 #
 #   And the rows above that are exactly the two features still owed:
 #
-#     NORMAL MAPPING, HALF DONE. Where the file supplies TANGENT it is applied and it
-#                      works: NormalTangentMirrorTest 3.84 to 0.41, TwoSidedPlane 0.35
-#                      to 0.17. Where it does not, the frame has to be DERIVED from the
-#                      texture coordinates, and that path is written and TURNED OFF --
-#                      measured, it made NormalTangentTest worse (4.26 to 5.25) while
-#                      making CompareNormal better (5.72 to 4.37), which is the
-#                      signature of neither a sign error nor a working implementation.
-#                      CompareNormal 5.72, NormalTangentTest 4.26 and Box With Spaces
-#                      0.26 therefore keep the numbers they had, which is stated rather
-#                      than pinned as progress.
-#                      (CompareNormal is WORSE with minification off, 2.78 to 5.72, and
-#                      that is coherent: a blurred normal map is a flatter surface, and a
-#                      flatter surface is closer to having no normal map at all.)
+#     NORMAL MAPPING IS DONE, both halves. Where the file supplies TANGENT it is
+#                      applied: NormalTangentMirrorTest 3.84 to 0.41, TwoSidedPlane 0.35
+#                      to 0.17. Where it does not, the frame is DERIVED from the texture
+#                      coordinates, and switching that on moved the three rows that
+#                      needed it: CompareNormal 5.72 to 0.65, NormalTangentTest 4.26 to
+#                      0.44, Box With Spaces 0.26 to 0.11.
+#                      THE SIGN OF THE BITANGENT IS WHAT HAD BEEN WRONG. glTF's texture
+#                      origin is the TOP LEFT, so the tangent space's second axis is
+#                      -dP/dv; the earlier attempt used +dP/dv and was worse than not
+#                      applying the map at all. See the note further down for the
+#                      instruments that separated the two, because a pixel-wise mean
+#                      could not.
+#                      CompareNormal's OTHER two columns rose (4.0 to 5.7, 2.78 to 4.10)
+#                      and that is coherent: those compare against a reference that IS
+#                      mipmapping, a blurred normal map is a flatter surface, and a
+#                      flatter surface was closer to the one this renderer used to draw.
 #     PRIMITIVE MODES ARE IMPLEMENTED: POINTS and the three LINE modes. That row went
 #                      from IoU 0.606 to 0.980 and 5.49 to 0.39, and it was the LAST ONE
 #                      BELOW THE SILHOUETTE FLOOR -- every row is above it now, and no
@@ -93,21 +96,37 @@
 #   1.10 and Cube at 1.01 -- are NOT attributed. Both carry a base colour texture and a
 #   TANGENT and no normal map. Said here rather than guessed at.
 #
-#   NORMAL MAPPING IS APPLIED WHERE THE FILE SUPPLIES TANGENTS, and it works:
-#   NormalTangentMirrorTest 3.84 to 0.41, TwoSidedPlane 0.35 to 0.17. Where it does not,
-#   the frame has to be DERIVED, and that path is written and TURNED OFF. It agrees with
-#   the supplied frame on a quad with axis-aligned UVs -- which is m3d against m3d,
-#   self-consistency and not an oracle -- and against the oracle it is WORSE on all three
-#   models that need it: NormalTangentTest 4.26 to 4.66, CompareNormal 5.72 to 8.10,
-#   Box With Spaces 0.26 to 0.41. Those three keep the numbers they had.
+#   HOW THE DERIVED FRAME WAS FINALLY SETTLED, because these rows could not do it alone.
 #
-#   THERE MAY BE NO SINGLE RIGHT ANSWER THERE. glTF names MikkTSpace for the case;
-#   three.js uses per-pixel screen-space derivatives; that code computes per-triangle
-#   affine gradients. Three algorithms, and agreement between two of them is not
-#   conformance to the third. Deciding which to aim at needs an instrument that sees THE
-#   FRAME rather than the picture -- and two rounds of adjusting a sign against a
-#   corpus-wide mean moved three numbers in three directions, which is how this note came
-#   to be written instead of a fix.
+#   Switching it on made all three WORSE -- NormalTangentTest 4.26 to 4.66, CompareNormal
+#   5.72 to 8.14, Box With Spaces 0.26 to 0.41 -- and those are within about 1% of what
+#   the older screen-space derivation measured. TWO INDEPENDENT DERIVATIONS AGREEING ON A
+#   BAD ANSWER IS NOT A DERIVATION PROBLEM, so the next measurement was not another sign.
+#
+#   A PIXEL-WISE MEAN CANNOT TELL "RIGHT PATTERN, WRONG SIGN" FROM "NO PATTERN": it
+#   rewards blur. A smooth surface sits near the average of a bumpy one and takes a
+#   moderate penalty everywhere; a sharp pattern lit from the wrong side takes a large
+#   one at every edge. So two other instruments were built, at 512x512 where the map is
+#   less minified:
+#
+#     the CORRELATION of the map's effect -- (ours with the map) minus (ours without),
+#     against (the reference) minus (ours without) -- which asks whether the same thing
+#     happened in the same places rather than how far apart two numbers are; and
+#
+#     the file's own tangents as an oracle: NormalTangentMirrorTest with its TANGENT
+#     attribute STRIPPED, rendered by the derived path and compared against the same
+#     model rendered from the tangents it ships. That model's whole purpose is a
+#     mirrored half, so it is the one place where a handedness error cannot hide.
+#
+#   With +dP/dv: correlation 0.51, and the stripped model came out at MAE 3.79 against
+#   its own tangents -- no better than not applying the map (3.49). With -dP/dv:
+#   correlation 0.996, and the stripped model at MAE 0.000 with 0.1% of pixels differing.
+#   A third reading agreed: over all 5,240 triangles of that model, the derived T matches
+#   the file's to cos +1.0000 and the derived dP/dv matches its bitangent to cos -1.0000.
+#
+#   glTF names MikkTSpace here and three.js uses per-pixel screen-space derivatives, so
+#   the three algorithms still differ in the small -- but they agree about the frame, and
+#   the sign was not a matter of taste.
 #
 # --- ROWS BELOW THIS LINE. Nothing above it is parsed.
 # --- The separator is explicit because rebuilding this header by truncating on the
@@ -118,7 +137,7 @@ AnimatedCube	                   1.000   8.6    8.794   1.095    77.96
 AnimatedMorphCube	              1.000   2.7    0.005   0.005    0.03
 AnimatedTriangle	               0.999   36.6   0.000   0.000    0.00
 Box	                            1.000   1.0    0.065   0.065    9.57
-Box With Spaces	                1.000   6.9    6.393   0.260    7.80
+Box With Spaces	                1.000   7.0    6.418   0.107    2.99
 BoxAnimated	                    1.000   2.3    0.051   0.051    1.82
 BoxInterleaved	                 1.000   5.9    0.003   0.003    0.53
 BoxTextured	                    1.000   4.8    3.136   0.100    9.86
@@ -128,7 +147,7 @@ Cameras	                        0.999   49.7   0.001   0.001    0.05
 CesiumMan	                      0.999   11.2   10.001  0.576    30.61
 CesiumMilkTruck	                1.000   8.1    7.142   0.376    15.07
 CompareMetallic	                0.999   9.8    7.102   0.255    16.61
-CompareNormal	                  0.999   4.0    2.776   5.721    59.26
+CompareNormal	                  0.999   5.7    4.102   0.653    41.25
 CompareRoughness	               0.999   7.0    5.857   0.333    11.64
 Cube	                           1.000   8.7    8.883   1.006    76.48
 Duck	                           0.999   2.2    0.613   0.099    19.64
@@ -141,7 +160,7 @@ MultipleScenes	                 1.000   37.3   0.002   0.002    0.18
 MultiUVTest	                    1.000   17.9   2.384   0.080    7.01
 NegativeScaleTest	              0.999   6.5    4.113   0.325    6.90
 NormalTangentMirrorTest	        0.994   6.8    3.346   0.411    13.22
-NormalTangentTest	              0.996   9.3    4.912   4.258    40.13
+NormalTangentTest	              0.996   6.8    2.238   0.443    16.19
 OrientationTest	                1.000   5.2    0.091   0.091    2.24
 PrimitiveModeNormalsTest	       0.980   6.6    3.922   0.388    3.48
 RecursiveSkeletons	             0.999   32.1   0.029   0.029    0.33

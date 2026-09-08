@@ -369,6 +369,55 @@ differ by up to 47 levels out of 255 in the middle, and they agree *exactly*
 when the three normals are the same. Both halves are needed; the second is what
 stops the first from passing for a per-pixel path that is simply wrong.
 
+## The derived tangent frame, and the sign a mean could not see
+
+Where a file supplies `TANGENT` the normal map is applied from it. Where it does not,
+glTF says to derive a frame from the texture coordinates, and that path was **written
+and turned off** for two slices: switching it on made every model that needed it *worse*
+against the reference.
+
+`Tangent.of_triangle` in `src/linalg.mere` is Lengyel's formula as a function of six
+vectors — three positions, three UVs — which puts it in the file compared across all
+four backends, with nine properties holding it to answers computed by hand. Turning it
+on measured **NormalTangentTest 4.26 → 4.66, CompareNormal 5.72 → 8.14, Box With Spaces
+0.26 → 0.41**: within about 1% of what the older screen-space derivation had measured.
+**Two independent derivations agreeing on a bad answer is not a derivation problem**, so
+the next measurement was not another sign.
+
+**A pixel-wise mean cannot tell "right pattern, wrong sign" from "no pattern" — it
+rewards blur.** A smooth surface sits near the average of a bumpy one and takes a
+moderate penalty everywhere; a sharp pattern lit from the wrong side takes a large one at
+every edge. Two instruments that can:
+
+- **the correlation of the map's effect** — *(ours with the map) − (ours without)*
+  against *(the reference) − (ours without)* — which asks whether the same thing happened
+  in the same places rather than how far apart two numbers are; and
+- **the file's own tangents as an oracle**: `NormalTangentMirrorTest` with its `TANGENT`
+  attribute *stripped*, rendered by the derived path and compared against the same model
+  rendered from the tangents it ships. That model exists for its mirrored half, so it is
+  the one place a handedness error cannot hide.
+
+| at 512×512 | correlation | stripped-model MAE |
+|---|---|---|
+| `B = +dP/dv` | 0.51 | 3.79 — no better than not applying the map (3.49) |
+| `B = −dP/dv` | **0.996** | **0.000**, 0.1% of pixels differing |
+
+**glTF's texture origin is the top left**, so `v` grows *down* the image and the tangent
+space's second axis is `−dP/dv`. A third reading agreed: over all 5,240 triangles of that
+model the derived T matches the file's to `cos +1.0000` and the derived `dP/dv` matches
+its bitangent to `cos −1.0000`.
+
+With the sign right, the three rows that needed the derivation moved to **CompareNormal
+0.65, NormalTangentTest 0.44, Box With Spaces 0.11**, and the two models that supply
+tangents did not move at all.
+
+**The repository's own property could not have found this**, and that is worth stating.
+Its quad's `v` grows *upward*, so `+dP/dv` *is* the supplied `w = +1` frame there — the
+derived path agreed with the document and disagreed with three.js. The property now pins
+the convention with a pair: the derived frame must equal the supplied one at `w = −1`
+**and** differ from it at `w = +1`, which no single sign can fake. Both halves were
+poisoned.
+
 ## Two bugs it found in its own dependencies
 
 Rendering a frame of shaded spheres turned up a real one in the PNG path, and
@@ -1129,30 +1178,6 @@ every gate here runs at 128 or 192 pixels.
 ## What is not here yet
 
 Ranked by what the corpus table says, rather than by what seems interesting:
-
-- **The derived tangent frame** — half of normal mapping, and **the instrument for it
-  now exists**. Where a file supplies `TANGENT` the map is applied and it works:
-  `NormalTangentMirrorTest` went from 3.84 to **0.41** and `TwoSidedPlane` from 0.35 to
-  **0.17**. Where it does not, glTF says to derive a frame from the texture coordinates,
-  and that path is written and **turned off**: measured, it made `NormalTangentTest`
-  *worse* (4.26 to 5.25) while making `CompareNormal` better (5.72 to 4.37), which is
-  the signature of neither a sign error nor a working implementation.
-
-  It stalled because it was being judged **by looking at pictures**, and a picture
-  cannot say which of three algorithms produced it — glTF names MikkTSpace, three.js
-  uses screen-space derivatives, and the renderer's disabled path computes a
-  per-triangle affine gradient *through screen space*. So the derivation is now written
-  where it can be checked: `Tangent.of_triangle` in `src/linalg.mere` is Lengyel's
-  formula as a function of six vectors and nothing else — three positions, three UVs —
-  which puts it in the file that is compared across all four backends. Nine properties
-  hold it to **answers computed by hand**: unit UVs give the axes exactly; doubling `u`
-  halves `dP/du`, so the texture's scale is carried rather than normalised away;
-  mirrored `v` flips the bitangent and not the tangent; collinear UVs have no frame at
-  all and say `None`. Six poisons, all caught.
-
-  What remains is the change itself: switching the renderer from the screen-space route
-  to this one, and measuring what the three affected models do. `CompareNormal`,
-  `NormalTangentTest` and `Box With Spaces` keep the numbers they had until then.
 
 - **Mipmaps** — last, and for a reason. `minFilter` is read and ignored, so a
   minified texture aliases. Implementing it **cannot make the comparison exact**:
