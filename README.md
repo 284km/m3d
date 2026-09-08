@@ -47,6 +47,14 @@ repository's Node host; without it the Wasm column is skipped **and says so**,
 because three backends agreeing is a weaker statement than four and a gate
 should not quietly become weaker.
 
+**What CI runs is not what a laptop runs, and the difference is printed.**
+`.github/workflows/ci.yml` gets the four backends, the Khronos validator (83 files) and
+the whole corpus; it has no Chrome, no SDL2 and therefore no reference, screen or bench
+column, and it says so in three SKIP lines. A developer machine is usually the mirror
+image — Chrome and SDL2 but no validator. **Neither side alone is the gate**, which is
+worth stating because for the life of this project the CI side was red at its first step
+and nobody on the laptop side could see why.
+
 ## Three readers, each seeing what the others cannot
 
 `scripts/linalg_check.sh` runs all three, and each one exists because the
