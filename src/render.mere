@@ -21,6 +21,73 @@ import "./texture.mere";
 // is NOT folded into `texture`, because the same image can be referenced by two
 // textures with different wrap modes and decoding it twice to say so would be a
 // lie about what the file contains.
+// A CORNER OF A TRIANGLE BEFORE THE PERSPECTIVE DIVIDE, which is where a vertex the
+// near plane creates has to be born: `svert` holds screen coordinates, and a point at
+// or behind the eye has none -- dividing by its w is where the picture goes wrong.
+//
+// So this carries the clip-space position alongside every attribute the shader wants,
+// the near plane is crossed here, and only then is anything divided. A clipped corner
+// is then indistinguishable from one the file supplied, which is the property that
+// makes the rest of the pipeline not need to know clipping happened.
+//
+// The tangent pair is the VERTEX's (from the TANGENT attribute) and is interpolated
+// like everything else. The derived pair -- for a primitive with no TANGENT -- is
+// constant across the triangle, so it does not belong to a corner and is not here.
+type cvert = { cx: float, cy: float, cz: float, cw: float,
+               wx: float, wy: float, wz: float,
+               nx: float, ny: float, nz: float,
+               u: float, v: float, u1: float, v1: float,
+               tax: float, tay: float, taz: float,
+               tbx: float, tby: float, tbz: float,
+               cr: float, cg: float, cb: float };
+
+// Straight-line interpolation of every field. Correct for all of them at once because
+// clip space is where the projection has already been applied and the divide has not:
+// c(t) = (1-t)*cA + t*cB exactly, and the world-space point, the normal and the texture
+// coordinates run with the same t along the same edge.
+let cv_lerp = fn (a: cvert) -> fn (b: cvert) -> fn (t: float) ->
+  let m = fn (x: float) -> fn (y: float) -> x + (y - x) * t in
+  cvert { cx = m a.cx b.cx, cy = m a.cy b.cy, cz = m a.cz b.cz, cw = m a.cw b.cw,
+          wx = m a.wx b.wx, wy = m a.wy b.wy, wz = m a.wz b.wz,
+          nx = m a.nx b.nx, ny = m a.ny b.ny, nz = m a.nz b.nz,
+          u = m a.u b.u, v = m a.v b.v, u1 = m a.u1 b.u1, v1 = m a.v1 b.v1,
+          tax = m a.tax b.tax, tay = m a.tay b.tay, taz = m a.taz b.taz,
+          tbx = m a.tbx b.tbx, tby = m a.tby b.tby, tbz = m a.tbz b.tbz,
+          cr = m a.cr b.cr, cg = m a.cg b.cg, cb = m a.cb b.cb };
+
+// THE NEAR PLANE, AND ONLY THE NEAR PLANE.
+//
+// A triangle with a vertex at or behind the eye used to be DROPPED WHOLE. That is right
+// for every model in the corpus, which is framed from outside, and wrong the moment the
+// camera goes in: with the eye inside Box, three.js fills all 36,864 pixels and this
+// renderer drew 0 of them. Sutherland-Hodgman against one plane is the whole fix --
+// the other five planes are what the rasterizer's bounding box and depth test already
+// do, and clipping to them would cost work to produce the same picture.
+//
+// `cz + cw >= 0` is the near plane in this projection's convention (NDC z in [-1, 1],
+// near at z = -w), so this clips where the reference clips rather than at the eye
+// plane, which would let geometry in front of the eye but behind the near plane through
+// with a depth outside the range.
+//
+// The result is a POLYGON OF THREE OR FOUR CORNERS returned as a tuple rather than a
+// list: this runs per triangle per frame, and a list here would allocate into the
+// default region on every one of them -- the shape recorded as Q-10. `n` is 0, 3 or 4.
+let clip_near = fn (a: cvert) -> fn (b: cvert) -> fn (c: cvert) ->
+  let d = fn (p: cvert) -> p.cz + p.cw in
+  let da = d a in let db = d b in let dc = d c in
+  let ia = da >= 0.0 in let ib = db >= 0.0 in let ic = dc >= 0.0 in
+  // The crossing point on an edge, at the t where the plane function reaches zero.
+  let cut = fn (p: cvert) -> fn (q: cvert) -> fn (dp: float) -> fn (dq: float) ->
+    cv_lerp p q (dp / (dp - dq)) in
+  if ia && ib && ic then (3, a, b, c, a)
+  else if not ia && not ib && not ic then (0, a, b, c, a)
+  else if ia && ib then (4, a, b, cut b c db dc, cut a c da dc)
+  else if ib && ic then (4, b, c, cut c a dc da, cut b a db da)
+  else if ic && ia then (4, c, a, cut a b da db, cut c b dc db)
+  else if ia then (3, a, cut a b da db, cut a c da dc, a)
+  else if ib then (3, b, cut b c db dc, cut b a db da, b)
+  else (3, c, cut c a dc da, cut c b dc db, c);
+
 type texslot = { img: texture, ws: int, wt: int, mag: int,
                  // WHICH COORDINATE SET, from the slot's own `texCoord`. It is a
                  // property of the SLOT and not of the mesh: MultiUVTest puts its
@@ -1508,146 +1575,181 @@ module Render {
                       let c0 = M4.mul_v4 vp (V4.of_point w0) in
                       let c1 = M4.mul_v4 vp (V4.of_point w1) in
                       let c2 = M4.mul_v4 vp (V4.of_point w2) in
-                      // NO NEAR-PLANE CLIPPING YET: a triangle with any vertex
-                      // at or behind the eye is dropped whole. That is wrong for
-                      // a camera inside geometry and right for every model in
-                      // the corpus, which is framed from outside; clipping is
-                      // recorded as owed rather than faked.
-                      let ok = c0.w > 0.0 && c1.w > 0.0 && c2.w > 0.0 in
+                      // EVERY ATTRIBUTE, GATHERED BEFORE THE DIVIDE, so that a corner
+                      // the near plane creates is the same kind of thing as one the
+                      // file supplied. Until this landed the triangle was carried
+                      // around as three vertex INDICES and every attribute was looked
+                      // up by index at the end -- which a clipped corner has no way to
+                      // be, because it is not a vertex of the mesh.
+                      let mk_cv = fn (c: v4) -> fn (wp: v3) -> fn (k: int) ->
+                        let n = nrm_of k in
+                        let (uu, vv) = vuv k in
+                        let (uu1, vv1) = vuv1 k in
+                        let (rr, gg, bb) = vcol k in
+                        let (ta, tb) =
+                          match vtan k n with
+                          | Some (tg, bt) -> (tg, bt)
+                          | None -> (v3 { x = 0.0, y = 0.0, z = 0.0 },
+                                     v3 { x = 0.0, y = 0.0, z = 0.0 }) in
+                        cvert { cx = c.x, cy = c.y, cz = c.z, cw = c.w,
+                                wx = wp.x, wy = wp.y, wz = wp.z,
+                                nx = n.x, ny = n.y, nz = n.z,
+                                u = uu, v = vv, u1 = uu1, v1 = vv1,
+                                tax = ta.x, tay = ta.y, taz = ta.z,
+                                tbx = tb.x, tby = tb.y, tbz = tb.z,
+                                cr = rr, cg = gg, cb = bb } in
+                      // THE LAST TWO ARE SWAPPED, AND THAT IS NOT A TYPO.
+                      //
+                      // glTF's front face is counter-clockwise. The viewport
+                      // transform below flips y -- a framebuffer's y grows
+                      // downward and NDC's grows up -- and a flip REVERSES
+                      // WINDING, so a front face arrives at the rasterizer
+                      // counter-clockwise in ITS coordinates, where the
+                      // convention is that clockwise is the front. Swapping
+                      // two vertices puts it back.
+                      //
+                      // Without this the renderer culls every front face and
+                      // draws the back ones, and the result LOOKS RIGHT: a box
+                      // is still a box from the inside. What gave it away was
+                      // that the whole model came out one flat colour --
+                      // ambient only -- because the faces being drawn are the
+                      // ones pointing away from the light. A silhouette is not
+                      // evidence that the right triangles were drawn.
+                      //
+                      // A NEGATIVE-DETERMINANT TRANSFORM FLIPS IT BACK, and
+                      // glTF says so in as many words: when the determinant of
+                      // a node's global transform is negative, the winding
+                      // order must be reversed. A mirroring scale turns every
+                      // front face into a back one, so without this the whole
+                      // model is inside out -- and it still looks like the
+                      // model, which is why Khronos ships NegativeScaleTest.
+                      let (va, vb2, vc2) =
+                        if flip then (mk_cv c0 w0 k0, mk_cv c1 w1 k1, mk_cv c2 w2 k2)
+                        else (mk_cv c0 w0 k0, mk_cv c2 w2 k2, mk_cv c1 w1 k1) in
+                      let (wa, wb2, wc) = if flip then (w0, w1, w2) else (w0, w2, w1) in
+                      let (ka, kb2, kc) = if flip then (k0, k1, k2) else (k0, k2, k1) in
+                      let sx_of = fn (p: cvert) -> (p.cx / p.cw * 0.5 + 0.5) * fw in
+                      let sy_of = fn (p: cvert) -> (0.5 - p.cy / p.cw * 0.5) * fh in
+                      // THE TANGENT FRAME'S TWO VECTORS, per triangle when
+                      // the primitive has no TANGENT.
+                      //
+                      // three.js takes the SCREEN-SPACE DERIVATIVES of the
+                      // eye position and of the texture coordinate. A
+                      // scanline rasterizer has no derivatives, so they are
+                      // solved analytically from the triangle's own screen
+                      // edges: for any attribute A,
+                      //
+                      //   [dA/dx, dA/dy] = [A1 - A0, A2 - A0] * inverse(M)
+                      //
+                      // where M is the 2x2 matrix of screen edges. THAT IS AN
+                      // AFFINE ANSWER AND THE TRUE DERIVATIVE IS NOT AFFINE:
+                      // under perspective three.js's varies across the
+                      // triangle and this does not. The difference is stated
+                      // rather than hidden, and it is small at the corpus's
+                      // field of view.
+                      //
+                      // World space rather than eye space, which is
+                      // equivalent here: the formula uses only differences
+                      // and cross and dot products, and the world-to-eye
+                      // transform of a look-at camera is a rotation and a
+                      // translation, both of which those survive.
+                      let (fa, fb) =
+                        match tang with
+                        // With tangents there is nothing to derive.
+                        | Some _ -> (v3 { x = 0.0, y = 0.0, z = 0.0 },
+                                     v3 { x = 0.0, y = 0.0, z = 0.0 })
+                        | None ->
+                          let (u0, v0) = vuv ka in
+                          let (u1, v1) = vuv kb2 in
+                          let (u2, v2) = vuv kc in
+                          // COLLINEAR TEXTURE COORDINATES HAVE NO FRAME, and zero
+                          // is the answer that makes the normal map do nothing
+                          // rather than divide by zero.
+                          //
+                          // THE BITANGENT IS NEGATED, and that is glTF's V AXIS and
+                          // not a sign that was tuned until the picture improved.
+                          // `Tangent.of_triangle` returns dP/du and dP/dv, which is
+                          // what the mathematics says; glTF puts the texture origin
+                          // at the TOP LEFT, so v grows downward and the tangent
+                          // space's second axis -- the one a normal map's green
+                          // channel means -- is -dP/dv. Measured against three.js on
+                          // CompareNormal at 512x512: with +dP/dv the effect of the
+                          // map correlates 0.51 with the reference's and MAE is
+                          // 7.97; with -dP/dv the correlation is 0.996 and MAE is
+                          // 0.417, against 5.59 for not applying the map at all.
+                          match Tangent.of_triangle wa wb2 wc u0 v0 u1 v1 u2 v2 with
+                          | None -> (v3 { x = 0.0, y = 0.0, z = 0.0 },
+                                     v3 { x = 0.0, y = 0.0, z = 0.0 })
+                          | Some (tv, bv) -> (tv, V3.scale bv (0.0 - 1.0)) in
+                      let sv = fn (p: cvert) -> fn (nsign: float) ->
+                        let c = v4 { x = p.cx, y = p.cy, z = p.cz, w = p.cw } in
+                        let wp = v3 { x = p.wx, y = p.wy, z = p.wz } in
+                        let n = v3 { x = p.nx, y = p.ny, z = p.nz } in
+                        let (uu, vv) = (p.u, p.v) in
+                        let (uu1, vv1) = (p.u1, p.v1) in
+                        let (cr, cg, cb) = (p.cr, p.cg, p.cb) in
+                        let vtan_here =
+                          if has_tangent
+                          then Some (v3 { x = p.tax, y = p.tay, z = p.taz },
+                                     v3 { x = p.tbx, y = p.tby, z = p.tbz })
+                          else None in
+                        let iw = 1.0 / c.w in
+                        // With tangents these are the vertex's own frame; the
+                        // derived pair is constant across the triangle, and a
+                        // constant survives interpolation as itself.
+                        // THE FRAME FLIPS WITH THE FACE, not just the normal.
+                        //
+                        // A back face's normal is negated above (`nsign`), and
+                        // three.js negates tbn[0] AND tbn[1] there too. Flipping
+                        // only the normal leaves a frame no longer right-handed
+                        // with it, so a double-sided surface gets its normal map
+                        // applied backwards on the far side. Three of the five
+                        // normal-mapped models are double-sided, including
+                        // NormalTangentTest.
+                        let (fav, fbv) = match vtan_here with
+                                         | Some (tg, bt) ->
+                                           (V3.scale tg nsign, V3.scale bt nsign)
+                                         | None -> (V3.scale fa nsign, V3.scale fb nsign) in
+                        svert { sx = (c.x * iw * 0.5 + 0.5) * fw,
+                                sy = (0.5 - c.y * iw * 0.5) * fh,
+                                sz = c.z * iw, siw = iw,
+                                wx = wp.x, wy = wp.y, wz = wp.z,
+                                nx = n.x * nsign, ny = n.y * nsign, nz = n.z * nsign,
+                                su = uu, sv = vv,
+                                su1 = uu1, sv1 = vv1,
+                                fax = fav.x, fay = fav.y, faz = fav.z,
+                                fbx = fbv.x, fby = fbv.y, fbz = fbv.z,
+                                cr = cr, cg = cg, cb = cb } in
+                      // ONE SUBMISSION, wherever the corners came from. The facing
+                      // decision is made per submitted triangle rather than per source
+                      // one, because clipping can hand the rasterizer a shape the file
+                      // never had -- and the sign it needs is a property of what is
+                      // actually drawn.
+                      let emit = fn (p: cvert) -> fn (q: cvert) -> fn (r: cvert) ->
+                        // Which side of this triangle is facing the eye, decided
+                        // where the rasterizer decides it: on the projected
+                        // area, in the order actually submitted.
+                        let sarea = Raster.edge (sx_of p) (sy_of p) (sx_of q) (sy_of q)
+                                                (sx_of r) (sy_of r) in
+                        // A DOUBLE-SIDED MATERIAL DRAWS THE BACK OF A SURFACE,
+                        // and the back's normal points away from the eye --
+                        // glTF says to negate it there. Without that the far
+                        // side of a leaf or a sheet of paper is lit from behind
+                        // and comes out at ambient: a dark shape that reads as a
+                        // hole rather than as a surface.
+                        let nsign = if sarea < 0.0 then 0.0 - 1.0 else 1.0 in
+                        let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in
+                        RasterS.triangle t depth (not mat.double_sided)
+                          (sv p nsign) (sv q nsign) (sv r nsign)
+                          shader in
+                      // THE NEAR PLANE IS CROSSED HERE, and the count of corners it
+                      // leaves says how many triangles to draw: none, the original, or
+                      // two from the quadrilateral a single clipped corner makes.
+                      let (nkeep, q0, q1, q2, q3) = clip_near va vb2 vc2 in
                       let _ =
-                        if not ok then ()
-                        else
-                          // THE LAST TWO ARE SWAPPED, AND THAT IS NOT A TYPO.
-                          //
-                          // glTF's front face is counter-clockwise. The viewport
-                          // transform below flips y -- a framebuffer's y grows
-                          // downward and NDC's grows up -- and a flip REVERSES
-                          // WINDING, so a front face arrives at the rasterizer
-                          // counter-clockwise in ITS coordinates, where the
-                          // convention is that clockwise is the front. Swapping
-                          // two vertices puts it back.
-                          //
-                          // Without this the renderer culls every front face and
-                          // draws the back ones, and the result LOOKS RIGHT: a box
-                          // is still a box from the inside. What gave it away was
-                          // that the whole model came out one flat colour --
-                          // ambient only -- because the faces being drawn are the
-                          // ones pointing away from the light. A silhouette is not
-                          // evidence that the right triangles were drawn.
-                          //
-                          // A NEGATIVE-DETERMINANT TRANSFORM FLIPS IT BACK, and
-                          // glTF says so in as many words: when the determinant of
-                          // a node's global transform is negative, the winding
-                          // order must be reversed. A mirroring scale turns every
-                          // front face into a back one, so without this the whole
-                          // model is inside out -- and it still looks like the
-                          // model, which is why Khronos ships NegativeScaleTest.
-                          let (ca, cb2, cc) = if flip then (c0, c1, c2) else (c0, c2, c1) in
-                          let (wa, wb2, wc) = if flip then (w0, w1, w2) else (w0, w2, w1) in
-                          let (ka, kb2, kc) = if flip then (k0, k1, k2) else (k0, k2, k1) in
-                          let sx_of = fn (c: v4) -> (c.x / c.w * 0.5 + 0.5) * fw in
-                          let sy_of = fn (c: v4) -> (0.5 - c.y / c.w * 0.5) * fh in
-                          // Which side of this triangle is facing the eye, decided
-                          // where the rasterizer decides it: on the projected
-                          // area, in the order actually submitted.
-                          let sarea = Raster.edge (sx_of ca) (sy_of ca) (sx_of cb2) (sy_of cb2)
-                                                  (sx_of cc) (sy_of cc) in
-                          // A DOUBLE-SIDED MATERIAL DRAWS THE BACK OF A SURFACE,
-                          // and the back's normal points away from the eye --
-                          // glTF says to negate it there. Without that the far
-                          // side of a leaf or a sheet of paper is lit from behind
-                          // and comes out at ambient: a dark shape that reads as a
-                          // hole rather than as a surface.
-                          let nsign = if sarea < 0.0 then 0.0 - 1.0 else 1.0 in
-                          // THE TANGENT FRAME'S TWO VECTORS, per triangle when
-                          // the primitive has no TANGENT.
-                          //
-                          // three.js takes the SCREEN-SPACE DERIVATIVES of the
-                          // eye position and of the texture coordinate. A
-                          // scanline rasterizer has no derivatives, so they are
-                          // solved analytically from the triangle's own screen
-                          // edges: for any attribute A,
-                          //
-                          //   [dA/dx, dA/dy] = [A1 - A0, A2 - A0] * inverse(M)
-                          //
-                          // where M is the 2x2 matrix of screen edges. THAT IS AN
-                          // AFFINE ANSWER AND THE TRUE DERIVATIVE IS NOT AFFINE:
-                          // under perspective three.js's varies across the
-                          // triangle and this does not. The difference is stated
-                          // rather than hidden, and it is small at the corpus's
-                          // field of view.
-                          //
-                          // World space rather than eye space, which is
-                          // equivalent here: the formula uses only differences
-                          // and cross and dot products, and the world-to-eye
-                          // transform of a look-at camera is a rotation and a
-                          // translation, both of which those survive.
-                          let (fa, fb) =
-                            match tang with
-                            // With tangents there is nothing to derive.
-                            | Some _ -> (v3 { x = 0.0, y = 0.0, z = 0.0 },
-                                         v3 { x = 0.0, y = 0.0, z = 0.0 })
-                            | None ->
-                              let (u0, v0) = vuv ka in
-                              let (u1, v1) = vuv kb2 in
-                              let (u2, v2) = vuv kc in
-                              // COLLINEAR TEXTURE COORDINATES HAVE NO FRAME, and zero
-                              // is the answer that makes the normal map do nothing
-                              // rather than divide by zero.
-                              //
-                              // THE BITANGENT IS NEGATED, and that is glTF's V AXIS and
-                              // not a sign that was tuned until the picture improved.
-                              // `Tangent.of_triangle` returns dP/du and dP/dv, which is
-                              // what the mathematics says; glTF puts the texture origin
-                              // at the TOP LEFT, so v grows downward and the tangent
-                              // space's second axis -- the one a normal map's green
-                              // channel means -- is -dP/dv. Measured against three.js on
-                              // CompareNormal at 512x512: with +dP/dv the effect of the
-                              // map correlates 0.51 with the reference's and MAE is
-                              // 7.97; with -dP/dv the correlation is 0.996 and MAE is
-                              // 0.417, against 5.59 for not applying the map at all.
-                              match Tangent.of_triangle wa wb2 wc u0 v0 u1 v1 u2 v2 with
-                              | None -> (v3 { x = 0.0, y = 0.0, z = 0.0 },
-                                         v3 { x = 0.0, y = 0.0, z = 0.0 })
-                              | Some (tv, bv) -> (tv, V3.scale bv (0.0 - 1.0)) in
-                          let sv = fn (c: v4) -> fn (wp: v3) -> fn (n: v3) ->
-                                   fn (k: int) ->
-                            let iw = 1.0 / c.w in
-                            let (uu, vv) = vuv k in
-                            let (uu1, vv1) = vuv1 k in
-                            let (cr, cg, cb) = vcol k in
-                            // With tangents these are the vertex's own frame; the
-                            // derived pair is constant across the triangle, and a
-                            // constant survives interpolation as itself.
-                            // THE FRAME FLIPS WITH THE FACE, not just the normal.
-                            //
-                            // A back face's normal is negated above (`nsign`), and
-                            // three.js negates tbn[0] AND tbn[1] there too. Flipping
-                            // only the normal leaves a frame no longer right-handed
-                            // with it, so a double-sided surface gets its normal map
-                            // applied backwards on the far side. Three of the five
-                            // normal-mapped models are double-sided, including
-                            // NormalTangentTest.
-                            let (fav, fbv) = match vtan k n with
-                                             | Some (tg, bt) ->
-                                               (V3.scale tg nsign, V3.scale bt nsign)
-                                             | None -> (V3.scale fa nsign, V3.scale fb nsign) in
-                            svert { sx = (c.x * iw * 0.5 + 0.5) * fw,
-                                    sy = (0.5 - c.y * iw * 0.5) * fh,
-                                    sz = c.z * iw, siw = iw,
-                                    wx = wp.x, wy = wp.y, wz = wp.z,
-                                    nx = n.x * nsign, ny = n.y * nsign, nz = n.z * nsign,
-                                    su = uu, sv = vv,
-                                    su1 = uu1, sv1 = vv1,
-                                    fax = fav.x, fay = fav.y, faz = fav.z,
-                                    fbx = fbv.x, fby = fbv.y, fbz = fbv.z,
-                                    cr = cr, cg = cg, cb = cb } in
-                          let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in
-                          RasterS.triangle t depth (not mat.double_sided)
-                            (sv ca wa (nrm_of ka) ka)
-                            (sv cb2 wb2 (nrm_of kb2) kb2)
-                            (sv cc wc (nrm_of kc) kc)
-                            shader in
+                        if nkeep == 0 then ()
+                        else if nkeep == 3 then emit q0 q1 q2
+                        else let _ = emit q0 q1 q2 in emit q0 q2 q3 in
                       go (ti + 1) in
 
                   // POINTS AND LINES, UNLIT.
@@ -1697,9 +1799,15 @@ module Render {
                   let seg = fn (ka: int) -> fn (kb: int) ->
                     let (axx, ayy, az, aw, aww) = thin_v ka in
                     let (bxx, byy, bz, bw, bww) = thin_v kb in
-                    // NO NEAR-PLANE CLIPPING HERE EITHER, so a segment with an
-                    // endpoint at or behind the eye is dropped whole rather than
-                    // drawn to a projected point that means nothing.
+                    // NO NEAR-PLANE CLIPPING ON THE THIN PRIMITIVES, so a segment
+                    // with an endpoint at or behind the eye is dropped whole rather
+                    // than drawn to a projected point that means nothing. The
+                    // TRIANGLE path clips (see `clip_near`); this one does not, and
+                    // the difference is deliberate rather than forgotten: a line has
+                    // one interior parameter and clipping it needs no polygon at all,
+                    // but the only models in the corpus with thin primitives are
+                    // framed from outside, so there would be no witness for the code.
+                    // Recorded as owed the moment one appears.
                     if aww <= 0.0 || bww <= 0.0 then ()
                     else
                       let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in

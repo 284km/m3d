@@ -112,7 +112,25 @@ sys.exit(s.connect_ex(("127.0.0.1", int(sys.argv[1]))))
 PY
   i=$((i + 1))
 done
+# THE LOAD, READ RATHER THAN ASKED ABOUT. A page that does not finish in 120 s of
+# virtual time is usually a busy machine, and this gate used to end that sentence with
+# "check the load before believing it" -- an instruction to a human for a number the
+# script can read. It is reported at the start, at every retake and at every failure, so
+# a red line carries its own attribution instead of needing a re-run to get one.
+cores=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 1)
+load1() {
+  if [ -r /proc/loadavg ]; then cut -d' ' -f1 /proc/loadavg
+  else sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{print $1}'
+  fi
+}
+loadnote() {
+  l=$(load1)
+  [ -n "$l" ] || { echo ""; return; }
+  awk -v l="$l" -v c="$cores" 'BEGIN{printf " [load %.2f over %d core(s) = %.2f per core]", l, c, l/c}'
+}
+
 [ "$i" -lt 40 ] || { echo "reference_check: the local server never came up on port $PORT"; exit 1; }
+echo "reference_check: starting$(loadnote)"
 
 # The viewport is four pixels taller than the picture: the page paints that strip only
 # after three.js returns from render(), and compare.py refuses any frame without it. See
@@ -123,6 +141,16 @@ done
 # occasionally screenshots before the compositor has drawn, and that is the browser
 # rather than anything under test. Retrying is fine; retrying quietly is not, so each
 # retake prints. A run that never gets a finished frame fails and names the model.
+#
+# READING THE CANVAS INSTEAD WAS TRIED, AND IT IS WORSE. page.html renders with
+# `preserveDrawingBuffer` and can hand out `canvas.toDataURL()` one statement after
+# `render()`, which removes the compositor from the path entirely -- measured on Box,
+# the two agree on all 36,864 pixels. But getting it out needs `--dump-dom`, and
+# **`--dump-dom` does not wait the way `--screenshot` does**: on Suzanne, three runs in
+# a row at the same load gave `<title>LOADING</title>` twice -- dumped before the loader
+# had even called back -- where the screenshot of the same page was finished every time.
+# So the capture that races less is behind a trigger that fires earlier, and the
+# screenshot stays. Written down so the next reader does not spend the same afternoon.
 #
 # THE BUDGET ESCALATES ACROSS ATTEMPTS -- 20 s, then 60, then 120 -- and it used to be
 # a flat 20 s for all four. Both halves of that were measured.
@@ -143,18 +171,18 @@ done
 # cheaply on the second attempt, and reaches 120 s only for a page that has already
 # missed twice.
 #
-# WHAT THIS STILL DOES NOT FIX, so that a future reader does not mistake it for solved:
-# under heavy machine load `NormalTangentTest` has missed all four attempts even at
-# 120 s. The gate then refuses to report a number and names the model, which is the
-# right behaviour, but it means a red line here can still be the machine rather than the
-# renderer. Check the load before believing it.
+# A RED LINE CAN STILL BE THE MACHINE, and the gate now says so itself instead of
+# asking the reader to check. The load average is read at the start and again at every
+# retake and every failure, so the report carries the one number needed to attribute it
+# -- "check the load before believing it" is not an instruction a gate should be handing
+# out when it can read the load.
 #
-# The first green run under the escalation printed exactly the shape this predicts:
-# `NormalTangentMirrorTest.patched` missed at 20 s and finished at 60; `.nomip` of
-# NormalTangentTest missed 20 and 60 and finished at 120; and its `.stock` missed all
-# of 20, 60 and 120 and finished on the fourth attempt. So both things are real at
-# once -- a budget that was too short, AND ordinary flake on top of it -- which is why
-# the retries stay and why they print what they were given.
+# What the escalation printed on its first green run was exactly the shape this
+# predicts: `NormalTangentMirrorTest.patched` missed at 20 s and finished at 60;
+# `.nomip` of NormalTangentTest missed 20 and 60 and finished at 120; and its `.stock`
+# missed all three budgets and finished on the fourth attempt. So both things are real
+# at once -- a budget that was too short, AND ordinary flake on top of it -- which is
+# why the retries stay and why they print what they were given, now with the load.
 shoot() { # url out
   k=0
   for budget in 20000 60000 120000 120000; do
@@ -166,9 +194,10 @@ shoot() { # url out
       --screenshot="$2" "$1" >/dev/null 2>&1
     if [ -s "$2" ] && python3 scripts/ref/finished.py "$2" "$SIZE"; then return 0; fi
     k=$((k + 1))
-    # THE BUDGET IS PRINTED, because "retaking" four times says nothing about whether
-    # the page is flaky or simply slow, and those want different fixes.
-    echo "  (retaking $(basename "$2") at ${budget}ms: the browser screenshotted before three.js drew)"
+    # THE BUDGET AND THE LOAD ARE PRINTED, because "retaking" four times says nothing
+    # about whether the page is flaky, simply slow, or waiting behind other work -- and
+    # those want different fixes.
+    echo "  (retaking $(basename "$2") at ${budget}ms: the browser screenshotted before three.js drew$(loadnote))"
   done
   return 1
 }
@@ -180,6 +209,10 @@ shoot() { # url out
 
 fail=0
 compared=0
+# The worst load seen while something was failing. A single number at the end is what
+# turns "20 models are red" into "20 models are red and the machine was at 15 per core",
+# which are different reports and want different actions.
+peak_fail_load=0
 printf '%-30s %-7s %-8s %-10s %-9s %-7s %s\n' model IoU 'MAE vs' 'MAE vs' 'MAE +no' 'px'   ''
 printf '%-30s %-7s %-8s %-10s %-9s %-7s %s\n' ''    ''    'stock'  'glTF BRDF' 'minify' 'diff%' ''
 for d in test/data/gltf/*/; do
@@ -200,8 +233,8 @@ for d in test/data/gltf/*/; do
   set -- $(echo "$log" | sed -n 's/^camera eye \([^ ]*\) \([^ ]*\) \([^ ]*\) target \([^ ]*\) \([^ ]*\) \([^ ]*\) tan_half_yfov \([^ ]*\) znear \([^ ]*\) zfar \([^ ]*\)$/\1 \2 \3 \4 \5 \6 \7 \8 \9/p')
   [ $# -eq 9 ] || { echo "$m: FAIL — could not read the camera back out of m3d"; fail=1; continue; }
   url="http://127.0.0.1:$PORT/scripts/ref/page.html?file=/$f&size=$SIZE&ex=$1&ey=$2&ez=$3&tx=$4&ty=$5&tz=$6&th=$7&zn=$8&zf=$9"
-  shoot "$url" "$T/$m.stock.png" || { echo "$m: FAIL — stock three.js never produced a finished frame"; fail=1; continue; }
-  shoot "$url&gltfbrdf=1" "$T/$m.patched.png" || { echo "$m: FAIL — three.js patched to glTF's BRDF never produced a finished frame"; fail=1; continue; }
+  shoot "$url" "$T/$m.stock.png" || { echo "$m: FAIL — stock three.js never produced a finished frame$(loadnote)"; peak_fail_load=$(awk -v a="$peak_fail_load" -v b="$(load1)" -v c="$cores" 'BEGIN{b=b/c; print (b>a)?b:a}'); fail=1; continue; }
+  shoot "$url&gltfbrdf=1" "$T/$m.patched.png" || { echo "$m: FAIL — three.js patched to glTF's BRDF never produced a finished frame$(loadnote)"; peak_fail_load=$(awk -v a="$peak_fail_load" -v b="$(load1)" -v c="$cores" 'BEGIN{b=b/c; print (b>a)?b:a}'); fail=1; continue; }
   # A THIRD FRAME, WITH MINIFICATION OFF, for models that have a texture at all.
   #
   # three.js builds a mipmap chain and samples it trilinearly; m3d has none and
@@ -222,7 +255,7 @@ for d in test/data/gltf/*/; do
   # about a model with none.
   if grep -q '"images"' "$f" 2>/dev/null; then
     shoot "$url&gltfbrdf=1&nomip=1" "$T/$m.nomip.png" \
-      || { echo "$m: FAIL — three.js with minification off never produced a finished frame"; fail=1; continue; }
+      || { echo "$m: FAIL — three.js with minification off never produced a finished frame$(loadnote)"; peak_fail_load=$(awk -v a="$peak_fail_load" -v b="$(load1)" -v c="$cores" 'BEGIN{b=b/c; print (b>a)?b:a}'); fail=1; continue; }
     nomip="$T/$m.nomip.png"
   else
     # No textures, so there is nothing to minify and the two frames are the same
@@ -233,9 +266,51 @@ for d in test/data/gltf/*/; do
   compared=$((compared + 1))
 done
 
+# THE CAMERA INSIDE THE GEOMETRY, which the corpus never asks for.
+#
+# Every model above is framed from OUTSIDE, so none of them crosses the near plane and
+# none could have noticed that a triangle with a vertex behind it was dropped whole.
+# With the eye inside `Box`, three.js filled all 36,864 pixels and this renderer drew
+# ZERO -- a hole the whole corpus was blind to, which is why this row exists: a feature
+# nobody's input exercises has no witness at all.
+#
+# The camera is the `--orbit` one zoomed past the surface, which is the path the window
+# drives, and three.js is handed the same numbers as every row above. Both sides must
+# FILL the frame, not merely agree -- two renderers that both drew nothing would agree
+# perfectly.
+BOXF="test/data/gltf/Box/glTF/Box.gltf"
+if [ -f "$BOXF" ]; then
+  ilog=$("$T/m3d" "$BOXF" --out "$T/inside.mine.png" --size "$SIZE" --bg 255,0,255 --orbit 30,20,0.3 2>&1)
+  set -- $(echo "$ilog" | sed -n 's/^camera eye \([^ ]*\) \([^ ]*\) \([^ ]*\) target \([^ ]*\) \([^ ]*\) \([^ ]*\) tan_half_yfov \([^ ]*\) znear \([^ ]*\) zfar \([^ ]*\)$/\1 \2 \3 \4 \5 \6 \7 \8 \9/p')
+  if [ $# -ne 9 ]; then
+    echo "near-plane: FAIL - could not read the camera back out of m3d for the inside view"; fail=1
+  else
+    iurl="http://127.0.0.1:$PORT/scripts/ref/page.html?file=/$BOXF&size=$SIZE&ex=$1&ey=$2&ez=$3&tx=$4&ty=$5&tz=$6&th=$7&zn=$8&zf=$9"
+    if ! shoot "$iurl" "$T/inside.ref.png"; then
+      echo "near-plane: FAIL - three.js never produced a finished frame for the inside view$(loadnote)"; fail=1
+    else
+      python3 scripts/ref/inside.py "$T/inside.mine.png" "$T/inside.ref.png" "$SIZE" || fail=1
+    fi
+  fi
+else
+  echo "near-plane: SKIP - $BOXF is not here"
+fi
+
 echo "reference_check: $compared model(s) compared against three.js at ${SIZE}x${SIZE}"
 # A gate that checked nothing is red. This one has been green with every IoU at 0.000,
 # because a table of unpinned models had nothing to disagree with.
 [ "$compared" -ge 8 ] || { echo "reference_check: only $compared compared, which is not a check"; fail=1; }
+if [ "$fail" != 0 ]; then
+  # ATTRIBUTION, NOT AN EXCUSE. The gate still fails -- it could not report a number --
+  # but a reader should not have to re-run it to find out whether the renderer or the
+  # machine was at fault, and this is the measurement that says which. One core's worth
+  # of load per core is a busy machine, and the frames that miss here miss under
+  # contention.
+  busy=$(awk -v l="$peak_fail_load" 'BEGIN{print (l > 1.0) ? 1 : 0}')
+  if [ "$busy" = 1 ]; then
+    echo "reference_check: the failures above happened with the machine at $(awk -v l="$peak_fail_load" 'BEGIN{printf "%.2f", l}') per core."
+    echo "reference_check: that is the usual cause of an unfinished frame here. Re-run on an idle machine before reading this as a renderer change."
+  fi
+fi
 [ "$fail" = 0 ] && echo "PASS reference_check" || echo "FAIL reference_check"
 exit $fail

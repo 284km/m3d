@@ -1224,9 +1224,14 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   IDCT was possible because libjpeg *is* a document. So the reference is asked to
   stop minifying instead (`?nomip=1`) and the resulting number is pinned; building
   mipmaps is a question about picture quality, not about agreement.
-- **Near-plane clipping**: a triangle with any vertex behind the eye is dropped
-  whole, which is right for every model in the corpus and wrong for a camera
-  inside geometry.
+- **Near-plane clipping on thin primitives**: a POINT or a LINE with an endpoint at
+  or behind the near plane is dropped whole. Triangles are clipped (Sutherland–Hodgman
+  against `z = -w`, interpolating every attribute), which was the case that mattered:
+  with the eye inside `Box`, three.js filled all 36,864 pixels and this renderer drew
+  **zero**. It now fills them too, at IoU 1.000 and the same MAE 1.0 it has from
+  outside, so the clip agrees with the reference rather than merely producing
+  something. Lines are left because the corpus's thin primitives are all framed from
+  outside and there would be no witness for the code.
 - **The GPU path.** Everything here is a software rasterizer. The window shows the
   buffer it produced; nothing is drawn by a GPU.
 - **A resizable window.** The frame buffer is a fixed size, so a size change is

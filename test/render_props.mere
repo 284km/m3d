@@ -1205,5 +1205,92 @@ let floor_eye = eye_of (zoom_in o_base 40);
 let _ = check "orbit.at_the_zoom_floor_the_camera_is_still_finite"
   (floor_eye.x == floor_eye.x && floor_eye.y == floor_eye.y && floor_eye.z == floor_eye.z);
 
+// ---------------------------------------------------------------------------
+// NEAR-PLANE CLIPPING.
+//
+// A triangle with a vertex at or behind the near plane used to be DROPPED WHOLE, which
+// is right for every model in the corpus -- all of them framed from outside -- and
+// wrong the moment the camera goes in. Measured against three.js with the eye inside
+// Box at 192x192: the reference filled all 36,864 pixels and this renderer drew ZERO.
+//
+// THE END-TO-END PROPERTY IS A PAIR, because the inside case alone would also pass on a
+// renderer that painted the whole frame regardless of where the camera was. Inside, the
+// box fills the frame; outside, it does not. And the unit properties below hold
+// `clip_near` to the two things a clipper has to get right -- how many corners come out,
+// and that every corner it invents is ON the plane rather than near it.
+let cv_at = fn (x: float) -> fn (y: float) -> fn (z: float) -> fn (w: float) ->
+            fn (uu: float) ->
+  cvert { cx = x, cy = y, cz = z, cw = w,
+          wx = x, wy = y, wz = z,
+          nx = 0.0, ny = 0.0, nz = 1.0,
+          u = uu, v = 0.0, u1 = 0.0, v1 = 0.0,
+          tax = 0.0, tay = 0.0, taz = 0.0,
+          tbx = 0.0, tby = 0.0, tbz = 0.0,
+          cr = 1.0, cg = 1.0, cb = 1.0 };
+// The plane function this clipper uses. `>= 0` is in front of the near plane.
+let plane_of = fn (p: cvert) -> p.cz + p.cw;
+let on_plane = fn (p: cvert) -> let d = plane_of p in (if d < 0.0 then 0.0 - d else d) < 0.000001;
+
+// Two units in front, one unit behind, and one exactly on it.
+let cv_in = cv_at 0.0 0.0 0.0 1.0 0.0;
+let cv_in2 = cv_at 1.0 0.0 0.0 1.0 1.0;
+let cv_in3 = cv_at 0.0 1.0 0.0 1.0 0.5;
+let cv_out = cv_at 0.0 0.0 (0.0 - 2.0) 1.0 1.0;
+let cv_out2 = cv_at 1.0 0.0 (0.0 - 2.0) 1.0 0.0;
+
+let (n_all, a0, a1, a2, _a3) = clip_near cv_in cv_in2 cv_in3;
+let _ = check "clip.all_three_in_front_keeps_the_triangle_untouched"
+  (n_all == 3 && a0.u == cv_in.u && a1.u == cv_in2.u && a2.u == cv_in3.u);
+
+let (n_none, _b0, _b1, _b2, _b3) = clip_near cv_out cv_out2 (cv_at 0.0 1.0 (0.0 - 2.0) 1.0 0.0);
+let _ = check "clip.all_three_behind_drops_it" (n_none == 0);
+
+let (n_one, c0_, c1_, c2_, _c3) = clip_near cv_in cv_out cv_out2;
+let _ = check "clip.one_corner_in_front_makes_one_triangle"
+  (n_one == 3 && c0_.u == cv_in.u);
+let _ = check "clip.the_corners_it_invents_are_on_the_plane"
+  (on_plane c1_ && on_plane c2_);
+
+let (n_two, d0_, d1_, d2_, d3_) = clip_near cv_in cv_in2 cv_out;
+let _ = check "clip.two_corners_in_front_make_a_quadrilateral"
+  (n_two == 4 && d0_.u == cv_in.u && d1_.u == cv_in2.u);
+let _ = check "clip.both_invented_corners_of_the_quadrilateral_are_on_the_plane"
+  (on_plane d2_ && on_plane d3_);
+// An invented corner carries the attributes of the point it stands for, not one of the
+// ends. cv_in is at z = 0 with u = 0 and cv_out at z = -2 with u = 1; the plane is
+// crossed halfway, so u is 0.5 there. A clipper that copied an endpoint's attributes
+// would draw the right shape with the wrong texture on it.
+let _ = check "clip.an_invented_corner_carries_interpolated_attributes"
+  (let du = d3_.u - 0.5 in (if du < 0.0 then 0.0 - du else du) < 0.000001);
+
+// End to end: the eye inside the box, through the same explicit-camera entry point the
+// window uses.
+// THE ORBIT CAMERA, ZOOMED PAST THE SURFACE, and not a hand-built one: this is the
+// path `--orbit` and the window drive, and it is the one whose picture was compared
+// against three.js. A camera assembled here would be a second spelling of the framing
+// rule, and the two could drift.
+let inside_cam = Frame.orbit_framed (Frame.orbit_of_flag cam_auto 30.0 20.0 0.3) 1.0 cam_auto;
+let (inside_t, _id, _idr, _ie, _ic, _ith, _izn, _izf) =
+  Render.one_frame_cam cam_doc 32 32 true cam_bg 0.0 0 inside_cam;
+let covered_of = fn (tg: target) ->
+  let rec go = fn (i: int) -> fn (acc: int) ->
+    if i >= tg.w * tg.h then acc
+    else
+      let r = bytebuf_get tg.color (4 * i) in
+      let g = bytebuf_get tg.color (4 * i + 1) in
+      let b = bytebuf_get tg.color (4 * i + 2) in
+      let bgr = 26 in
+      let d = (if r > bgr then r - bgr else bgr - r)
+              + (if g > bgr then g - bgr else bgr - g)
+              + (if b > 30 then b - 30 else 30 - b) in
+      go (i + 1) (if d > 6 then acc + 1 else acc) in
+  go 0 0;
+let _ = check "nearclip.the_eye_inside_the_box_sees_the_box_everywhere"
+  (covered_of inside_t == 32 * 32);
+// The control: from outside, the same box does NOT fill the frame. Without it the
+// property above would pass on a renderer that painted every pixel.
+let _ = check "nearclip.from_outside_the_same_box_does_not_fill_the_frame"
+  (let c = covered_of auto_t in c > 0 && c < 48 * 48);
+
 let n = vec_len fails;
 print (if n == 0 then "render_props: ok" else "render_props: " ++ str_of_int n ++ " FAILED")

@@ -152,9 +152,30 @@ instead of merely embarrassing.
   renderer would do anyway, which is why neither is a hardship -- but neither is a
   choice, and a reader would otherwise assume the `region` around a frame was doing the
   work.
-- **What would answer it**: a lowering that gives `__heap` containers the current region
-  in non-lib mode, in the language repository. Until then a `region` block reclaims the
-  small values and none of the buffers.
+- **What would answer it -- AND NOT THE OBVIOUS ONE.** "Give `__heap` containers the
+  current region in non-lib mode" is what this entry used to propose, and the language
+  repository has now measured that it does not work (mere v0.1.452). Two things came
+  out of trying it:
+
+  - **`--lib` mode already does exactly that, and it is broken there.** A host that
+    calls an exported function which stores a returned `Vec` into module state, and then
+    makes one more call, reads back garbage: the container is a pointer into the arena
+    that call reclaimed. So the proposal is not untested; it is tested, and it fails.
+  - **Nothing here would have noticed.** With the lowering flipped, all 50 of this
+    renderer's pictures stay byte-identical and every gate passes. Producing a witness
+    needs the region to be REUSED before the read -- a second block that allocates over
+    it -- and a sanitiser cannot see it either, because the arena is one live
+    allocation.
+
+  What the containers are stored into does not save them, either: containers in this
+  language are shared by identity, so the store copies the strings and records inside
+  and not the container. The real answer is the one that stops `__heap` meaning two
+  things at once -- the caller's region instantiated at the call site -- which makes
+  "carried out of the block" a type error. **This renderer's accessor cache is the code
+  that would be rejected**, and it would become a warm pass like the texture cache; that
+  is already written down beside it.
+
+  Until then a `region` block reclaims the small values and none of the buffers.
 - **Verify**: `printf '%s\n' 'let one = fn (i: int) -> region R { let b = bytebuf_new 16 in bytebuf_get b 0 };' 'let _ = print (str_of_int (one 0));' '0' > /tmp/m3dq10.mere && "$MERE" -c /tmp/m3dq10.mere > /tmp/m3dq10.c 2>/dev/null && grep -q '__lang_region_block_acquire("region R")' /tmp/m3dq10.c && grep -q 'mere_bytebuf_new((&__lang_default_region)' /tmp/m3dq10.c`
 - **Why that shape**: the first grep is a POSITIVE CONTROL -- it requires the region
   block to have been emitted at all, so a compiler that stopped emitting regions (or a

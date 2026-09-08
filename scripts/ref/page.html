@@ -14,7 +14,13 @@
    its own proof that it is a finished render and not whatever the page happened to look
    like when the browser's clock ran out. Without it a blank or half-loaded frame is a
    valid PNG of the right size, and the gate reads it as an answer -- which happened
-   once, on one model, and did not reproduce, which is the worst way for it to happen. */
+   once, on one model, and did not reproduce, which is the worst way for it to happen.
+
+   READING THE CANVAS INSTEAD WAS TRIED AND IS WORSE, not because the pixels differ --
+   `preserveDrawingBuffer` is set and `toDataURL` agrees with the screenshot on all
+   36,864 of them -- but because getting them out needs `--dump-dom`, which fires
+   EARLIER than `--screenshot` does: three runs of Suzanne gave <title>LOADING</title>
+   twice. See the note in scripts/reference_check.sh. */
 #done{height:4px;background:#f0f}</style>
 <script type="importmap">{"imports":{"three":"./three.module.js","three/addons/":"./jsm/"}}</script>
 </head><body><canvas id="c"></canvas><div id="done"></div>
