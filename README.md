@@ -215,6 +215,16 @@ function and barycentric weight is exact in binary floating point. That
 separates "the geometry is wrong" from "the arithmetic rounded", and only the
 first is a bug in a rasterizer.
 
+**And one program agrees on three of the four, on x86-64 only.** `shade_props` comes out
+with NaN in two of its metallic values when the LLVM backend's IR is compiled for
+x86-64 — the architecture and not the operating system: arm64 macOS and arm64 Linux are
+both right, x86-64 Linux and x86-64 macOS under Rosetta are both wrong, and the C
+backend is right everywhere. Nothing this project *ships* is affected, because every
+picture goes through the C backend. `scripts/linalg_check.sh` names that gap and holds
+it **in both directions** — it is absorbed only on x86-64, and the gate fails if it ever
+starts agreeing, because then the entry is the stale thing. It is reproducible on an arm
+Mac with `clang -target x86_64-apple-macosx`, which is what makes it someone's to fix.
+
 **It runs on two backends, not four.** `bytebuf_*` is refused by the LLVM and
 Wasm backends, so the rasterizer is compared across the interpreter and C where
 the linear algebra is compared across four. The gate prints the refusal rather
