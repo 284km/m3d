@@ -55,11 +55,17 @@ fi
 # and when the mjpeg package landed FOUR OF THEM STARTED READING and this line is what
 # made the gate say so rather than keep passing.
 #
-# The two that remain are PROGRESSIVE JPEGs, which is a different and much larger feature
-# than baseline: spectral selection and successive approximation, several scans per
-# component. The refusal names it, which is the point -- it used to say "not a PNG".
-KNOWN_REFUSALS="CesiumMan CesiumMilkTruck"
-KNOWN_REASON="a progressive JPEG, and mjpeg reads baseline and extended sequential only"
+# IT EARNED IT A SECOND TIME. The list was two progressive JPEGs; when mjpeg learned to
+# read spectral selection, `CesiumMilkTruck` started rendering and this line said so --
+# "2 model(s) are on the known-refusal list but 1 were refused" -- rather than passing
+# with a stale entry.
+#
+# The one that remains needs SUCCESSIVE APPROXIMATION, which is the other half of
+# progressive: scans that refine the bits of coefficients earlier scans already sent,
+# rather than carrying bands of coefficients nobody has sent yet. The refusal names which
+# half is missing, which is the point -- it used to say "not a PNG".
+KNOWN_REFUSALS="CesiumMan"
+KNOWN_REASON="a progressive JPEG using successive approximation, which mjpeg does not read yet"
 
 fail=0; total=0; read_ok=0; drew=0; lit=0; nomesh=0
 refused=""

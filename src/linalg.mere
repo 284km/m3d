@@ -340,3 +340,62 @@ module Qx {
     let s = sin h in
     quat { x = a.x * s, y = a.y * s, z = a.z * s, w = cos h };
 }
+
+// The tangent frame a triangle's texture coordinates imply.
+//
+// WHY THIS IS HERE AND NOT IN THE RENDERER. glTF says that where a mesh supplies no
+// TANGENT attribute the renderer derives one from the texture coordinates, and the
+// derivation is a function of six vectors and nothing else -- three positions, three
+// UVs. Written as one it can be checked against an independently written oracle and
+// against answers computed by hand, neither of which is possible for the same
+// arithmetic buried in a per-pixel shader. The renderer's existing derived path goes
+// through SCREEN-SPACE gradients, which is a different route to a related answer and
+// is the reason that path is still turned off: it was being judged by comparing
+// pictures, and a picture cannot say which of three algorithms produced it.
+//
+// This is Lengyel's formula, which is what MikkTSpace and every glTF viewer starts
+// from. `dP/du` and `dP/dv` are the two surface directions along which u and v grow:
+//
+//   e1 = p1 - p0                      e2 = p2 - p0
+//   T  = (e1 * dv2 - e2 * dv1) / det  B  = (e2 * du1 - e1 * du2) / det
+//   det = du1 * dv2 - du2 * dv1
+//
+// NOT NORMALISED, and that is deliberate: the lengths carry the texture's scale, a
+// caller that wants a unit frame can say so, and a caller checking the derivation
+// against an oracle needs the unscaled answer. Mirrored texture coordinates make `det`
+// negative, which flips B -- that is the handedness glTF stores in TANGENT.w, and it
+// is a property rather than an accident.
+//
+// A degenerate mapping -- three collinear UVs, or two the same -- has no frame at all,
+// and `None` says so. Returning zero would be a frame that silently does nothing, and
+// returning a NaN would spread.
+module Tangent {
+  let of_triangle = fn (p0: v3) -> fn (p1: v3) -> fn (p2: v3) ->
+                    fn (u0: float) -> fn (v0: float) ->
+                    fn (u1: float) -> fn (v1: float) ->
+                    fn (u2: float) -> fn (v2: float) ->
+    let e1 = V3.sub p1 p0 in
+    let e2 = V3.sub p2 p0 in
+    let du1 = u1 - u0 in
+    let dv1 = v1 - v0 in
+    let du2 = u2 - u0 in
+    let dv2 = v2 - v0 in
+    let det = du1 * dv2 - du2 * dv1 in
+    if det == 0.0 then None
+    else
+      let r = 1.0 / det in
+      Some (V3.scale (V3.sub (V3.scale e1 dv2) (V3.scale e2 dv1)) r,
+            V3.scale (V3.sub (V3.scale e2 du1) (V3.scale e1 du2)) r);
+
+  // The frame a pixel shader wants: T made perpendicular to the interpolated normal by
+  // Gram-Schmidt, and the handedness kept as a sign rather than by trusting B, which
+  // after orthogonalisation is not the surface's B any more.
+  let orthonormal = fn (n: v3) -> fn (t: v3) -> fn (b: v3) ->
+    let tp = V3.sub t (V3.scale n (V3.dot n t)) in
+    let len = V3.length tp in
+    if len == 0.0 then None
+    else
+      let tn = V3.scale tp (1.0 / len) in
+      let w = if V3.dot (V3.cross n tn) b < 0.0 then 0.0 - 1.0 else 1.0 in
+      Some (tn, V3.scale (V3.cross n tn) w, w);
+}

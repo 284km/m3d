@@ -188,5 +188,88 @@ let _ = match M4x.normal_matrix model with
     check "normal.model_matrix_would_be_wrong"
       (f_abs (V3.dot (V3.normalize bad) (V3.normalize t1)) > 1e-3);
 
+// ---------------------------------------------------------------------------
+// The tangent frame a triangle's texture coordinates imply.
+//
+// ANSWERS COMPUTED BY HAND, not by comparing this against itself. The derived tangent
+// path in the renderer has been turned off for exactly that reason -- it was judged by
+// looking at pictures, and a picture cannot say which of three algorithms produced it
+// (glTF names MikkTSpace, three.js uses screen-space derivatives, this computes a
+// per-triangle affine gradient). These triangles are chosen so the answer is written
+// down before the code runs.
+let tri3 = fn (o) ->
+  match o with
+  | None -> (v3 { x = 0.0, y = 0.0, z = 0.0 }, v3 { x = 0.0, y = 0.0, z = 0.0 }, false)
+  | Some (t, b) -> (t, b, true);
+let near3 = fn (a: v3) -> fn (bx: float) -> fn (by: float) -> fn (bz: float) ->
+  f_abs (a.x - bx) < 1e-9 && f_abs (a.y - by) < 1e-9 && f_abs (a.z - bz) < 1e-9;
+
+let o_a = V3.make 0.0 0.0 0.0;
+let o_b = V3.make 1.0 0.0 0.0;
+let o_c = V3.make 0.0 1.0 0.0;
+
+// The unit case: u grows with x, v with y, one unit of each over one unit of world.
+// T must be exactly +x and B exactly +y.
+let (t1, b1, ok1) = tri3 (Tangent.of_triangle o_a o_b o_c 0.0 0.0 1.0 0.0 0.0 1.0);
+let _ = check "tangent.unit_uv_gives_the_axes"
+  (ok1 && near3 t1 1.0 0.0 0.0 && near3 b1 0.0 1.0 0.0);
+
+// TWICE the u over the same world distance halves dP/du. This is the property that
+// fails for an implementation that normalises -- the length carries the texture scale.
+let (t2, b2, ok2) = tri3 (Tangent.of_triangle o_a o_b o_c 0.0 0.0 2.0 0.0 0.0 1.0);
+let _ = check "tangent.uv_scale_is_carried_not_normalised"
+  (ok2 && near3 t2 0.5 0.0 0.0 && near3 b2 0.0 1.0 0.0);
+
+// MIRRORED v: the determinant goes negative and B flips. T does not.
+let (t3, b3, ok3) = tri3 (Tangent.of_triangle o_a o_b o_c 0.0 0.0 1.0 0.0 0.0 (0.0 - 1.0));
+let _ = check "tangent.mirrored_uv_flips_the_bitangent"
+  (ok3 && near3 t3 1.0 0.0 0.0 && near3 b3 0.0 (0.0 - 1.0) 0.0);
+
+// SWAPPED axes: u runs along y and v along x, so T and B swap.
+let (t4, b4, ok4) = tri3 (Tangent.of_triangle o_a o_b o_c 0.0 0.0 0.0 1.0 1.0 0.0);
+let _ = check "tangent.swapped_uv_swaps_the_frame"
+  (ok4 && near3 t4 0.0 1.0 0.0 && near3 b4 1.0 0.0 0.0);
+
+// A triangle that is not axis-aligned, with the answer worked out beforehand:
+// p0=(0,0,0) p1=(2,0,0) p2=(0,0,4); u along x over 2 units, v along z over 4.
+// dP/du = (1,0,0) and dP/dv = (0,0,4) because v only reaches 1 at p2.
+let (t5, b5, ok5) = tri3 (Tangent.of_triangle (V3.make 0.0 0.0 0.0) (V3.make 2.0 0.0 0.0)
+                                              (V3.make 0.0 0.0 4.0)
+                                              0.0 0.0 2.0 0.0 0.0 1.0);
+let _ = check "tangent.a_triangle_off_the_axes"
+  (ok5 && near3 t5 1.0 0.0 0.0 && near3 b5 0.0 0.0 4.0);
+
+// DEGENERATE: two identical UVs leave no frame, and `None` says so rather than a zero
+// vector that would silently do nothing or a NaN that would spread.
+let (_t6, _b6, ok6) = tri3 (Tangent.of_triangle o_a o_b o_c 0.0 0.0 1.0 0.0 2.0 0.0);
+let _ = check "tangent.collinear_uv_has_no_frame" (not ok6);
+
+// Gram-Schmidt against a normal the tangent is already perpendicular to changes nothing,
+// and the handedness comes back +1.
+let up = V3.make 0.0 0.0 1.0;
+let (ot, ob, ow, ook) =
+  match Tangent.orthonormal up t1 b1 with
+  | None -> (o_a, o_a, 0.0, false)
+  | Some (a, b, w) -> (a, b, w, true);
+let _ = check "tangent.orthonormal_leaves_a_perpendicular_frame_alone"
+  (ook && near3 ot 1.0 0.0 0.0 && near3 ob 0.0 1.0 0.0 && ow > 0.0);
+
+// And with the mirrored bitangent it reports the other handedness -- which is what
+// glTF stores in TANGENT.w, so getting it backwards mirrors every normal map.
+let (_mt, _mb, mw, mok) =
+  match Tangent.orthonormal up t3 b3 with
+  | None -> (o_a, o_a, 0.0, false)
+  | Some (a, b, w) -> (a, b, w, true);
+let _ = check "tangent.orthonormal_reports_the_mirrored_handedness" (mok && mw < 0.0);
+
+// A tangent NOT perpendicular to the normal is made perpendicular, and stays unit.
+let skew = V3.make 1.0 0.0 0.5;
+let (st, _sb, _sw, sok) =
+  match Tangent.orthonormal up skew b1 with
+  | None -> (o_a, o_a, 0.0, false)
+  | Some (a, b, w) -> (a, b, w, true);
+let _ = check "tangent.orthonormal_removes_the_normal_component"
+  (sok && f_abs (V3.dot st up) < 1e-9 && f_abs (V3.length st - 1.0) < 1e-9);
+
 let n = vec_len fails;
 print (if n == 0 then "linalg_props: ok" else "linalg_props: " ++ str_of_int n ++ " FAILED")

@@ -25,8 +25,23 @@ type htab = { cls: int, hid: int, mincode: int Vec, maxcode: int Vec, valptr: in
 // One component as the scan sees it: where its samples go, and how wide that is in blocks.
 type scomp = { ci: int, hs: int, vs: int, bw: int, plane: int Vec };
 
+// A component's COEFFICIENTS, for the progressive path: every block of the whole image,
+// in natural (de-zigzagged) order, accumulated across scans before anything is
+// transformed. `bw`/`bh` are in blocks.
+type pcomp = { ci: int, id: int, hs: int, vs: int, bw: int, bh: int, tq: int, coef: int Vec };
+
 // A frame's shape, which is all of SOF0 plus what DQT said.
 type jcomp = { id: int, hs: int, vs: int, tq: int };
+
+// ONE SCAN. A baseline file has exactly one and a progressive file has many, each
+// coding a SLICE of the coefficients: `ss`..`se` are the spectral band (0..0 is the DC
+// coefficient alone, 1..63 the AC band), and `ah`/`al` are successive approximation --
+// the bit position this scan refines. `at` is where its entropy-coded bytes begin.
+// `hts` is a SNAPSHOT: the Huffman tables in force where this scan sits in the file.
+// A later scan may redefine one, and looking the tables up at decode time would then
+// hand every scan the last definition rather than its own.
+type jscan = { comps: (int * int * int) list, ss: int, se: int,
+               ah: int, al: int, at: int, hts: htab list };
 
 type jhead = {
   w: int, h: int, ncomp: int,
@@ -45,7 +60,12 @@ type jhead = {
   // `comps` and not necessarily in the same order — a frame says what the image HAS, a scan says what
   // this pass is coding, and baseline files where the two agree are the common case and not the rule.
   sos: (int * int * int) list,
-  scan: int
+  scan: int,
+  // PROGRESSIVE. `prog` is set by SOF2, and `scans` holds every scan in the file --
+  // for a baseline file it holds the one scan, so the two spellings agree and the
+  // baseline path can keep reading `sos`/`scan` unchanged.
+  prog: bool,
+  scans: jscan list
 };
 
 module Jpeg {
@@ -153,6 +173,43 @@ module Jpeg {
     else if m == 207 then "arithmetic-coded differential lossless"
     else "SOF" ++ str_of_int (m - 192);
 
+  // A DHT REDEFINES a table for everything after it, so a second definition of the same
+  // (class, id) must SHADOW the first rather than sit behind it in a list. Appending and
+  // then taking the first match is what this used to do, and in a baseline file -- one
+  // scan, every table defined once -- it never mattered.
+  //
+  // It matters immediately in a progressive file. `cjpeg` emits a fresh chroma DC table
+  // before Cb's scan and another before Cr's, so Cr was being decoded with Cb's table:
+  // the blue channel came out exact (it does not use Cr) while red and green were wrong
+  // everywhere, and the first block of each row differed from the rest because the
+  // differential DC decode was reading a bitstream it had misaligned.
+  let _put_htab = fn (hs: htab list) -> fn (t: htab) ->
+    let rec go = fn (l: htab list) -> fn (acc: htab list) -> fn (hit: bool) ->
+      match l with
+      | Nil -> if hit then list_rev acc else list_rev (Cons (t, acc))
+      | Cons (x, r) ->
+        if x.cls == t.cls && x.hid == t.hid then go r (Cons (t, acc)) true
+        else go r (Cons (x, acc)) hit in
+    go hs Nil false;
+
+  // From the first byte of entropy-coded data to the next real marker.
+  //
+  // Inside the entropy stream an `FF` byte is followed by `00` to say "this is data, not
+  // a marker" -- the encoder stuffs the zero -- and restart markers `D0`-`D7` appear
+  // between MCU runs and are part of the stream. Everything else that follows an `FF`
+  // ends the scan. Getting this wrong does not produce an error; it produces a scan list
+  // that is short or full of nonsense, so it is written once and used by the walk.
+  let _skip_entropy = fn (d: bytes) -> fn (at: int) ->
+    let n = bytes_len d in
+    let rec go = fn (i: int) ->
+      if i + 1 >= n then n
+      else if u8 d i != 255 then go (i + 1)
+      else
+        let m = u8 d (i + 1) in
+        if m == 0 || m == 255 || (m >= 208 && m <= 215) then go (i + 2)
+        else i in
+    go at;
+
   let header = fn (d: bytes) ->
     let n = bytes_len d in
     let rec go = fn (i: int) -> fn (h: jhead) ->
@@ -179,11 +236,11 @@ module Jpeg {
           // C2 is progressive, C3 lossless, C5-C7 differential, C9-CB arithmetic-coded
           // and CD-CF differential arithmetic. C4 is DHT and C8 and CC are not frames,
           // so they are left to the branches below.
-          if m == 194 || m == 195 || (m >= 197 && m <= 199)
+          if m == 195 || (m >= 197 && m <= 199)
              || (m >= 201 && m <= 203) || (m >= 205 && m <= 207) then
             fail ("jpeg: this file is " ++ sof_name m
                   ++ ", and this decoder reads baseline and extended sequential only")
-          else if m == 192 || m == 193 then
+          else if m == 192 || m == 193 || m == 194 then
             // SOF0 baseline, SOF1 extended sequential — the same layout, and the second is rare
             // enough that refusing it would be a guess about what a file is rather than a reading.
             let nc = u8 d (body + 5) in
@@ -196,7 +253,8 @@ module Jpeg {
                                              vs = hv - (hv / 16) * 16, tq = u8 d (at + 2) }, acc)) in
             go after (jhead { w = u16 d (body + 3), h = u16 d (body + 1), ncomp = nc,
                               comps = comps 0 Nil, qt = h.qt, restart = h.restart,
-                              hts = h.hts, sos = h.sos, scan = h.scan })
+                              hts = h.hts, sos = h.sos, scan = h.scan,
+                              prog = m == 194, scans = h.scans })
           else if m == 219 then
             // One DQT segment can carry several tables, one after another, each with its own
             // precision in the top half of the byte that names it.
@@ -210,7 +268,7 @@ module Jpeg {
                      (list_append acc (Cons ((tq, vals), Nil))) in
             go after (jhead { w = h.w, h = h.h, ncomp = h.ncomp, comps = h.comps,
                               qt = tabs body h.qt, restart = h.restart,
-                              hts = h.hts, sos = h.sos, scan = h.scan })
+                              hts = h.hts, sos = h.sos, scan = h.scan, prog = h.prog, scans = h.scans })
           else if m == 218 then
             let ns = u8 d body in
             let rec sc = fn (k: int) -> fn (acc: (int * int * int) list) ->
@@ -219,8 +277,24 @@ module Jpeg {
                 let at = body + 1 + k * 2 in
                 let t = u8 d (at + 1) in
                 sc (k + 1) (Cons ((u8 d at, t / 16, t - (t / 16) * 16), acc)) in
-            jhead { w = h.w, h = h.h, ncomp = h.ncomp, comps = h.comps, qt = h.qt,
-                    restart = h.restart, hts = h.hts, sos = sc 0 Nil, scan = after }
+            let ssel = u8 d (body + 1 + ns * 2) in
+            let esel = u8 d (body + 2 + ns * 2) in
+            let ap = u8 d (body + 3 + ns * 2) in
+            let this = jscan { comps = sc 0 Nil, ss = ssel, se = esel,
+                               ah = ap / 16, al = ap - (ap / 16) * 16, at = after,
+                               hts = h.hts } in
+            // A BASELINE FILE STOPS HERE, exactly as before: one scan, and the rest of
+            // the file is entropy data. A PROGRESSIVE file has more scans after this
+            // one, so the walk skips the entropy bytes and keeps going.
+            if h.prog then
+              go (_skip_entropy d after)
+                 (jhead { w = h.w, h = h.h, ncomp = h.ncomp, comps = h.comps, qt = h.qt,
+                          restart = h.restart, hts = h.hts, sos = sc 0 Nil, scan = after,
+                          prog = h.prog, scans = list_append h.scans (Cons (this, Nil)) })
+            else
+              jhead { w = h.w, h = h.h, ncomp = h.ncomp, comps = h.comps, qt = h.qt,
+                      restart = h.restart, hts = h.hts, sos = sc 0 Nil, scan = after,
+                      prog = h.prog, scans = Cons (this, Nil) }
           else if m == 196 then
             // One DHT segment can carry several tables, same as DQT, and libjpeg does pack them.
             let rec tabs = fn (at: int) -> fn (acc: htab list) ->
@@ -230,17 +304,16 @@ module Jpeg {
                 let th = u8 d at - (u8 d at / 16) * 16 in
                 let rec total = fn (l: int) -> fn (a: int) ->
                   if l > 16 then a else total (l + 1) (a + u8 d (at + l)) in
-                tabs (at + 17 + total 1 0)
-                     (list_append acc (Cons (_build_htab d (at + 1) tc th, Nil))) in
+                tabs (at + 17 + total 1 0) (_put_htab acc (_build_htab d (at + 1) tc th)) in
             go after (jhead { w = h.w, h = h.h, ncomp = h.ncomp, comps = h.comps, qt = h.qt,
-                              restart = h.restart, hts = tabs body h.hts, sos = h.sos, scan = h.scan })
+                              restart = h.restart, hts = tabs body h.hts, sos = h.sos, scan = h.scan, prog = h.prog, scans = h.scans })
           else if m == 221 then
             go after (jhead { w = h.w, h = h.h, ncomp = h.ncomp, comps = h.comps,
                               qt = h.qt, restart = u16 d body,
-                              hts = h.hts, sos = h.sos, scan = h.scan })
+                              hts = h.hts, sos = h.sos, scan = h.scan, prog = h.prog, scans = h.scans })
           else go after h in
     go 0 (jhead { w = 0, h = 0, ncomp = 0, comps = Nil, qt = Nil, restart = 0,
-                  hts = Nil, sos = Nil, scan = 0 });
+                  hts = Nil, sos = Nil, scan = 0, prog = false, scans = Nil });
 
   let render_head = fn (h: jhead) ->
     let c1 = fn (c: jcomp) ->
@@ -503,6 +576,183 @@ module Jpeg {
     let _ = mcu 0 0 0 in
     (scs, hmax, vmax, vec_get nzs 0);
 
+  // ---------------------------------------------------------------------------
+  // PROGRESSIVE.
+  //
+  // A baseline file codes each block once, completely: read the coefficients, invert
+  // the transform, write the samples, move on. A progressive file codes the SAME
+  // coefficients across several scans -- a first scan carrying the DC of every block,
+  // then scans carrying bands of AC coefficients, and (successive approximation) later
+  // scans adding low-order bits to what earlier ones sent.
+  //
+  // So the pipeline has to turn inside out: coefficients for the WHOLE IMAGE are
+  // accumulated first, and only when every scan has been read is anything transformed.
+  // That is the entire difference. The Huffman reader, the dequantisation, the inverse
+  // transform, the upsampling and the colour conversion below are the baseline ones,
+  // unchanged, which is also why this is exact for the same reason baseline is: the
+  // entropy decoding is determined by the bitstream, and everything after it is shared.
+  //
+  // WHAT IS NOT READ YET is refused by name rather than guessed at: successive
+  // approximation (`ah > 0`), and restart intervals in a progressive file. Neither
+  // appears in the files this was written against for `CesiumMilkTruck`, and writing
+  // untested code for them would be a claim rather than a reading.
+  let _decode_prog = fn (h: jhead) -> fn (d: bytes) ->
+    let cdiv = fn (a: int) -> fn (b: int) -> (a + b - 1) / b in
+    let _ = if h.restart > 0
+            then fail "jpeg: this file is progressive AND has restart intervals, which is not read yet"
+            else 0 in
+    let rec maxf = fn (l: jcomp list) -> fn (a: int) -> fn (b: int) ->
+      match l with Nil -> (a, b)
+      | Cons (c, r) -> maxf r (if c.hs > a then c.hs else a) (if c.vs > b then c.vs else b) in
+    let (hmax, vmax) = maxf h.comps 1 1 in
+    let mcux = cdiv h.w (8 * hmax) in
+    let mcuy = cdiv h.h (8 * vmax) in
+
+    // One coefficient plane per FRAME component -- not per scan component, because a
+    // scan carries only some of them and they all have to survive between scans.
+    let rec build = fn (l: jcomp list) -> fn (i: int) -> fn (acc: pcomp list) ->
+      match l with
+      | Nil -> list_rev acc
+      | Cons (c, r) ->
+        let bw = mcux * c.hs in
+        let bh = mcuy * c.vs in
+        build r (i + 1) (Cons (pcomp { ci = i, id = c.id, hs = c.hs, vs = c.vs,
+                                       bw = bw, bh = bh, tq = c.tq,
+                                       coef = _zeros (bw * bh * 64) }, acc)) in
+    let pcs = build h.comps 0 Nil in
+    let zz = _qvec zigzag in
+    let rec find_p = fn (l: pcomp list) -> fn (id: int) ->
+      match l with
+      | Nil -> fail ("jpeg: a scan names component " ++ str_of_int id ++ ", which the frame does not have")
+      | Cons (c, r) -> if c.id == id then c else find_p r id in
+
+    // One scan.
+    let pass = fn (sc: jscan) ->
+      // `checked` refuses this before a caller gets a header at all; this is the same
+      // refusal at the point of use, for a caller that built a `jhead` some other way.
+      let _ = if sc.ah > 0
+              then fail ("jpeg: this progressive file uses successive approximation, which is "
+                         ++ "not read yet -- spectral selection is")
+              else 0 in
+      let ns = list_len sc.comps in
+      let st = _zeros 3 in
+      let _ = vec_set st 0 sc.at in
+      let pred = _zeros (if ns == 0 then 1 else ns) in
+      let eobrun = _zeros 1 in
+
+      // One block, at `bi` blocks into `c`'s coefficient plane.
+      let one = fn (c: pcomp) -> fn (si: int) -> fn (bi: int) ->
+        let (cs, td, ta) = _nth3 sc.comps si in
+        let _ = cs in
+        let base = bi * 64 in
+        if sc.ss == 0 then
+          // THE DC SCAN. One coefficient per block, differentially coded exactly as in
+          // baseline, then shifted left by the point transform.
+          let dct = _find_htab sc.hts 0 td in
+          let t = _dec_huff d st dct in
+          let dc = vec_get pred si + _extend (_receive d st t) t in
+          let _ = vec_set pred si dc in
+          let _ = vec_set c.coef base (_pow2 sc.al * dc) in
+          0
+        else
+          // AN AC BAND. `ss`..`se` of one component, with END-OF-BAND RUNS: a symbol
+          // whose size is zero and whose run is under fifteen does not mean "this block
+          // is finished" as it does in baseline, it means "this block AND the next
+          // (2^r - 1 + extra) blocks are finished". That run has to survive across
+          // blocks, which is why it is a cell rather than a local.
+          if vec_get eobrun 0 > 0 then
+            let _ = vec_set eobrun 0 (vec_get eobrun 0 - 1) in 0
+          else
+            let act = _find_htab sc.hts 1 ta in
+            let rec go = fn (k: int) ->
+              if k > sc.se then 0
+              else
+                let rs = _dec_huff d st act in
+                let r = rs / 16 in
+                let sz = rs - r * 16 in
+                if sz == 0 then
+                  if r == 15 then go (k + 16)
+                  else
+                    let _ = vec_set eobrun 0 (_pow2 r - 1 + (if r > 0 then _receive d st r else 0)) in
+                    0
+                else
+                  let k2 = k + r in
+                  let v = _extend (_receive d st sz) sz in
+                  let _ = if k2 <= 63
+                          then (let _ = vec_set c.coef (base + vec_get zz k2) (_pow2 sc.al * v) in 0)
+                          else 0 in
+                  go (k2 + 1) in
+            go sc.ss in
+
+      if ns == 1 then
+        // NON-INTERLEAVED, which every single-component scan is: the blocks are walked
+        // in the component's OWN raster order and not in MCU order, and the count comes
+        // from the component's own size rather than from the MCU grid. For a file with
+        // no subsampling the two happen to agree, which is exactly why this is written
+        // from the definition rather than from what happens to work here.
+        let (cs, _td, _ta) = _nth3 sc.comps 0 in
+        let c = find_p pcs cs in
+        let cw = cdiv (h.w * c.hs) hmax in
+        let ch = cdiv (h.h * c.vs) vmax in
+        let nbx = cdiv cw 8 in
+        let nby = cdiv ch 8 in
+        let rec rows = fn (by: int) -> fn (bx: int) ->
+          if by >= nby then 0
+          else if bx >= nbx then rows (by + 1) 0
+          else
+            let _ = one c 0 (by * c.bw + bx) in
+            rows by (bx + 1) in
+        rows 0 0
+      else
+        let rec mcu = fn (my: int) -> fn (mx: int) ->
+          if my >= mcuy then 0
+          else if mx >= mcux then mcu (my + 1) 0
+          else
+            let rec each = fn (si: int) ->
+              if si >= ns then 0
+              else
+                let (cs, _td, _ta) = _nth3 sc.comps si in
+                let c = find_p pcs cs in
+                let rec blk = fn (bv: int) -> fn (bh2: int) ->
+                  if bv >= c.vs then 0
+                  else if bh2 >= c.hs then blk (bv + 1) 0
+                  else
+                    let _ = one c si ((my * c.vs + bv) * c.bw + (mx * c.hs + bh2)) in
+                    blk bv (bh2 + 1) in
+                let _ = blk 0 0 in
+                each (si + 1) in
+            let _ = each 0 in
+            mcu my (mx + 1) in
+        mcu 0 0 in
+
+    let rec run = fn (l: jscan list) ->
+      match l with Nil -> 0 | Cons (sc, r) -> let _ = pass sc in run r in
+    let _ = run h.scans in
+
+    // Every scan is in. NOW invert the transform, into the same `scomp` planes the
+    // baseline path produces, so upsampling and colour conversion are shared.
+    let co = _zeros 64 in
+    let rec finish = fn (l: pcomp list) -> fn (acc: scomp list) ->
+      match l with
+      | Nil -> list_rev acc
+      | Cons (c, r) ->
+        let qv = _qvec (_find_qt h.qt c.tq) in
+        let plane = _zeros (c.bw * 8 * c.bh * 8) in
+        let rec blk = fn (by: int) -> fn (bx: int) ->
+          if by >= c.bh then 0
+          else if bx >= c.bw then blk (by + 1) 0
+          else
+            let base = (by * c.bw + bx) * 64 in
+            let rec cp = fn (i: int) ->
+              if i >= 64 then 0
+              else let _ = vec_set co i (vec_get c.coef (base + i)) in cp (i + 1) in
+            let _ = cp 0 in
+            let _ = _idct co qv plane (c.bw * 8) (bx * 8) (by * 8) in
+            blk by (bx + 1) in
+        let _ = blk 0 0 in
+        finish r (Cons (scomp { ci = c.ci, hs = c.hs, vs = c.vs, bw = c.bw, plane = plane }, acc)) in
+    (finish pcs Nil, hmax, vmax, 0);
+
   // Upsampling: putting back the chroma samples the encoder threw away.
   //
   // Repeating the nearest sample is the obvious thing and it is not what any real decoder does. The
@@ -602,7 +852,9 @@ module Jpeg {
     r * 65536 + g * 256 + b;
 
   let pixels = fn (h: jhead) -> fn (d: bytes) ->
-    let (scs, hmax, vmax, nz) = decode h d in
+    // The two paths produce the same thing -- component planes plus the sampling
+    // factors -- so everything downstream is shared and neither knows about the other.
+    let (scs, hmax, vmax, nz) = if h.prog then _decode_prog h d else decode h d in
     let up = list_map scs (fn (c: scomp) -> _upsample c hmax vmax h.w h.h) in
     let v = _zeros (h.w * h.h) in
     let p0 = _nthv up 0 in
@@ -648,9 +900,21 @@ module Jpeg {
   let checked = fn (d: bytes) ->
     let h = header d in
     if h.w <= 0 || h.h <= 0 || h.ncomp <= 0
-    then fail ("jpeg: no frame header was found (SOF0 or SOF1), so there is nothing to "
-               ++ "decode -- the file is truncated, or is not a JPEG")
-    else h;
+    then fail ("jpeg: no frame header was found (SOF0, SOF1 or SOF2), so there is nothing "
+               ++ "to decode -- the file is truncated, or is not a JPEG")
+    else
+      // REFUSED HERE AND NOT AT DECODE TIME. A progressive file whose scans refine
+      // earlier ones cannot be read at all, so `info` printing its dimensions and
+      // tables would be a header this decoder cannot stand behind -- the same shape as
+      // the 0x0 header a stepped-over SOF2 used to produce, one layer along.
+      let rec approx = fn (l: jscan list) ->
+        match l with
+        | Nil -> false
+        | Cons (sc, r) -> if sc.ah > 0 then true else approx r in
+      if approx h.scans
+      then fail ("jpeg: this progressive file uses successive approximation, which is "
+                 ++ "not read yet -- spectral selection is")
+      else h;
 
   // Reading a file is the CALLER'S business, not this decoder's. The package takes
   // bytes: a glTF image may be a file beside the document or a range of a binary

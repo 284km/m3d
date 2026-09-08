@@ -1034,27 +1034,45 @@ every gate here runs at 128 or 192 pixels.
 
 Ranked by what the corpus table says, rather than by what seems interesting:
 
-- **Progressive JPEG.** Two models are refused, by name. Baseline JPEG landed as
+- **Progressive JPEG with successive approximation.** ONE model is refused, by name,
+  and it used to be two. [mjpeg](https://github.com/284km/mjpeg) now reads progressive
+  with *spectral selection* — `CesiumMilkTruck`'s four scans all have `Ah = Al = 0`, so
+  half the feature opened half the files, and it comes in at **IoU 1.000, 0.376** against
+  the reference. `CesiumMan` has refinement scans and waits on the other half. The bug
+  along the way is worth the sentence: a progressive file **redefines Huffman tables
+  between scans**, they were being found by first match, and Cr decoded with Cb's table —
+  which showed up as **blue exact and red and green wrong everywhere**, because blue does
+  not use Cr.
+- Baseline JPEG landed as
   [mjpeg](https://github.com/284km/mjpeg) — extracted from mbrowse, where it was
   written for a browser and had only ever been handed files a browser had already
   sniffed. Asking for it as a package found two things one caller could not: it
   took a *path*, where a glTF image may be a range of the binary chunk, and it
   **stepped past a frame marker it did not know**, so a progressive file came back
-  as a `0 0 0` header with no complaint. Progressive is a much larger feature than
-  baseline — several scans per component, spectral selection, successive
-  approximation — and `CesiumMan` and `CesiumMilkTruck` wait on it.
-- **The derived tangent frame** — half of normal mapping. Where a file supplies
-  `TANGENT` the map is applied and it works: `NormalTangentMirrorTest` went from
-  3.84 to **0.41** and `TwoSidedPlane` from 0.35 to **0.17**. Where it does not,
-  glTF says to derive a frame from the texture coordinates, and that path is
-  written and **turned off**: measured, it made `NormalTangentTest` *worse* (4.26
-  to 5.25) while making `CompareNormal` better (5.72 to 4.37), which is the
-  signature of neither a sign error nor a working implementation. Two rounds of
-  adjusting a sign against a corpus-wide mean moved three numbers in three
-  directions — **the mean is the wrong instrument for a per-pixel frame**, and the
-  next step is a purpose-built input with an answer computable by hand, not more
-  tuning. `CompareNormal`, `NormalTangentTest` and `Box With Spaces` keep the
-  numbers they had.
+  as a `0 0 0` header with no complaint.
+- **The derived tangent frame** — half of normal mapping, and **the instrument for it
+  now exists**. Where a file supplies `TANGENT` the map is applied and it works:
+  `NormalTangentMirrorTest` went from 3.84 to **0.41** and `TwoSidedPlane` from 0.35 to
+  **0.17**. Where it does not, glTF says to derive a frame from the texture coordinates,
+  and that path is written and **turned off**: measured, it made `NormalTangentTest`
+  *worse* (4.26 to 5.25) while making `CompareNormal` better (5.72 to 4.37), which is
+  the signature of neither a sign error nor a working implementation.
+
+  It stalled because it was being judged **by looking at pictures**, and a picture
+  cannot say which of three algorithms produced it — glTF names MikkTSpace, three.js
+  uses screen-space derivatives, and the renderer's disabled path computes a
+  per-triangle affine gradient *through screen space*. So the derivation is now written
+  where it can be checked: `Tangent.of_triangle` in `src/linalg.mere` is Lengyel's
+  formula as a function of six vectors and nothing else — three positions, three UVs —
+  which puts it in the file that is compared across all four backends. Nine properties
+  hold it to **answers computed by hand**: unit UVs give the axes exactly; doubling `u`
+  halves `dP/du`, so the texture's scale is carried rather than normalised away;
+  mirrored `v` flips the bitangent and not the tangent; collinear UVs have no frame at
+  all and say `None`. Six poisons, all caught.
+
+  What remains is the change itself: switching the renderer from the screen-space route
+  to this one, and measuring what the three affected models do. `CompareNormal`,
+  `NormalTangentTest` and `Box With Spaces` keep the numbers they had until then.
 
 - **Mipmaps** — last, and for a reason. `minFilter` is read and ignored, so a
   minified texture aliases. Implementing it **cannot make the comparison exact**:
