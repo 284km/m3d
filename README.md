@@ -1240,6 +1240,13 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   walks**, and so does `--out`, which renders exactly one. `J.at` walks a JSON array's
   list, so indexing 924 nodes, 1,769 accessors or a skin's joints is quadratic in each.
 
+  **Half of it was tried and is not here, which is the useful part of the entry.**
+  `Acc.floats` finds its accessor twice — once in `plan` and once in `sparse_of` — so
+  the obvious first move is to find it once and pass it. Measured: the cold frame went
+  29 ms → 27, a single `--out` did not move (0.06 s either way), and rendering the whole
+  corpus went 16.17 s → 16.20. The walk is real and it is not where the time is, so the
+  change was reverted rather than committed for the shape of it.
+
 Within the loader: **`data:` URIs** (glTF-Embedded) and matrix accessors whose
 columns need 4-byte padding — both **refused by name** rather than mis-read.
 Sparse accessors used to be on this list and are implemented.
