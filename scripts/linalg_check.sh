@@ -37,31 +37,6 @@ cd "$ROOT"
 fail=0
 backends="interp"
 
-# A KNOWN BACKEND GAP, NAMED AND HELD IN BOTH DIRECTIONS.
-#
-# `shade_props` comes out with NaN in two of its metallic values when the LLVM backend's
-# IR is compiled FOR x86-64. It is the architecture and not the operating system: arm64
-# macOS and arm64 Linux are both correct, x86-64 Linux and x86-64 macOS (Rosetta) are
-# both wrong, and the C backend is correct everywhere. So this is not a rounding
-# difference between platforms -- it is a real defect in the LLVM backend, recorded
-# upstream as Q-129, and it is REPRODUCIBLE ON AN ARM MAC with
-#
-#     mere -ll test/shade_props.mere > x.ll && clang -target x86_64-apple-macosx x.ll ...
-#
-# Nothing this project ships is affected: every picture-producing path goes through the
-# C backend. What is affected is the four-backend comparison, on x86-64 only, for one
-# program -- so that one is reported rather than counted, and the gate FAILS IF IT EVER
-# STARTS AGREEING, because then this entry is the stale thing.
-# Overridable so the entry itself can be exercised on the other architecture: with
-# ARCH=x86_64 on an arm machine the program AGREES, and the gate must then say the entry
-# is stale rather than pass quietly.
-ARCH="${ARCH:-$(uname -m 2>/dev/null || echo unknown)}"
-known_gap() { # name backend -> 0 if this difference is the known one
-  [ "$1" = "shade_props" ] && [ "$2" = "llvm" ] && [ "$ARCH" = "x86_64" ] || return 1
-  echo "linalg_check: ^ KNOWN — the LLVM backend produces NaN here on x86-64 (upstream"
-  echo "linalg_check:   Q-129); arm64 agrees and the C backend agrees everywhere"
-  return 0
-}
 
 run_interp() { "$MERE" "$1" 2>&1; }
 run_c() {
@@ -121,16 +96,7 @@ for prog in test/linalg_dump.mere test/linalg_props.mere test/raster_dump.mere t
       echo "linalg_check: $name DIFFERS on $be"
       printf '%s\n' "$ref" > "$T/ref.txt"; printf '%s\n' "$out" > "$T/got.txt"
       diff "$T/ref.txt" "$T/got.txt" | head -8
-      known_gap "$name" "$be" || fail=1
-    else
-      # AND THE OTHER DIRECTION. A known gap that has started agreeing is a list entry
-      # that has to go, and a list nobody edits is how a corpus starts tolerating a
-      # failure again. northstar_check holds its refusal list the same way.
-      if [ "$name" = "shade_props" ] && [ "$be" = "llvm" ] && [ "$ARCH" = "x86_64" ]; then
-        echo "linalg_check: shade_props now AGREES on llvm/x86-64 — the upstream gap is"
-        echo "linalg_check: fixed, so delete this entry from scripts/linalg_check.sh"
-        fail=1
-      fi
+      fail=1
     fi
   done
   echo "linalg_check: $name — $n backend(s) byte-identical"
