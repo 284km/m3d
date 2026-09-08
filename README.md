@@ -1205,11 +1205,13 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   now flat — `Suzanne` grows 1 MB over forty frames. `scripts/bench_check.sh` prints
   the number rather than asserting it, because a threshold loose enough to admit it
   could not catch the tenfold leak the gate exists for.
-- **The scene walk on a large document.** `RecursiveSkeletons` costs **26 ms** to
-  produce a 64×64 image — all setup and no pixels — down from 240 when the walk was
-  quadratic in `Scene.world_matrices_at` and 177 when every accessor re-read the `.bin`.
-  What is left of it is still list-shaped: `J.at` walks a JSON array's list, so indexing
-  924 nodes, 1,769 accessors or a skin's joints is quadratic in each.
+- **The scene walk on a large document, on the first frame.** `RecursiveSkeletons`
+  costs **25 ms** for its first 64×64 image and **3 ms** for every frame after it — all
+  setup and no pixels — down from 240 when the walk was quadratic in
+  `Scene.world_matrices_at` and 177 when every accessor re-read the `.bin`. The
+  accessor cache is what makes the second frame cheap; **the first still pays the list
+  walks**, and so does `--out`, which renders exactly one. `J.at` walks a JSON array's
+  list, so indexing 924 nodes, 1,769 accessors or a skin's joints is quadratic in each.
 
 Within the loader: **`data:` URIs** (glTF-Embedded) and matrix accessors whose
 columns need 4-byte padding — both **refused by name** rather than mis-read.
