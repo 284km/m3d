@@ -137,20 +137,29 @@ fi
 echo "bench: the frame loop does not grow with the frame count"
 
 # A REPORTED RESIDUAL, NOT AN ASSERTION, and named so it is not mistaken for solved.
-# RecursiveSkeletons has 924 nodes, 84 skins and ZERO images, and it still grows about
-# 12 MB a frame -- roughly 13 KB per node per frame -- so something in the per-node work
-# escapes the frame's region. Every ordinary model is flat: Box 25->28 MB over forty
-# frames, RiggedSimple 15->19, MultipleScenes 21->24, Fox 115->133.
 #
-# It is printed rather than asserted because a threshold loose enough to admit 1.55x
-# would be too loose to catch the defect this gate exists for. If it is ever fixed this
-# number falls; if something regresses badly it climbs. Either way it is visible.
+# What remains, after the texture cache and after the target stopped being reallocated
+# per frame, is ABOUT 1.3 MB A FRAME AND THE SAME AT EVERY SIZE -- 1323 KB at 64x64 and
+# 1360 at 512x512, where the framebuffer differs by a factor of 64. So it is not the
+# framebuffer: it is the vertex data, decoded out of its accessors on every frame and
+# never reclaimed. RiggedSimple, with almost none, is flat.
+#
+# The reason nothing is reclaimed is the same one throughout: a container whose region
+# marker is `__heap` is allocated from the DEFAULT region, which is never freed, and a
+# `region` block does not change that. Measured: 200 iterations of a 4 MB `bytebuf_new`
+# inside a region reach 770 MB of peak RSS against 5 MB for one.
+#
+# It is printed rather than asserted because the threshold that would catch it is
+# tighter than the noise, and because the fix -- caching decoded accessors the way
+# textures are cached -- is a change of its own. If it is ever made this number falls;
+# if something regresses badly it climbs. Either way it is visible.
 RS="test/data/gltf/RecursiveSkeletons/glTF/RecursiveSkeletons.gltf"
 if [ -f "$RS" ]; then
   set -- $(growth "$RS")
   if [ -n "${1:-}" ] && [ -n "${2:-}" ] && [ "$1" -gt 0 ]; then
     echo "bench: RecursiveSkeletons $(($1 / 1024)) MB for 1 frame, $(($2 / 1024)) MB for 40 —"
-    echo "bench: a KNOWN residual, 924 nodes and no images, so per-node work escapes the region"
+    echo "bench: a KNOWN residual — vertex data is re-decoded every frame and the default"
+    echo "bench: region is never freed; about 1.3 MB a frame, the same at every size"
   fi
 fi
 echo "bench: ok"

@@ -103,13 +103,26 @@ let o_start = match orbit_flag with
 // decodes an image the first time it is asked and `mat_slots` runs per primitive, so
 // without this a frame loop re-decodes every texture on every frame. Measured, that
 // was 4198 MB over forty frames of Suzanne against 382 MB for one.
+// ONE TARGET FOR THE WHOLE SESSION, cleared each frame rather than reallocated.
+// A `region` cannot reclaim it: the framebuffer is a `ByteBuf`, and a ByteBuf's
+// region marker is `__heap`, which in this compilation mode is the default region
+// and is never freed -- measured, 200 iterations of a 4 MB `bytebuf_new` inside a
+// region reach 770 MB against 5 MB for one. So the per-frame growth that remained
+// after the texture cache was the colour buffer plus the depth buffer, about 3.1x
+// the framebuffer a frame, and the fix is to stop allocating one per frame.
+// BOUND AS ONE NAME AND PROJECTED AT USE, not destructured here. A top-level
+// `let (a, b) = ...` does not give the lifted closure below anything it can see:
+// the C came out with `use of undeclared identifier 'mu_frame_t'`.
+let frame_target = Target.make size size;
 let cache = Render.tex_cache d;
 // WARMED ONCE, HERE, OUTSIDE EVERY REGION. This is the whole reason the frame loop
 // can both reclaim its scratch and keep its textures: the decode happens out here,
 // so the lookup inside a frame never allocates anything that would have to escape.
 let _ = Render.warm_cache d cache;
 let render_at = fn (o) ->
-  Render.one_frame_cached d size size true bgv time anim (Frame.orbit_framed o aspect autocam) cache;
+  let (ft, fdep) = frame_target in
+  Render.one_frame_into d ft fdep true bgv time anim
+    (Frame.orbit_framed o aspect autocam) cache;
 
 // WITH NO `--orbit`, THE FRAME COMES FROM THE UNTOUCHED AUTO PATH -- not from
 // decomposing that camera into angles and rebuilding it. The round trip through

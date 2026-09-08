@@ -869,6 +869,43 @@ Two of my own measurements along the way were wrong, in opposite directions:
 An unflattering number is worth suspecting the harness over — and so is a flattering
 one.
 
+## Holding the open questions to the same standard as the code
+
+`OPEN_QUESTIONS.md` records nine questions, each claiming something is still true —
+a feature the language does not have, a symptom that still reproduces, a decision
+taken for a stated reason. Nothing was checking those claims, so an entry whose
+symptom someone had fixed would read as open forever.
+
+`scripts/questions_check.sh` runs them. Each entry carries one line: a backquoted
+command that must exit 0 **while the question is still open**, or `none — <why>` for
+a decision. **Every question must carry one**, and that rule found the first gap
+immediately: Q-9, "the rasterizer runs on two backends", had no check at all.
+
+**The second gap is the interesting one.** Q-8's check had been passing for the wrong
+reason. It wrote its test program with `printf '...\{...'`, and `\{` is not an escape
+any printf here expands — so the file contained a literal backslash, `mere` answered
+`parse error: expected type`, and the check, a bare `! mere file`, passed because the
+program did not parse rather than because a record cannot hold a `Vec`. The claim was
+still true; nothing had been testing it.
+
+That is the failure mode this whole gate is aimed at, and it shapes the design:
+
+- **Positive checks beat negations.** Most of these questions assert a feature is
+  *absent*, and a negation succeeds when its subject fails for any reason at all — no
+  compiler, a misspelled flag, an unset variable. Q-9 now greps the refusal *by name*
+  (`bytebuf_new has no LLVM lowering`) and requires the C backend to accept the same
+  program first. Q-8 greps `__heap` and requires a plain-`int` record to run first as
+  a control.
+- **The gate establishes its own positive controls before running anything.** `mere
+  -te` must find a builtin that certainly exists, and `MERE_SRC` must name a tree that
+  actually has a `contrib/` — otherwise every "this is still absent" check is
+  vacuously true and the run means nothing. If a control fails it **skips by name**
+  rather than reporting green.
+
+Poisoned four ways: a question whose verify stops holding is reported as a retire
+candidate; a question with its verify deleted is reported as unchecked; a broken
+compiler and a wrong `MERE_SRC` both stop the run instead of passing it.
+
 ## What a frame costs, and a gate that found a real bug on its first run
 
 `scripts/bench_check.sh` makes **one assertion and one report**, and they are
@@ -946,12 +983,41 @@ The memory was the symptom the gate could see. The cost was the frame time:
 Suzanne's 75 ms to produce a 64×64 image was almost entirely PNG decoding. Every
 picture in the corpus is byte-identical before and after, on both entry points.
 
-**One residual, named rather than hidden.** `RecursiveSkeletons` — 924 nodes, 84 skins,
-*zero* images — still grows about 12 MB a frame, roughly 13 KB per node per frame, so
-something in the per-node work escapes the frame's region. Every ordinary model is
-flat (`Box` 25→28, `RiggedSimple` 15→19, `MultipleScenes` 21→24, `Fox` 115→133). The
-gate **prints** that number instead of asserting it, because a threshold loose enough
-to admit 1.55× would be too loose to catch the defect the gate exists for.
+### A region does not reclaim what a frame allocates
+
+The residual after the cache turned out to be worth chasing, because the answer is a
+fact about the language rather than about this renderer:
+
+```
+200 iterations of a 4 MB bytebuf_new inside region R { }
+  1 iteration    5 MB peak RSS      the allocation is real
+  200 iterations 770 MB peak RSS    none of it came back
+```
+
+The emitted C says `mere_bytebuf_new((&__lang_default_region), ...)` **even for a call
+written directly inside the block**: a container whose region marker is `__heap` is
+allocated from the default region, and the default region is never freed. So wrapping
+a frame changes nothing for the framebuffer, however the wrapping is written.
+
+Measured on the renderer, per-frame growth converged to **3.1× the colour buffer** —
+`RiggedSimple` at 64/128/256/512 grew 117/262/844/3169 KB a frame against framebuffers
+of 16/64/256/1024 KB — which is the colour buffer plus a double-precision depth buffer.
+The fix needs no language change: **allocate the target once and clear it**, which is
+what a real renderer does. `RecursiveSkeletons` over forty frames went 1111→1621 MB
+before and **1081→1143 MB** after; `RiggedSimple` is flat.
+
+**And the walk was quadratic.** `Scene.world_matrices_at` transforms *every* node in
+the document and depends only on the frame, yet it was called once per skinned node
+inside the walk — the same shape as the texture decode, frame-constant work repeated
+per node. Hoisting it took `RecursiveSkeletons` from 240 ms to **134 ms** for a 64×64
+image. All 48 renderable models are byte-identical before and after.
+
+**What is left, measured and named.** About **1.3 MB a frame, and the same at every
+size** — 1323 KB at 64², 1360 KB at 512², where the framebuffer differs by 64×. So it
+is not the framebuffer: it is the vertex data, decoded out of its accessors on every
+frame and never reclaimed. `RiggedSimple`, which has almost none, is flat. The gate
+prints it rather than asserting it, because caching decoded accessors the way textures
+are cached is a change of its own.
 
 ### The 19 seconds were not the renderer
 
@@ -1014,8 +1080,11 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   `scripts/bench_check.sh` prints that number rather than asserting it, because a
   threshold loose enough to admit it could not catch the tenfold leak the gate
   exists for.
-- **Mipmaps**, still — see below. And the 924-node walk itself: `RecursiveSkeletons`
-  costs 240 ms to produce a 64×64 image, which is all scene setup and no pixels.
+- **The scene walk on a large document.** `RecursiveSkeletons` costs 240 ms to
+  produce a 64×64 image — all setup and no pixels. `J.at` is a linear walk down a
+  JSON array's list, so indexing 924 nodes is quadratic, and
+  `Scene.world_matrices_at` (which transforms *every* node) is called once per
+  skinned node inside the walk rather than once per frame.
 
 Within the loader: **`data:` URIs** (glTF-Embedded) and matrix accessors whose
 columns need 4-byte padding — both **refused by name** rather than mis-read.

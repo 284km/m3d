@@ -1090,12 +1090,30 @@ module Render {
   // `Frame.auto_camera_at` returns, so handing it that output unchanged must give
   // back exactly the frame `one_frame_anim` gives. A property asserts that, byte for
   // byte, because it is the only thing that says this extraction moved nothing.
-  let one_frame_cached = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+  // RENDER INTO A TARGET SOMEBODY ELSE OWNS. `one_frame_cached` below makes one per
+  // call, which is right for a single picture; a frame loop makes one and clears it,
+  // because A REGION DOES NOT RECLAIM A ByteBuf.
+  //
+  // That is measured and not assumed: two hundred iterations of a 4 MB `bytebuf_new`
+  // inside a `region R { }` reach 770 MB of peak RSS against 5 MB for one iteration,
+  // and the emitted C says `mere_bytebuf_new((&__lang_default_region), ...)` even for
+  // a call written directly inside the block -- a container whose region marker is
+  // `__heap` gets the default region, which is never freed. So a per-frame target
+  // grows without bound however the frame is wrapped, and the only fix available
+  // here is not to allocate one per frame.
+  let one_frame_into = fn (d: doc) -> fn (t: target) -> fn (depth) -> fn (lit: bool) ->
                       fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
                       fn (cam: (v3 * v3 * float * float * float * mat4)) -> fn (cache) ->
-    let (t, depth) = Target.make w h in
+    let w = t.w in
+    let h = t.h in
     let _ = Target.clear t depth (int_of_float bg.x) (int_of_float bg.y) (int_of_float bg.z) in
     let ast = Scene.anim_state_of d time anim in
+    // HOISTED OUT OF THE WALK. This transforms EVERY node in the document and depends
+    // only on `d` and `ast`, both fixed for the frame -- calling it per skinned node
+    // made a frame quadratic in the node count. Measured on RecursiveSkeletons (924
+    // nodes): 198/247 ms a frame became 153/157, with every picture byte-identical.
+    // The same shape as the texture decode: frame-constant work repeated per node.
+    let all_worlds = Scene.world_matrices_at d ast in
     let (eye, ctr, th, zn, zf, vp) = cam in
     let k = if lit then 3.0 else 0.0 in
     let light = dirlight { dx = 0.0 - 0.4, dy = 0.0 - 0.7, dz = 0.0 - 0.6, lr = k, lg = k, lb = k } in
@@ -1115,7 +1133,7 @@ module Render {
         // `world` must not be applied on top of them -- see `joint_matrices`.
         let skin = match J.field nd "skin" with
                    | None -> None
-                   | Some si -> Some (joint_matrices d (Scene.world_matrices_at d ast) (J.int_ si)) in
+                   | Some si -> Some (joint_matrices d all_worlds (J.int_ si)) in
         let nrm_m = match M4x.normal_matrix world with | None -> M4.identity | Some x -> x in
         // A mirroring transform reverses the winding order (glTF 3.7.4). Decided
         // per node, once, from the global transform's determinant.
@@ -1652,10 +1670,17 @@ module Render {
         prims (J.arr (J.req mesh "primitives"))) in
     (t, depth, vec_get drawn 0, eye, ctr, th, zn, zf);
 
+  // A fresh target per call, for a caller that wants one picture.
+  let one_frame_cached = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
+                      fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
+                      fn (cam: (v3 * v3 * float * float * float * mat4)) -> fn (cache) ->
+    let (t, depth) = Target.make w h in
+    one_frame_into d t depth lit bg time anim cam cache;
+
   // A FRESH CACHE PER CALL, so every existing caller is unchanged: one frame decodes
   // each image at most once instead of once per primitive, and nothing survives the
-  // call. A frame LOOP wants the opposite and calls `one_frame_cached` with a cache
-  // it keeps -- see src/view.mere.
+  // call. A frame LOOP wants the opposite and calls `one_frame_into` with a target
+  // and a cache it keeps -- see src/view.mere.
   let one_frame_cam = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
                       fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
                       fn (cam: (v3 * v3 * float * float * float * mat4)) ->

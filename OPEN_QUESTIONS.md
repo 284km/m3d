@@ -87,7 +87,15 @@ instead of merely embarrassing.
 - **The alternative that was rejected**: keeping depth as f32 bit patterns inside a second
   `ByteBuf`, which would fit in the record. It costs four `bytebuf_get` plus a shift and a
   widening per depth test, in the innermost loop of the rasterizer, to buy a nicer type.
-- **Verify**: `printf 'type box = \{ v: Vec[R, float] };\nlet b = box \{ v = vec_new () };\nprint_int (vec_len b.v)\n' > /tmp/m3dq8.mere && ! "$MERE" /tmp/m3dq8.mere >/dev/null 2>&1`
+- **Verify**: `printf "%s\n" "type ok8 = { v: int };" "let a = ok8 { v = 1 };" "print_int a.v" > /tmp/m3dq8ctl.mere && "$MERE" /tmp/m3dq8ctl.mere >/dev/null 2>&1 && printf "%s\n" "type box8 = { v: Vec[R, float] };" "let b = box8 { v = vec_new () };" "print_int (vec_len b.v)" > /tmp/m3dq8.mere && "$MERE" /tmp/m3dq8.mere 2>&1 | grep -q "__heap"`
+- **The previous version of this check was VACUOUS**, and building `questions_check.sh`
+  found it. It wrote the program with `printf '...\{...'`, where `\{` is not an escape
+  any printf here expands -- so the file contained a literal backslash, `mere` answered
+  `parse error: expected type`, and the check (a bare `! mere file`) passed because the
+  program did not parse rather than because a record cannot hold a `Vec`. The claim was
+  still true; nothing had been testing it. This version writes the braces as ARGUMENTS
+  rather than inside the format string, requires a plain-`int` record to run first as a
+  positive control, and GREPS THE ERROR by name (`__heap`) instead of negating.
 
 ## Q-9: the rasterizer runs on two backends, not four
 
@@ -103,6 +111,12 @@ instead of merely embarrassing.
 - **What would fix it**: a `ByteBuf` lowering in those two backends, which is the language
   repository's work. Until then the browser path (M2c) cannot render either, since it is
   the Wasm backend.
+- **Verify**: `printf "%s\n" "type box9 = { b: ByteBuf[R] };" "let x = box9 { b = bytebuf_new 8 };" "let _ = bytebuf_set x.b 0 1;" "print_int (bytebuf_get x.b 0)" > /tmp/m3dq9.mere && "$MERE" -c /tmp/m3dq9.mere >/dev/null 2>&1 && "$MERE" -ll /tmp/m3dq9.mere 2>&1 | grep -q "bytebuf_new has no LLVM lowering" && "$MERE" -w /tmp/m3dq9.mere 2>&1 | grep -q "bytebuf_new has no Wasm lowering"`
+- **Why that shape**: it GREPS THE REFUSAL BY NAME rather than asserting the compiler
+  fails, and it requires the C backend to accept the same program first. A bare `!
+  compiles` would pass if the compiler were missing, if the flag were misspelled, or if
+  the program were rejected for some unrelated reason -- reporting "still open" about a
+  question it never tested.
 
 ## Q-2: does `linalg` belong in the language's `contrib/`
 
@@ -147,6 +161,9 @@ instead of merely embarrassing.
 - **What would still move the line**: a `pow` in a texture filter or a tone map. Neither
   exists yet, and the reason to write this down is that adding one would cost the
   four-backend comparison and should be a decision rather than a side effect.
+- **Verify**: none — answered, and the answer is not left to prose: `linalg_check.sh`
+  compares `shade_props` and `srgb_dump` across all four backends on every run, so the
+  claim that shading is bit-exact is asserted continuously rather than remembered.
 
 ## Q-5: `V3.normalize` of a zero vector returns zero
 

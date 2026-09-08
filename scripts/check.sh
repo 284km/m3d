@@ -14,6 +14,12 @@ sh "$ROOT/scripts/gltf_check.sh" || exit 1
 sh "$ROOT/scripts/raster_check.sh" || exit 1
 sh "$ROOT/scripts/shade_check.sh" || exit 1
 
+# OPEN_QUESTIONS.md held to the same standard as the code: every entry claims something
+# is still true, and this runs the claim. It found two gaps the moment it existed -- a
+# question with no check at all, and one whose check had been passing for the wrong
+# reason.
+sh "$ROOT/scripts/questions_check.sh" || exit 1
+
 out=$("$MERE" "$ROOT/test/render_props.mere" 2>&1) || { echo "check: render_props did not run"; echo "$out" | head -3; exit 1; }
 case "$out" in
   *"render_props: ok"*) echo "check: the pipeline properties hold (the winding, above all)" ;;
