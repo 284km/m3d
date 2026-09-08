@@ -55,17 +55,18 @@ fi
 # and when the mjpeg package landed FOUR OF THEM STARTED READING and this line is what
 # made the gate say so rather than keep passing.
 #
-# IT EARNED IT A SECOND TIME. The list was two progressive JPEGs; when mjpeg learned to
-# read spectral selection, `CesiumMilkTruck` started rendering and this line said so --
-# "2 model(s) are on the known-refusal list but 1 were refused" -- rather than passing
-# with a stale entry.
+# IT EARNED IT A SECOND TIME, AND THEN THE LIST EMPTIED. It was two progressive JPEGs;
+# when mjpeg learned spectral selection `CesiumMilkTruck` started rendering and this line
+# said so -- "2 model(s) are on the known-refusal list but 1 were refused" -- rather than
+# passing with a stale entry. When it learned successive approximation `CesiumMan`
+# followed, and the list is now empty: EVERY MODEL IN THE CORPUS IS READ.
 #
-# The one that remains needs SUCCESSIVE APPROXIMATION, which is the other half of
-# progressive: scans that refine the bits of coefficients earlier scans already sent,
-# rather than carrying bands of coefficients nobody has sent yet. The refusal names which
-# half is missing, which is the point -- it used to say "not a PNG".
-KNOWN_REFUSALS="CesiumMan"
-KNOWN_REASON="a progressive JPEG using successive approximation, which mjpeg does not read yet"
+# THE LIST STAYS, EMPTY, and the accounting below stays with it. An empty list is the
+# strongest form of this check -- any refusal at all is now a failure by name -- and
+# deleting the mechanism because it currently has nothing in it is how a corpus quietly
+# starts tolerating one again.
+KNOWN_REFUSALS=""
+KNOWN_REASON="on the known-refusal list"
 
 fail=0; total=0; read_ok=0; drew=0; lit=0; nomesh=0
 refused=""

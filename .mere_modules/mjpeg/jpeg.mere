@@ -592,12 +592,15 @@ module Jpeg {
   // unchanged, which is also why this is exact for the same reason baseline is: the
   // entropy decoding is determined by the bitstream, and everything after it is shared.
   //
-  // WHAT IS NOT READ YET is refused by name rather than guessed at: successive
-  // approximation (`ah > 0`), and restart intervals in a progressive file. Neither
-  // appears in the files this was written against for `CesiumMilkTruck`, and writing
-  // untested code for them would be a claim rather than a reading.
+  // BOTH HALVES ARE READ: spectral selection (a scan carries a band of coefficients
+  // nobody has sent yet) and successive approximation (a scan adds a lower bit to what
+  // an earlier one sent). RESTART INTERVALS IN A PROGRESSIVE FILE are still refused by
+  // name -- no file this has been pointed at has one, and writing untested code for it
+  // would be a claim rather than a reading.
   let _decode_prog = fn (h: jhead) -> fn (d: bytes) ->
     let cdiv = fn (a: int) -> fn (b: int) -> (a + b - 1) / b in
+    // `checked` refuses this before a caller gets a header at all; this is the same
+    // refusal at the point of use, for a caller that built a `jhead` some other way.
     let _ = if h.restart > 0
             then fail "jpeg: this file is progressive AND has restart intervals, which is not read yet"
             else 0 in
@@ -628,12 +631,6 @@ module Jpeg {
 
     // One scan.
     let pass = fn (sc: jscan) ->
-      // `checked` refuses this before a caller gets a header at all; this is the same
-      // refusal at the point of use, for a caller that built a `jhead` some other way.
-      let _ = if sc.ah > 0
-              then fail ("jpeg: this progressive file uses successive approximation, which is "
-                         ++ "not read yet -- spectral selection is")
-              else 0 in
       let ns = list_len sc.comps in
       let st = _zeros 3 in
       let _ = vec_set st 0 sc.at in
@@ -645,7 +642,18 @@ module Jpeg {
         let (cs, td, ta) = _nth3 sc.comps si in
         let _ = cs in
         let base = bi * 64 in
-        if sc.ss == 0 then
+        if sc.ss == 0 && sc.ah > 0 then
+          // A DC REFINEMENT SCAN, which is the simplest thing in the format: ONE BIT per
+          // block, no Huffman code and no predictor. The bit is the next lower bit of a
+          // value the first DC scan already sent shifted up, so it is OR-ed in rather
+          // than added -- adding would be right for a positive coefficient and wrong for
+          // a negative one, where the bits below the point transform belong to the two's
+          // complement of the magnitude.
+          let _ = if _bit d st == 1
+                  then (let _ = vec_set c.coef base (bit_or (vec_get c.coef base) (_pow2 sc.al)) in 0)
+                  else 0 in
+          0
+        else if sc.ss == 0 then
           // THE DC SCAN. One coefficient per block, differentially coded exactly as in
           // baseline, then shifted left by the point transform.
           let dct = _find_htab sc.hts 0 td in
@@ -653,6 +661,80 @@ module Jpeg {
           let dc = vec_get pred si + _extend (_receive d st t) t in
           let _ = vec_set pred si dc in
           let _ = vec_set c.coef base (_pow2 sc.al * dc) in
+          0
+        else if sc.ah > 0 then
+          // AN AC REFINEMENT SCAN, and the only genuinely difficult reading in the
+          // format. The band's coefficients already have values from earlier scans, and
+          // this scan carries TWO INTERLEAVED KINDS OF BIT:
+          //
+          //   a CORRECTION BIT for every coefficient already known to be nonzero, in
+          //   band order, saying whether its magnitude grows at this bit position; and
+          //   a Huffman-coded run/size pair announcing a coefficient that BECOMES
+          //   nonzero here, whose one magnitude bit is its sign.
+          //
+          // The run in that pair counts ZERO-HISTORY coefficients only -- the ones still
+          // zero after every earlier scan -- so walking it means stepping over the
+          // nonzero ones without spending run, while spending a correction bit on each.
+          // Getting that split wrong desynchronises the bit stream, which is not a
+          // slightly wrong picture: everything after it is noise.
+          let p1 = _pow2 sc.al in
+          let m1 = 0 - _pow2 sc.al in
+          // One correction bit for one coefficient, and NO BIT AT ALL if it is still
+          // zero. That condition is the whole synchronisation.
+          let correct = fn (idx: int) ->
+            let cv = vec_get c.coef idx in
+            if cv == 0 then 0
+            else if _bit d st == 0 then 0
+            else if bit_and cv p1 != 0 then 0
+            else (let _ = vec_set c.coef idx (cv + (if cv >= 0 then p1 else m1)) in 0) in
+          let act = _find_htab sc.hts 1 ta in
+          // Advance from `kk`, spending `r` on zero-history coefficients and a
+          // correction bit on nonzero ones. Stops AT the target zero coefficient, which
+          // is the one the caller writes the new value into.
+          let rec adv = fn (kk: int) -> fn (r: int) ->
+            if kk > sc.se then kk
+            else if vec_get c.coef (base + vec_get zz kk) != 0 then
+              let _ = correct (base + vec_get zz kk) in adv (kk + 1) r
+            else if r == 0 then kk
+            else adv (kk + 1) (r - 1) in
+          // The band, until an end-of-band run starts or the band ends. Returns where it
+          // stopped, because the correction bits for the rest of the band are still owed
+          // and the EOB tail below picks up from there.
+          let rec band = fn (k: int) ->
+            if k > sc.se then k
+            else
+              let rs = _dec_huff d st act in
+              let r0 = rs / 16 in
+              let sz = rs - r0 * 16 in
+              if sz == 0 && r0 != 15 then
+                // EOBr: this block and the next (2^r - 1 + extra) are finished, and the
+                // count is written WITHOUT the -1 the first-pass form uses, because this
+                // path decrements at the end of every block including this one.
+                let _ = vec_set eobrun 0 (_pow2 r0 + (if r0 > 0 then _receive d st r0 else 0)) in
+                k
+              else
+                // A newly nonzero coefficient's magnitude is always one at this bit
+                // position, so the only thing sent is its sign.
+                let sval = if sz == 0 then 0 else if _bit d st == 1 then p1 else m1 in
+                let k2 = adv k r0 in
+                // GUARDED, and libjpeg pads its own order table instead: a stream that
+                // runs out of band before finding the target zero is malformed, and
+                // writing at k2 would be a read past the end of the block.
+                let _ = if sval != 0 && k2 <= sc.se
+                        then (let _ = vec_set c.coef (base + vec_get zz k2) sval in 0)
+                        else 0 in
+                band (k2 + 1) in
+          let k0 = if vec_get eobrun 0 > 0 then sc.ss else band sc.ss in
+          // INSIDE AN END-OF-BAND RUN THE BLOCK IS NOT SKIPPED, which is the difference
+          // from the first pass: no new coefficient arrives, but every coefficient the
+          // earlier scans made nonzero still owes its correction bit.
+          let _ = if vec_get eobrun 0 > 0 then
+                    let rec tail = fn (kk: int) ->
+                      if kk > sc.se then 0
+                      else let _ = correct (base + vec_get zz kk) in tail (kk + 1) in
+                    let _ = tail k0 in
+                    (let _ = vec_set eobrun 0 (vec_get eobrun 0 - 1) in 0)
+                  else 0 in
           0
         else
           // AN AC BAND. `ss`..`se` of one component, with END-OF-BAND RUNS: a symbol
@@ -903,17 +985,13 @@ module Jpeg {
     then fail ("jpeg: no frame header was found (SOF0, SOF1 or SOF2), so there is nothing "
                ++ "to decode -- the file is truncated, or is not a JPEG")
     else
-      // REFUSED HERE AND NOT AT DECODE TIME. A progressive file whose scans refine
-      // earlier ones cannot be read at all, so `info` printing its dimensions and
-      // tables would be a header this decoder cannot stand behind -- the same shape as
-      // the 0x0 header a stepped-over SOF2 used to produce, one layer along.
-      let rec approx = fn (l: jscan list) ->
-        match l with
-        | Nil -> false
-        | Cons (sc, r) -> if sc.ah > 0 then true else approx r in
-      if approx h.scans
-      then fail ("jpeg: this progressive file uses successive approximation, which is "
-                 ++ "not read yet -- spectral selection is")
+      // REFUSED HERE AND NOT ONLY AT DECODE TIME, for the reason successive approximation
+      // used to be: a header this decoder cannot stand behind should not be printed at
+      // all. A progressive file with restart intervals needs the bit reader, the DC
+      // predictors and the end-of-band run reset at every marker, and no file this has
+      // been pointed at has one -- so it is named rather than guessed at.
+      if h.restart > 0 && h.prog
+      then fail "jpeg: this file is progressive AND has restart intervals, which is not read yet"
       else h;
 
   // Reading a file is the CALLER'S business, not this decoder's. The package takes

@@ -324,6 +324,27 @@ metallic, so its ambient is zero, and the threshold that passes a lit metal also
 passes a black frame. Two models sat exactly on that line and the column said
 "no" about a renderer that was working.
 
+### The known-refusal list is empty, and it stays
+
+The gate holds a list of models it expects to be refused, and it holds it **in both
+directions**: a refusal that is not on the list fails, and a model on the list that has
+started reading fails too. That second half earned its keep twice. The list was six
+models with JPEG textures; when [mjpeg](https://github.com/284km/mjpeg) landed, four of
+them started reading and the gate said *"6 model(s) are on the known-refusal list but 2
+were refused"* rather than passing with a stale entry. When mjpeg learned progressive
+with spectral selection, `CesiumMilkTruck` followed and it said so again.
+
+**It is now empty: 50 of 50 read.** The last two were progressive JPEGs and they took the
+two halves of progressive separately — `CesiumMilkTruck`'s four scans all have
+`Ah = Al = 0`, so spectral selection alone opened it, and `CesiumMan`'s ten-scan script
+needed successive approximation, where a scan adds a lower bit to what an earlier one
+sent. Its 1024×1024 texture decodes **0 of 3,145,728 bytes different** from libjpeg.
+
+The empty list stays, and so does the accounting around it. An empty list is the
+strongest form of the check — any refusal at all is now a failure, by name — and deleting
+the mechanism because it happens to have nothing in it is how a corpus quietly starts
+tolerating one again.
+
 ## Per-pixel shading
 
 The rasterizer has two entry points. `Raster.triangle` interpolates a colour;
@@ -1045,7 +1066,8 @@ field keeps its name.
 | `Box` | 0 → 0 ms | 24 → 25 ms |
 
 and one frame of `RecursiveSkeletons` at 256² went **1081 MB → 295 MB** of peak RSS.
-Every one of the 49 pictures is byte-identical and the one refusal is unchanged.
+Every one of the 49 pictures readable at the time is byte-identical and the one refusal
+is unchanged.
 
 **It made the reader stricter, and that was not free.** Where buffer `i` starts in the
 blob has to be *derivable* from the JSON — a record cannot hold a `Vec` (Q-8), so a
@@ -1108,22 +1130,6 @@ every gate here runs at 128 or 192 pixels.
 
 Ranked by what the corpus table says, rather than by what seems interesting:
 
-- **Progressive JPEG with successive approximation.** ONE model is refused, by name,
-  and it used to be two. [mjpeg](https://github.com/284km/mjpeg) now reads progressive
-  with *spectral selection* — `CesiumMilkTruck`'s four scans all have `Ah = Al = 0`, so
-  half the feature opened half the files, and it comes in at **IoU 1.000, 0.376** against
-  the reference. `CesiumMan` has refinement scans and waits on the other half. The bug
-  along the way is worth the sentence: a progressive file **redefines Huffman tables
-  between scans**, they were being found by first match, and Cr decoded with Cb's table —
-  which showed up as **blue exact and red and green wrong everywhere**, because blue does
-  not use Cr.
-- Baseline JPEG landed as
-  [mjpeg](https://github.com/284km/mjpeg) — extracted from mbrowse, where it was
-  written for a browser and had only ever been handed files a browser had already
-  sniffed. Asking for it as a package found two things one caller could not: it
-  took a *path*, where a glTF image may be a range of the binary chunk, and it
-  **stepped past a frame marker it did not know**, so a progressive file came back
-  as a `0 0 0` header with no complaint.
 - **The derived tangent frame** — half of normal mapping, and **the instrument for it
   now exists**. Where a file supplies `TANGENT` the map is applied and it works:
   `NormalTangentMirrorTest` went from 3.84 to **0.41** and `TwoSidedPlane` from 0.35 to

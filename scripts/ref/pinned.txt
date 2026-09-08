@@ -1,4 +1,4 @@
-# Pinned agreement with three.js, at 192x192, over the 48 corpus models both renderers
+# Pinned agreement with three.js, at 192x192, over the 49 corpus models both renderers
 # draw. `scripts/reference_check.sh` renders each with m3d and THREE TIMES with three.js.
 #
 #   model <TAB> IoU  MAE-vs-stock  MAE-vs-glTF-BRDF  MAE-comparable  %-differing  [reason]
@@ -125,6 +125,7 @@ BoxTextured	                    1.000   4.8    3.136   0.100    9.86
 BoxTexturedNonPowerOfTwo	       1.000   4.6    2.871   0.094    9.30
 BoxVertexColors	                1.000   17.3   0.027   0.027    6.39
 Cameras	                        0.999   49.7   0.001   0.001    0.05
+CesiumMan	                      0.999   11.2   10.001  0.576    30.61
 CesiumMilkTruck	                1.000   8.1    7.142   0.376    15.07
 CompareMetallic	                0.999   9.8    7.102   0.255    16.61
 CompareNormal	                  0.999   4.0    2.776   5.721    59.26
