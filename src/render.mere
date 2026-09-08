@@ -28,6 +28,77 @@ type texslot = { img: texture, ws: int, wt: int, mag: int,
                  // one material.
                  uvset: int };
 
+// ONE DECODED COPY OF EACH ACCESSOR, kept by whoever owns the frame loop.
+//
+// WHY IT IS WORTH ANYTHING. `Acc.floats` walks the JSON array of accessors to find the
+// one it was asked for, and then `Acc.sparse_of` walks it AGAIN, and both are lists.
+// RecursiveSkeletons has 1,769 accessors and reads about that many a frame -- every
+// animation channel is a sampler with an input and an output, every skin has its
+// inverse bind matrices -- so a frame walked a 1,769-long list some 3,500 times.
+// Profiled after the buffers stopped being re-read, that was the whole frame:
+// 1,921 samples in `plan` and 1,079 in `sparse_of` against 27 in the decoder itself.
+//
+// AND IT IS THE FRAME LOOP'S LAST LEAK. A `Vec` a function returns has the region
+// marker `__heap`, which the C backend lowers to the DEFAULT region, which is never
+// freed (Q-10) -- so every one of those decoded arrays stayed. That was the 1.3 MB a
+// frame `bench_check.sh` printed and did not assert.
+//
+// THIS ONE FILLS ITSELF, and the texture cache next door cannot. A `texture` holds a
+// `ByteBuf[R]`: decoded inside a `region` it cannot be stored anywhere that outlives
+// the region, and Mere rejects the path whether or not it is taken, so filling has to
+// happen in a separate warm pass the caller runs outside. A decoded accessor is a
+// `Vec` a function returned -- default region, by the same rule that leaks it -- so
+// storing one from inside a frame's region is accepted, and measured to work on the
+// interpreter and the C backend both.
+//
+// THAT IS A DEPENDENCE ON Q-10 AND IT IS WRITTEN DOWN THERE. If the language ever
+// gives those allocations the caller's region, this stops compiling -- loudly, at the
+// `vec_set` below -- and wants the warm pass the textures have. A silent version of
+// that change would be a dangling reference; the type system is what makes it loud.
+module Acache {
+  let make = fn (d: doc) ->
+    let n = match J.field d.j "accessors" with | None -> 0 | Some a -> J.arr_len a in
+    let fs = vec_new () in
+    let is = vec_new () in
+    let rec fill = fn (i: int) ->
+      if i >= n then ()
+      else
+        let _ = vec_push fs (None : (float Vec) option) in
+        let _ = vec_push is (None : (int Vec) option) in
+        fill (i + 1) in
+    let _ = fill 0 in
+    (fs, is);
+
+  // A MISS DECODES AND STORES, and an index outside the table decodes and does not:
+  // the cache is sized from the document, so an index it does not cover is a document
+  // that names an accessor it does not have, and `Acc.floats` is the one that should
+  // say so rather than this.
+  let floats = fn (d: doc) -> fn (ac) -> fn (i: int) ->
+    let (fs, _is) = ac in
+    if i < 0 || i >= vec_len fs then Acc.floats d i
+    else
+      match (vec_get fs i : (float Vec) option) with
+      | Some v -> v
+      | None ->
+        let v = Acc.floats d i in
+        let _ = vec_set fs i (Some v) in
+        v;
+
+  // JOINTS_0 is read as integers and the indices are integers, so the two element
+  // types need two tables. Keyed the same way: one accessor is read as one or the
+  // other and never as both, so the tables are sparse and never disagree.
+  let ints = fn (d: doc) -> fn (ac) -> fn (i: int) ->
+    let (_fs, is) = ac in
+    if i < 0 || i >= vec_len is then Acc.ints d i
+    else
+      match (vec_get is i : (int Vec) option) with
+      | Some v -> v
+      | None ->
+        let v = Acc.ints d i in
+        let _ = vec_set is i (Some v) in
+        v;
+}
+
 module Scene {
   // A node's local transform: `matrix` if it has one, otherwise TRS. glTF says
   // a node has one or the other and never both, and the defaults are not all
@@ -154,7 +225,9 @@ module Scene {
   // for one model and ambiguous for another is not a rule.
   let s0_of = fn (s2: float) -> 1.0 - s2;
 
-  let anim_state_of = fn (d: doc) -> fn (time: float) -> fn (which: int) ->
+  // THE CACHE-TAKING ONE. A document's animation is read out of accessors -- an input
+  // and an output per channel -- and a frame loop asks for the same ones every frame.
+  let anim_state_ac = fn (d: doc) -> fn (ac) -> fn (time: float) -> fn (which: int) ->
     let n = J.len (J.arr (nodes d)) in
     let ts = vec_new () in
     let rs = vec_new () in
@@ -210,8 +283,8 @@ module Scene {
                              | None -> fail "gltf: a channel names a sampler that is not there"
                              | Some x -> x in
                     let interp = J.str_or sp "interpolation" "LINEAR" in
-                    let tin = Acc.floats d (J.int_ (J.req sp "input")) in
-                    let out = Acc.floats d (J.int_ (J.req sp "output")) in
+                    let tin = Acache.floats d ac (J.int_ (J.req sp "input")) in
+                    let out = Acache.floats d ac (J.int_ (J.req sp "output")) in
                     let nk = vec_len tin in
                     if nk == 0 || ni < 0 || ni >= n then ()
                     else
@@ -325,6 +398,11 @@ module Scene {
             each rest (ai + 1) in
         each anims 0 in
     (ts, rs, ss, mask, woff, wcnt, wval);
+
+  // AND THE ONE EVERY OLD CALLER USES, with a cache of its own that lasts as long as
+  // the call. Nothing about the answer changes; a caller that asks twice pays twice.
+  let anim_state_of = fn (d: doc) -> fn (time: float) -> fn (which: int) ->
+    anim_state_ac d (Acache.make d) time which;
 
   let anim_state = fn (d: doc) -> fn (time: float) -> anim_state_of d time 0;
 
@@ -589,10 +667,10 @@ module Frame {
 module Render {
   // Vertex attributes, read once per primitive. A record cannot hold a Vec
   // (OPEN_QUESTIONS Q-8), so these travel as a tuple.
-  let attr = fn (d: doc) -> fn (prim: Json.json) -> fn (name: str) ->
+  let attr = fn (d: doc) -> fn (ac) -> fn (prim: Json.json) -> fn (name: str) ->
     match J.field (J.req prim "attributes") name with
     | None -> None
-    | Some a -> Some (Acc.floats d (J.int_ a));
+    | Some a -> Some (Acache.floats d ac (J.int_ a));
 
   // SKINNING: a vertex belongs to up to four joints, and lands where their
   // weighted average of transforms puts it.
@@ -616,7 +694,7 @@ module Render {
   // authored in and into the joint's own space. Without it the mesh is skinned
   // from wherever the joints happen to be, which folds it into a knot at the
   // origin.
-  let joint_matrices = fn (d: doc) -> fn (worlds) -> fn (si: int) ->
+  let joint_matrices = fn (d: doc) -> fn (ac) -> fn (worlds) -> fn (si: int) ->
     let sk = match J.at (J.req d.j "skins") si with
              | None -> fail ("gltf: no skin " ++ str_of_int si)
              | Some x -> x in
@@ -628,7 +706,7 @@ module Render {
     let ibm = match J.field sk "inverseBindMatrices" with
               | None -> None
               | Some a ->
-                let f = Acc.floats d (J.int_ a) in
+                let f = Acache.floats d ac (J.int_ a) in
                 let _ = if vec_len f != nj * 16
                         then fail ("gltf: a skin has " ++ str_of_int nj ++ " joints but "
                                    ++ str_of_int (vec_len f / 16) ++ " inverse bind matrices")
@@ -741,7 +819,7 @@ module Render {
 
   // `base` with each target's displacement added, scaled by its weight. `ncomp` is
   // 3 for POSITION and NORMAL; a target's array is the same shape as the base's.
-  let morphed = fn (d: doc) -> fn (prim: Json.json) -> fn (name: str) ->
+  let morphed = fn (d: doc) -> fn (ac) -> fn (prim: Json.json) -> fn (name: str) ->
                 fn (ws) -> fn (base) ->
     match J.field prim "targets" with
     | None -> base
@@ -773,7 +851,7 @@ module Render {
                   match J.field t name with
                   | None -> tgt (i + 1)
                   | Some a ->
-                    let dv = Acc.floats d (J.int_ a) in
+                    let dv = Acache.floats d ac (J.int_ a) in
                     let _ =
                       if vec_len dv != vec_len base
                       then fail ("gltf: morph target " ++ str_of_int i ++ "'s " ++ name
@@ -791,9 +869,9 @@ module Render {
   // un-indexed case produce the same shape means the draw loop has one path
   // rather than two, and TriangleWithoutIndices is in the corpus precisely to
   // catch a renderer that only has the other.
-  let indices = fn (d: doc) -> fn (prim: Json.json) -> fn (vcount: int) ->
+  let indices = fn (d: doc) -> fn (ac) -> fn (prim: Json.json) -> fn (vcount: int) ->
     match J.field prim "indices" with
-    | Some a -> Acc.ints d (J.int_ a)
+    | Some a -> Acache.ints d ac (J.int_ a)
     | None ->
       let v = vec_new () in
       let rec go = fn (i: int) -> if i == vcount then () else let _ = vec_push v i in go (i + 1) in
@@ -1104,10 +1182,15 @@ module Render {
   let one_frame_into = fn (d: doc) -> fn (t: target) -> fn (depth) -> fn (lit: bool) ->
                       fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
                       fn (cam: (v3 * v3 * float * float * float * mat4)) -> fn (cache) ->
+    // TWO CACHES, ONE ARGUMENT: the decoded images and the decoded accessors. They are
+    // filled differently -- the images by a warm pass the caller runs outside every
+    // region, the accessors by themselves on a miss -- and the difference is forced by
+    // the types rather than chosen (see `Acache` and Q-10).
+    let (tcache, acache) = cache in
     let w = t.w in
     let h = t.h in
     let _ = Target.clear t depth (int_of_float bg.x) (int_of_float bg.y) (int_of_float bg.z) in
-    let ast = Scene.anim_state_of d time anim in
+    let ast = Scene.anim_state_ac d acache time anim in
     // HOISTED OUT OF THE WALK. This transforms EVERY node in the document and depends
     // only on `d` and `ast`, both fixed for the frame -- calling it per skinned node
     // made a frame quadratic in the node count. Measured on RecursiveSkeletons (924
@@ -1133,7 +1216,7 @@ module Render {
         // `world` must not be applied on top of them -- see `joint_matrices`.
         let skin = match J.field nd "skin" with
                    | None -> None
-                   | Some si -> Some (joint_matrices d all_worlds (J.int_ si)) in
+                   | Some si -> Some (joint_matrices d acache all_worlds (J.int_ si)) in
         let nrm_m = match M4x.normal_matrix world with | None -> M4.identity | Some x -> x in
         // A mirroring transform reverses the winding order (glTF 3.7.4). Decided
         // per node, once, from the global transform's determinant.
@@ -1155,40 +1238,40 @@ module Render {
                       ++ " is not implemented -- no model in this corpus uses one, so it "
                       ++ "would be written blind")
               else
-                match attr d prim "POSITION" with
+                match attr d acache prim "POSITION" with
                 | None -> ()
                 | Some pos0 ->
                   // MORPHED BEFORE ANYTHING ELSE TOUCHES THEM. Everything
                   // downstream -- the face normal, the bounds, the projection --
                   // has to see the moved vertex, so this is the first thing done
                   // with the arrays and not a correction applied later.
-                  let pos = morphed d prim "POSITION" mweights pos0 in
-                  let nrm = match attr d prim "NORMAL" with
+                  let pos = morphed d acache prim "POSITION" mweights pos0 in
+                  let nrm = match attr d acache prim "NORMAL" with
                             | None -> None
-                            | Some n0 -> Some (morphed d prim "NORMAL" mweights n0) in
+                            | Some n0 -> Some (morphed d acache prim "NORMAL" mweights n0) in
                   let mat = material_of d prim in
                   let occ_strength = occ_str d prim in
-                  let (btex, mrtex, nmtex, octex, emtex) = mat_slots d cache prim in
+                  let (btex, mrtex, nmtex, octex, emtex) = mat_slots d tcache prim in
                   let vcount = vec_len pos / 3 in
-                  let idx = indices d prim vcount in
+                  let idx = indices d acache prim vcount in
                   let tri = vec_len idx / 3 in
                   // JOINTS_0 is read as INTEGERS, not floats: it is an index and
                   // a float would be a conversion nobody asked for. WEIGHTS_0 may
                   // be `normalized` bytes or shorts, which `Acc.floats` already
                   // scales to 0..1.
                   let sjoints = match J.field (J.req prim "attributes") "JOINTS_0" with
-                                | None -> None | Some a -> Some (Acc.ints d (J.int_ a)) in
-                  let sweights = attr d prim "WEIGHTS_0" in
+                                | None -> None | Some a -> Some (Acache.ints d acache (J.int_ a)) in
+                  let sweights = attr d acache prim "WEIGHTS_0" in
                   // TANGENT is VEC4: xyz is the tangent and W IS A HANDEDNESS,
                   // +1 or -1, saying which way the bitangent goes. It is not a
                   // fourth coordinate and normalizing the four together would
                   // destroy it -- which is what NormalTangentMirrorTest exists
                   // to catch, its two halves differing only in that sign.
                   let tang = match J.field (J.req prim "attributes") "TANGENT" with
-                             | None -> None | Some a -> Some (Acc.floats d (J.int_ a)) in
-                  let uv = attr d prim "TEXCOORD_0" in
-                  let uv1 = attr d prim "TEXCOORD_1" in
-                  let col0 = attr d prim "COLOR_0" in
+                             | None -> None | Some a -> Some (Acache.floats d acache (J.int_ a)) in
+                  let uv = attr d acache prim "TEXCOORD_0" in
+                  let uv1 = attr d acache prim "TEXCOORD_1" in
+                  let col0 = attr d acache prim "COLOR_0" in
                   let col0_n = match J.field (J.req prim "attributes") "COLOR_0" with
                                | None -> 3
                                | Some a ->
@@ -1677,6 +1760,10 @@ module Render {
     let (t, depth) = Target.make w h in
     one_frame_into d t depth lit bg time anim cam cache;
 
+  // BOTH CACHES A FRAME NEEDS, made together so a caller cannot make one and forget
+  // the other. The warm pass is separate because only the images need one.
+  let caches = fn (d: doc) -> (tex_cache d, Acache.make d);
+
   // A FRESH CACHE PER CALL, so every existing caller is unchanged: one frame decodes
   // each image at most once instead of once per primitive, and nothing survives the
   // call. A frame LOOP wants the opposite and calls `one_frame_into` with a target
@@ -1684,8 +1771,8 @@ module Render {
   let one_frame_cam = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
                       fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
                       fn (cam: (v3 * v3 * float * float * float * mat4)) ->
-    let c = tex_cache d in
-    let _ = warm_cache d c in
+    let c = caches d in
+    let _ = warm_cache d (fst c) in
     one_frame_cached d w h lit bg time anim cam c;
 
   // THE ANIMATION IS EVALUATED BEFORE THE CAMERA, and that ordering lives here

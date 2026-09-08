@@ -114,11 +114,11 @@ let o_start = match orbit_flag with
 // `let (a, b) = ...` does not give the lifted closure below anything it can see:
 // the C came out with `use of undeclared identifier 'mu_frame_t'`.
 let frame_target = Target.make size size;
-let cache = Render.tex_cache d;
+let cache = Render.caches d;
 // WARMED ONCE, HERE, OUTSIDE EVERY REGION. This is the whole reason the frame loop
 // can both reclaim its scratch and keep its textures: the decode happens out here,
 // so the lookup inside a frame never allocates anything that would have to escape.
-let _ = Render.warm_cache d cache;
+let _ = Render.warm_cache d (fst cache);
 let render_at = fn (o) ->
   let (ft, fdep) = frame_target in
   Render.one_frame_into d ft fdep true bgv time anim

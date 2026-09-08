@@ -1013,12 +1013,12 @@ inside the walk — the same shape as the texture decode, frame-constant work re
 per node. Hoisting it took `RecursiveSkeletons` from 240 ms to **134 ms** for a 64×64
 image. All 48 renderable models are byte-identical before and after.
 
-**What is left, measured and named.** About **1.3 MB a frame, and the same at every
+**What was left, measured and named.** About **1.3 MB a frame, and the same at every
 size** — 1323 KB at 64², 1360 KB at 512², where the framebuffer differs by 64×. So it
-is not the framebuffer: it is the vertex data, decoded out of its accessors on every
-frame and never reclaimed. `RiggedSimple`, which has almost none, is flat. The gate
-prints it rather than asserting it, because caching decoded accessors the way textures
-are cached is a change of its own.
+was not the framebuffer: it was the vertex data, decoded out of its accessors on every
+frame and never reclaimed. That one is fixed two sections down, by caching decoded
+accessors the way textures are cached; what remains after it is a different thing and
+is named there.
 
 ### The file a frame opened 1,769 times
 
@@ -1060,6 +1060,38 @@ property builds a glTF declaring `byteLength: 264` whose four bufferViews end at
 264 is what it would be if TANGENT were VEC3, and TANGENT is VEC4. It had been illegal
 since tangents were added to it, and nothing noticed because the old bound was the
 length of the file, which the writer makes 288.
+
+### Decoding an accessor once, and what the frame loop still holds
+
+With the buffers read once, the profile moved to the two functions that FIND an
+accessor rather than the one that reads it: **1,921 samples in `Acc.plan` and 1,079 in
+`Acc.sparse_of` against 27 in the decoder**. Both walk the JSON array of accessors as a
+list, both run on every read, and `RecursiveSkeletons` performs about 1,769 reads a
+frame — every animation channel is a sampler with an input and an output, every skin
+has its inverse bind matrices — so a frame walked a 1,769-long list some 3,500 times.
+
+So the decoded arrays are cached by accessor index, in a table the caller owns.
+
+**It fills itself, and the texture cache next door cannot** — and that difference is
+forced rather than chosen. A `texture` holds a `ByteBuf[R]`, so one decoded inside a
+`region` cannot be stored anywhere that outlives it and Mere rejects the path outright;
+that is why images are filled by a warm pass run outside. A decoded accessor is a `Vec`
+**a function returned**, which by Q-10 lands in the default region no matter which
+region called it — so storing one from inside a frame's region is accepted. *The rule
+that leaks it is the rule that makes it cacheable.* If Q-10 is ever fixed this stops
+compiling, at the `vec_set`, which is the loud failure rather than the silent one.
+
+| | 64² | 512² | peak RSS, 1 → 40 frames at 256² |
+|---|---|---|---|
+| `RecursiveSkeletons` | 26 → **3 ms** (cold frame 25) | 55 → **28 ms** | 295→367 MB becomes 294→**323** |
+| `Suzanne` | unchanged | unchanged | 372→422 MB becomes 372→**373** |
+| `Fox` | unchanged | unchanged | 131→149 MB becomes 131→**136** |
+
+**What still grows is a different thing, and it is now named as one.**
+`RecursiveSkeletons` adds about **0.7 MB a frame** and it is no longer the vertex data:
+it is the per-frame scene state — 924 world matrices, seven arrays of animation state,
+the joint matrices of 84 skins — produced by functions, so allocated in the default
+region, and *different every frame*, so no cache can hold it. Only Q-10 can.
 
 ### The 19 seconds were not the renderer
 
@@ -1135,13 +1167,13 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   `SDL_WINDOW_ALLOW_HIGHDPI` is set and moving between displays of different scale
   can.
 - **The last of the frame-loop growth.** `RecursiveSkeletons` — 924 nodes, 84 skins,
-  no images — still grows about **1.8 MB a frame, and the same at every size**, so it
-  is not the framebuffer: it is the vertex data, decoded out of its accessors on every
-  frame into a default region that is never freed (Q-10). Every ordinary model is flat.
-  `scripts/bench_check.sh` prints that number rather than asserting it, because a
-  threshold loose enough to admit it could not catch the tenfold leak the gate
-  exists for. **Caching decoded accessors the way textures are cached** is the fix, and
-  it is a change of its own.
+  no images — still grows about **0.7 MB a frame**, which is the per-frame scene state:
+  924 world matrices, seven arrays of animation state and 84 skins' joint matrices,
+  produced by functions and so allocated in a default region that is never freed
+  (Q-10), and different every frame, so no cache can hold them. Every ordinary model is
+  now flat — `Suzanne` grows 1 MB over forty frames. `scripts/bench_check.sh` prints
+  the number rather than asserting it, because a threshold loose enough to admit it
+  could not catch the tenfold leak the gate exists for.
 - **The scene walk on a large document.** `RecursiveSkeletons` costs **26 ms** to
   produce a 64×64 image — all setup and no pixels — down from 240 when the walk was
   quadratic in `Scene.world_matrices_at` and 177 when every accessor re-read the `.bin`.

@@ -138,28 +138,32 @@ echo "bench: the frame loop does not grow with the frame count"
 
 # A REPORTED RESIDUAL, NOT AN ASSERTION, and named so it is not mistaken for solved.
 #
-# What remains, after the texture cache and after the target stopped being reallocated
-# per frame, is ABOUT 1.3 MB A FRAME AND THE SAME AT EVERY SIZE -- 1323 KB at 64x64 and
-# 1360 at 512x512, where the framebuffer differs by a factor of 64. So it is not the
-# framebuffer: it is the vertex data, decoded out of its accessors on every frame and
-# never reclaimed. RiggedSimple, with almost none, is flat.
+# What remains, after the texture cache, after the target stopped being reallocated per
+# frame, and after the decoded accessors were cached, is ABOUT 0.7 MB A FRAME on this
+# one model. It is no longer the vertex data: it is the PER-FRAME SCENE STATE -- 924
+# world matrices, seven arrays of animation state, and the joint matrices of 84 skins.
+# Every one of those is produced by a function and is different every frame, so no
+# cache can hold them, and RecursiveSkeletons is the only model in the corpus with
+# enough nodes for it to show: Suzanne grows 1 MB over forty frames and Fox 5.
 #
-# The reason nothing is reclaimed is the same one throughout: a container whose region
-# marker is `__heap` is allocated from the DEFAULT region, which is never freed, and a
-# `region` block does not change that. Measured: 200 iterations of a 4 MB `bytebuf_new`
-# inside a region reach 770 MB of peak RSS against 5 MB for one.
+# The reason nothing is reclaimed is the same one throughout: a container a FUNCTION
+# returns has the region marker `__heap`, which is lowered to the DEFAULT region, which
+# is never freed, and a `region` block around the caller does not change that (Q-10).
+# Measured: 200 iterations of a 4 MB `bytebuf_new` inside a region reach 770 MB of peak
+# RSS against 5 MB for one.
 #
 # It is printed rather than asserted because the threshold that would catch it is
-# tighter than the noise, and because the fix -- caching decoded accessors the way
-# textures are cached -- is a change of its own. If it is ever made this number falls;
-# if something regresses badly it climbs. Either way it is visible.
+# tighter than the noise, and because the fix is in the language rather than here. If
+# Q-10 is ever answered this number falls; if something regresses badly it climbs.
+# Either way it is visible.
 RS="test/data/gltf/RecursiveSkeletons/glTF/RecursiveSkeletons.gltf"
 if [ -f "$RS" ]; then
   set -- $(growth "$RS")
   if [ -n "${1:-}" ] && [ -n "${2:-}" ] && [ "$1" -gt 0 ]; then
     echo "bench: RecursiveSkeletons $(($1 / 1024)) MB for 1 frame, $(($2 / 1024)) MB for 40 —"
-    echo "bench: a KNOWN residual — vertex data is re-decoded every frame and the default"
-    echo "bench: region is never freed; about 1.3 MB a frame, the same at every size"
+    echo "bench: a KNOWN residual — the per-frame scene state (924 world matrices, the"
+    echo "bench: animation arrays, 84 skins' joint matrices) is returned by functions, so"
+    echo "bench: it lands in the default region and is never freed; about 0.7 MB a frame"
   fi
 fi
 echo "bench: ok"
