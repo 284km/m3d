@@ -1208,8 +1208,16 @@ every gate here runs at 128 or 192 pixels.
 
 Ranked by what the corpus table says, rather than by what seems interesting:
 
-- **Mipmaps** — last, and for a reason. `minFilter` is read and ignored, so a
-  minified texture aliases. Implementing it **cannot make the comparison exact**:
+- **Mipmaps** — last, and for a reason, but with the ground now measured. 29 of the
+  corpus's models carry textures and at the reference's 192×192 they are minified **5×
+  to 11×**; `minFilter` is read and ignored, so all of them alias. What that costs is
+  known: the *comparable* column is at or under 0.65 for every row except two, and
+  those two — AnimatedCube and Cube, the ones this list used to call unattributed — are
+  **sampling noise, not shading**: over AnimatedCube's 13,494 covered pixels the
+  per-channel differences are symmetric and zero-mean (45% equal, 18.3% at +1 against
+  18.1% at −1, mean −0.009). So mipmapping is a question about **picture quality**, and
+  the agreement it would buy is small and in the stock column only.
+  Implementing it **cannot make the comparison exact**:
   `gl.generateMipmap`'s filter is implementation-defined, the level of detail
   comes from screen-space derivatives, and the implementation here is a software
   GL driver rather than a document anyone can follow. Matching libjpeg's integer

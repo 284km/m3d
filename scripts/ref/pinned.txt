@@ -93,8 +93,13 @@
 #                      nothing here uses either, so they would be written blind.
 #
 #   Everything else is at or under 1.1, and the two largest of those -- AnimatedCube at
-#   1.10 and Cube at 1.01 -- are NOT attributed. Both carry a base colour texture and a
-#   TANGENT and no normal map. Said here rather than guessed at.
+#   1.10 and Cube at 1.01 -- WERE not attributed. They are now, and it is not a shading
+#   error: the difference is SAMPLING NOISE ON A MINIFIED TEXTURE. Measured on
+#   AnimatedCube over its 13,494 covered pixels, the per-channel differences are
+#   symmetric and zero-mean -- 45.2% exactly equal, 18.3% at +1 against 18.1% at -1,
+#   4.7% each at +/-2, mean -0.009 -- which is what two renderers sampling a 1024-pixel
+#   texture into about a hundred screen pixels look like when they land on slightly
+#   different texels. A systematic error would have a sign; this one does not.
 #
 #   HOW THE DERIVED FRAME WAS FINALLY SETTLED, because these rows could not do it alone.
 #
