@@ -118,6 +118,76 @@ instead of merely embarrassing.
   the program were rejected for some unrelated reason -- reporting "still open" about a
   question it never tested.
 
+## Q-10: a `region` does not reclaim a `ByteBuf`, so a frame loop cannot lean on one
+
+- **State**: open in the language; worked around here, twice, and the workaround costs
+  something both times.
+- **Measured** (mere v0.1.447): two hundred iterations of a 4 MB `bytebuf_new` INSIDE a
+  `region R { }` reach 770 MB of peak RSS, against 5 MB for one iteration. Nothing is
+  freed at the end of the block.
+- **Why**: a container whose region marker is `__heap` is allocated from the DEFAULT
+  region, and the default region is never freed. The emitted C says so directly -- a
+  `bytebuf_new` written *inside* the block still comes out as
+  `mere_bytebuf_new((&__lang_default_region), ...)` -- so this is not about escape
+  analysis or about the value outliving the block. It cannot outlive it; it is simply
+  not allocated where the block can free it.
+- **AND THE RULE IS NARROWER THAN "A REGION DOES NOTHING", which is worth stating
+  because the wide version is the one a reader would take away.** Read out of the
+  emitted C:
+
+  | written as | allocated from | reclaimed by the block |
+  |---|---|---|
+  | `vec_new ()` lexically inside `region R { }` | `__region_R` | **yes** |
+  | `read_bytes path` (anywhere) | `__lang_current_region` | **yes** |
+  | a `Vec` or `ByteBuf` returned by a FUNCTION | `(&__lang_default_region)` | no |
+
+  `Acc.floats` is the third row -- `mere_vec_float_new((&__lang_default_region))` -- and
+  that one line is the renderer's whole remaining per-frame growth: the vertex data,
+  decoded again every frame into a region nothing frees. A function's return type is
+  generalised over the region, `__heap` is what it generalises to, and the lowering
+  reads `__heap` as the default region rather than as the caller's.
+- **What it cost here**: the render target is allocated once and cleared per frame
+  rather than made per frame (`one_frame_into` takes a target), and the decoded textures
+  live in a cache the caller owns rather than in the frame's region. Both are what a
+  renderer would do anyway, which is why neither is a hardship -- but neither is a
+  choice, and a reader would otherwise assume the `region` around a frame was doing the
+  work.
+- **What would answer it**: a lowering that gives `__heap` containers the current region
+  in non-lib mode, in the language repository. Until then a `region` block reclaims the
+  small values and none of the buffers.
+- **Verify**: `printf '%s\n' 'let one = fn (i: int) -> region R { let b = bytebuf_new 16 in bytebuf_get b 0 };' 'let _ = print (str_of_int (one 0));' '0' > /tmp/m3dq10.mere && "$MERE" -c /tmp/m3dq10.mere > /tmp/m3dq10.c 2>/dev/null && grep -q '__lang_region_block_acquire("region R")' /tmp/m3dq10.c && grep -q 'mere_bytebuf_new((&__lang_default_region)' /tmp/m3dq10.c`
+- **Why that shape**: the first grep is a POSITIVE CONTROL -- it requires the region
+  block to have been emitted at all, so a compiler that stopped emitting regions (or a
+  probe the optimiser deleted) fails rather than reporting the question answered. The
+  second is the claim itself, by name. Both greps are of the emitted C rather than of a
+  peak-RSS measurement, which is quantised, machine-dependent, and would make this gate
+  flaky for no gain.
+
+## Q-11: a buffer is as long as its `byteLength` says, and not as long as its file
+
+- **State**: decided (2026-09-08), recorded because it is a choice and because it made
+  this reader stricter than it was.
+- Every buffer is read once into one blob, and where buffer `i` starts in it is DERIVED
+  by summing the `byteLength`s in front of it -- a record cannot hold a `Vec` (Q-8), so
+  a table of offsets has nowhere to live and the JSON has to be the only source. That
+  forces the question: a `.bin` that is longer than its `byteLength` contributes the
+  declared length and no more, and the bound an accessor is checked against is the
+  buffer's declared end rather than the length of the file.
+- **What that changes**: a document whose bufferView runs past its buffer's
+  `byteLength` is now REFUSED where it used to be read, if the file behind it happened
+  to be long enough. glTF says a bufferView must fit inside its buffer, and the Khronos
+  validator calls it `BUFFER_VIEW_TOO_LONG`, so the strict reading is the specified one
+  -- but it is strictness this project chose for an implementation reason and would not
+  otherwise have had, which is what makes it worth writing down.
+- **What it caught immediately**: this repository's own normal-map property document,
+  which declared 264 bytes where its four bufferViews end at 288. It had been illegal
+  since TANGENT (VEC4, 96 bytes) replaced a VEC3 in it, and every reader had been
+  reading past the end it declared.
+- Measured across the corpus before the change: every `.bin` is exactly its
+  `byteLength`, three GLBs pad their BIN chunk past it (which the specification allows),
+  and no bufferView in any of the fifty documents overruns its buffer.
+- **Verify**: none — a decision.
+
 ## Q-2: does `linalg` belong in the language's `contrib/`
 
 - **State**: open. It stays here until there is a second consumer.

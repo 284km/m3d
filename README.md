@@ -919,8 +919,9 @@ on a busy laptop.
 At 64×64 almost all of it is per-frame setup — the node walk, the animation state, the
 joint matrices. At 512×512 the per-pixel work is added on top. `Box`, with twelve
 triangles, goes 1 → 4 → 15 → 60 ms across 64 → 128 → 256 → 512, exactly four times per
-doubling and so purely per-pixel; `RecursiveSkeletons` costs 240 ms to produce a 64×64
-image, which is all setup. One number would have blended them, and the first person to
+doubling and so purely per-pixel; `RecursiveSkeletons` costs 26 ms to produce a 64×64
+image, which is all setup — and was 240 before the walk was hoisted and 177 before the
+buffers stopped being re-read. One number would have blended them, and the first person to
 ask "why is a twelve-triangle model slow" would have had nowhere to look. `show` is
 timed separately for the same reason — it is 1 ms at every size on every model, so
 compositing is not where a frame goes, but that is a *finding*, and it took separating
@@ -1019,6 +1020,47 @@ frame and never reclaimed. `RiggedSimple`, which has almost none, is flat. The g
 prints it rather than asserting it, because caching decoded accessors the way textures
 are cached is a change of its own.
 
+### The file a frame opened 1,769 times
+
+The next thing on the list was the quadratic walk above. The profile said something
+else, which is the reason it was taken before the patch: on `RecursiveSkeletons`,
+`sample` put **2,231 of its samples in `open`, `read` and `close`** against 387 in the
+accessor planner and 316 in the sparse reader.
+
+`Gltf.buffer` READ THE FILE, and `Acc.plan` needs a buffer for every accessor it
+describes. That document has **1,769 accessors and a 106 KB `.bin`**, so a frame opened,
+read and closed the same file 1,769 times — and each read allocated a copy of it that
+nothing frees.
+
+Every buffer is now read **once, at load, into one blob**, and a buffer is a *range* of
+it rather than a copy. The GLB container already worked this way: `bin` was the BIN
+chunk and nothing re-read it. This gives `.gltf` the shape `.glb` had, which is why the
+field keeps its name.
+
+| | 64² | 512² |
+|---|---|---|
+| `RecursiveSkeletons` | 177 → **26 ms** | 204 → **54 ms** |
+| `Fox` | 3 → **0 ms** | 12 → **7 ms** |
+| `Suzanne` | 2 → 1 ms | 15 → 15 ms |
+| `Box` | 0 → 0 ms | 24 → 25 ms |
+
+and one frame of `RecursiveSkeletons` at 256² went **1081 MB → 295 MB** of peak RSS.
+Every one of the 49 pictures is byte-identical and the one refusal is unchanged.
+
+**It made the reader stricter, and that was not free.** Where buffer `i` starts in the
+blob has to be *derivable* from the JSON — a record cannot hold a `Vec` (Q-8), so a
+table of offsets has nowhere to live — so each buffer contributes exactly its declared
+`byteLength` and an accessor is bounds-checked against its buffer's declared end rather
+than against the length of the file. glTF says a bufferView must fit inside its buffer
+and the Khronos validator agrees, so the strict reading is the specified one; it is
+recorded as Q-11 because it is strictness chosen for an implementation reason.
+
+**The first thing it caught was this repository's own test document.** The normal-map
+property builds a glTF declaring `byteLength: 264` whose four bufferViews end at 288 —
+264 is what it would be if TANGENT were VEC3, and TANGENT is VEC4. It had been illegal
+since tangents were added to it, and nothing noticed because the old bound was the
+length of the file, which the writer makes 288.
+
 ### The 19 seconds were not the renderer
 
 Rendering `Fox` at 512 to a PNG takes 19 seconds, which would make an orbiting window
@@ -1093,16 +1135,18 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   `SDL_WINDOW_ALLOW_HIGHDPI` is set and moving between displays of different scale
   can.
 - **The last of the frame-loop growth.** `RecursiveSkeletons` — 924 nodes, 84 skins,
-  no images — still grows about 12 MB a frame, roughly 13 KB per node, so something
-  in the per-node work escapes the frame's region. Every ordinary model is flat.
+  no images — still grows about **1.8 MB a frame, and the same at every size**, so it
+  is not the framebuffer: it is the vertex data, decoded out of its accessors on every
+  frame into a default region that is never freed (Q-10). Every ordinary model is flat.
   `scripts/bench_check.sh` prints that number rather than asserting it, because a
   threshold loose enough to admit it could not catch the tenfold leak the gate
-  exists for.
-- **The scene walk on a large document.** `RecursiveSkeletons` costs 240 ms to
-  produce a 64×64 image — all setup and no pixels. `J.at` is a linear walk down a
-  JSON array's list, so indexing 924 nodes is quadratic, and
-  `Scene.world_matrices_at` (which transforms *every* node) is called once per
-  skinned node inside the walk rather than once per frame.
+  exists for. **Caching decoded accessors the way textures are cached** is the fix, and
+  it is a change of its own.
+- **The scene walk on a large document.** `RecursiveSkeletons` costs **26 ms** to
+  produce a 64×64 image — all setup and no pixels — down from 240 when the walk was
+  quadratic in `Scene.world_matrices_at` and 177 when every accessor re-read the `.bin`.
+  What is left of it is still list-shaped: `J.at` walks a JSON array's list, so indexing
+  924 nodes, 1,769 accessors or a skin's joints is quadratic in each.
 
 Within the loader: **`data:` URIs** (glTF-Embedded) and matrix accessors whose
 columns need 4-byte padding — both **refused by name** rather than mis-read.

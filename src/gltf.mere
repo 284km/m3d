@@ -149,26 +149,6 @@ module Gltf {
       else back (i - 1) in
     back (str_len path - 1);
 
-  // A `.gltf` is JSON and a `.glb` starts with the four bytes `glTF`, so the
-  // container is decided by looking rather than by the file extension. A file
-  // that is neither is named as such: it would otherwise reach the JSON parser
-  // and come back as "unexpected 'g' at pos 0", which is true and useless -- a
-  // refusal has to say what it refused.
-  let load = fn (path: str) ->
-    let raw = read_bytes path in
-    if Glb.is_glb raw then
-      let (js, bin) = Glb.split raw in
-      doc { j = Json.parse_json js, bin = bin, base = dirname path }
-    else
-      let text = str_of_bytes raw in
-      let first = if str_len text == 0 then "" else char_at text 0 in
-      let looks_like_json = str_eq first "\{" || str_eq first " "
-                         || str_eq first "\n" || str_eq first "\t" || str_eq first "\r" in
-      if bytes_len raw >= 4 && not looks_like_json
-      then fail ("gltf: " ++ path ++ " is neither a GLB (its first four bytes are not `glTF`)"
-                 ++ " nor JSON (it starts with `" ++ first ++ "`)")
-      else doc { j = Json.parse_json text, bin = bytes_of_hex "", base = dirname path };
-
   // A required extension is REFUSED, with its name. A viewer that ignores one
   // draws a picture that is wrong in a way nothing else reports -- the geometry
   // is there, the material is not what the file asked for, and it looks fine.
@@ -220,22 +200,102 @@ module Gltf {
         else go (i + 1) (acc ++ char_at u i) in
     go 0 "";
 
-  // The bytes of buffer `i`. Buffer 0 of a GLB has no uri and is the BIN chunk;
-  // everything else is a file beside the document. A `data:` URI is refused by
-  // name rather than mis-read as a filename.
+  // EVERY BUFFER, READ ONCE, INTO ONE BLOB -- and a buffer is a RANGE of it rather
+  // than a copy.
+  //
+  // Reading a buffer used to be a FILE READ, and `plan` needs one for every accessor
+  // it describes: `RecursiveSkeletons` has 1,769 accessors and a 106 KB `.bin`, so a
+  // frame opened, read and closed that file 1,769 times. Measured with `sample`, that
+  // was most of a frame -- 2,231 samples in `open`, `read` and `close` against 387 in
+  // the accessor planner itself and 316 in the sparse reader. The list walks those two
+  // do are the SECOND cause and were the one this project expected to find first.
+  //
+  // The GLB container already worked this way: `bin` was the BIN chunk and nothing
+  // re-read it. This gives the `.gltf` container the same shape, which is why the
+  // field keeps its name.
+  //
+  // EACH BUFFER CONTRIBUTES EXACTLY ITS `byteLength` and not the length of the file it
+  // came from, so where buffer `i` starts can be DERIVED from the JSON (`buffer_span`
+  // below) instead of remembered -- a record cannot hold a `Vec`, so there is nowhere
+  // to put a table of offsets. glTF requires `byteLength`; every `.bin` in this corpus
+  // is exactly that long, and three GLBs pad their BIN chunk past it, which the
+  // specification allows and which this drops. A source SHORTER than its `byteLength`
+  // is refused by name rather than quietly used short.
+  let blob_of = fn (j: Json.json) -> fn (base: str) -> fn (chunk: bytes) ->
+    match J.field j "buffers" with
+    | None -> chunk
+    | Some bs ->
+      let rec go = fn (xs) -> fn (i: int) -> fn (acc: bytes) ->
+        match xs with
+        | Nil -> acc
+        | Cons (b, rest) ->
+          let want = J.int_ (J.req b "byteLength") in
+          let raw =
+            match J.field b "uri" with
+            | None ->
+              if bytes_len chunk == 0
+              then fail "gltf: buffer has no uri and there is no BIN chunk"
+              else chunk
+            | Some u ->
+              let uri = J.str_ u in
+              if str_len uri >= 5 && str_eq (substring uri 0 5) "data:"
+              then fail "gltf: a data: URI needs base64, which this reader does not have yet (glTF-Embedded is out of scope)"
+              else read_bytes (base ++ uri_decode uri) in
+          let _ = if bytes_len raw < want
+                  then fail ("gltf: buffer " ++ str_of_int i ++ " declares byteLength "
+                             ++ str_of_int want ++ " and its source is "
+                             ++ str_of_int (bytes_len raw) ++ " bytes")
+                  else () in
+          go rest (i + 1) (bytes_concat acc (bytes_slice raw 0 want)) in
+      go (J.arr bs) 0 (bytes_of_hex "");
+
+  // A `.gltf` is JSON and a `.glb` starts with the four bytes `glTF`, so the
+  // container is decided by looking rather than by the file extension. A file
+  // that is neither is named as such: it would otherwise reach the JSON parser
+  // and come back as "unexpected 'g' at pos 0", which is true and useless -- a
+  // refusal has to say what it refused.
+  //
+  // THE BUFFERS ARE READ HERE, which moves a refusal earlier: a document whose `.bin`
+  // is missing, short, or a `data:` URI is now refused when it is loaded rather than
+  // when the first accessor asks. The words are the same ones; only the moment moves,
+  // and a reader that cannot get its geometry cannot draw anything anyway.
+  let load = fn (path: str) ->
+    let raw = read_bytes path in
+    if Glb.is_glb raw then
+      let (js, chunk) = Glb.split raw in
+      let j = Json.parse_json js in
+      doc { j = j, bin = blob_of j (dirname path) chunk, base = dirname path }
+    else
+      let text = str_of_bytes raw in
+      let first = if str_len text == 0 then "" else char_at text 0 in
+      let looks_like_json = str_eq first "\{" || str_eq first " "
+                         || str_eq first "\n" || str_eq first "\t" || str_eq first "\r" in
+      if bytes_len raw >= 4 && not looks_like_json
+      then fail ("gltf: " ++ path ++ " is neither a GLB (its first four bytes are not `glTF`)"
+                 ++ " nor JSON (it starts with `" ++ first ++ "`)")
+      else
+        let j = Json.parse_json text in
+        doc { j = j, bin = blob_of j (dirname path) (bytes_of_hex ""), base = dirname path };
+
+  // WHERE BUFFER `i` SITS IN THE BLOB: its start and its length, summed from the
+  // `byteLength`s in front of it. A document has a handful of buffers -- eight of the
+  // fifty here have more than one and the largest has five -- so walking them is
+  // cheaper than the Vec that cannot be kept anyway.
+  let buffer_span = fn (d: doc) -> fn (i: int) ->
+    let rec go = fn (xs) -> fn (k: int) -> fn (off: int) ->
+      match xs with
+      | Nil -> fail ("gltf: no buffer " ++ str_of_int i)
+      | Cons (b, rest) ->
+        let len = J.int_ (J.req b "byteLength") in
+        if k == i then (off, len) else go rest (k + 1) (off + len) in
+    go (J.arr (J.req d.j "buffers")) 0 0;
+
+  // The bytes of buffer `i`, COPIED OUT of the blob. Everything on the per-frame path
+  // reads through `buffer_span` instead and does not copy; this is for the callers
+  // that want the bytes themselves.
   let buffer = fn (d: doc) -> fn (i: int) ->
-    match J.at (J.req d.j "buffers") i with
-    | None -> fail ("gltf: no buffer " ++ str_of_int i)
-    | Some b ->
-      match J.field b "uri" with
-      | None ->
-        if bytes_len d.bin == 0 then fail "gltf: buffer has no uri and there is no BIN chunk"
-        else d.bin
-      | Some u ->
-        let uri = J.str_ u in
-        if str_len uri >= 5 && str_eq (substring uri 0 5) "data:"
-        then fail "gltf: a data: URI needs base64, which this reader does not have yet (glTF-Embedded is out of scope)"
-        else read_bytes (d.base ++ uri_decode uri);
+    let (off, len) = buffer_span d i in
+    bytes_slice d.bin off len;
 
   // The bytes of image `i`. glTF gives an image EITHER a `uri` -- a file
   // beside the document -- OR a `bufferView`, which is how a GLB carries its
@@ -259,12 +319,12 @@ module Gltf {
           let bv = match J.at (J.req d.j "bufferViews") (J.int_ bvi) with
                    | None -> fail "gltf: image names a bufferView that is not there"
                    | Some x -> x in
-          let buf = buffer d (J.int_or bv "buffer" 0) in
+          let (boff, blen) = buffer_span d (J.int_or bv "buffer" 0) in
           let off = J.int_or bv "byteOffset" 0 in
           let len = J.int_ (J.req bv "byteLength") in
-          if off + len > bytes_len buf
+          if off + len > blen
           then fail ("gltf: image " ++ str_of_int i ++ " runs past the end of its buffer")
-          else bytes_slice buf off len;
+          else bytes_slice d.bin (boff + off) len;
 
   // How an image calls itself, for an error message. A refusal that says "not a
   // PNG" without saying WHICH image sends the reader back to the file to guess.
@@ -375,17 +435,21 @@ module Acc {
       let bv = match J.at (J.req d.j "bufferViews") (J.int_ bvi) with
                | None -> fail "gltf: accessor names a bufferView that is not there"
                | Some x -> x in
-      let buf = Gltf.buffer d (J.int_or bv "buffer" 0) in
-      let start = J.int_or bv "byteOffset" 0 + J.int_or a "byteOffset" 0 in
+      // THE BLOB AND AN ABSOLUTE OFFSET, not a copy of the buffer: `Gltf.buffer` would
+      // slice one out per accessor, and before the blob existed it re-read the file.
+      let (boff, blen) = Gltf.buffer_span d (J.int_or bv "buffer" 0) in
+      let start = boff + J.int_or bv "byteOffset" 0 + J.int_or a "byteOffset" 0 in
       let stride = J.int_or bv "byteStride" packed in
       // Checked once here rather than per element: the read loop below is the
       // hot one, and a bound test inside it would be the same test repeated.
+      // AGAINST THE BUFFER'S OWN END and not the blob's, so an accessor cannot read
+      // into the buffer that follows it.
       let last = start + (count - 1) * stride + packed in
-      let _ = if count > 0 && last > bytes_len buf
-              then fail ("gltf: accessor " ++ str_of_int i ++ " runs " ++ str_of_int (last - bytes_len buf)
+      let _ = if count > 0 && last > boff + blen
+              then fail ("gltf: accessor " ++ str_of_int i ++ " runs " ++ str_of_int (last - boff - blen)
                          ++ " bytes past the end of its buffer")
               else () in
-      span { buf = buf, start = start, stride = stride,
+      span { buf = d.bin, start = start, stride = stride,
              ct = ct, nc = nc, count = count, norm = norm };
 
   // A SPARSE ACCESSOR IS A BASE PLUS A LIST OF OVERWRITES, and both halves are
@@ -417,8 +481,9 @@ module Acc {
           let bv = match J.at (J.req d.j "bufferViews") bvi with
                    | None -> fail "gltf: sparse names a bufferView that is not there"
                    | Some x -> x in
-          (Gltf.buffer d (J.int_or bv "buffer" 0),
-           J.int_or bv "byteOffset" 0 + J.int_or o "byteOffset" 0,
+          let (boff, _blen) = Gltf.buffer_span d (J.int_or bv "buffer" 0) in
+          (d.bin,
+           boff + J.int_or bv "byteOffset" 0 + J.int_or o "byteOffset" 0,
            J.int_or o "componentType" 5125) in
       let (ibuf, ioff, ict) = sub "indices" in
       let (vbuf, voff, _) = sub "values" in

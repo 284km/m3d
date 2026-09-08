@@ -678,7 +678,14 @@ let nm_gltf_raw = fn (scale: str) -> fn (with_tangent: bool) -> fn (with_map: bo
   ++ "\"metallicFactor\":0.0,\"roughnessFactor\":1.0}"
   ++ (if with_map then ",\"normalTexture\":\{\"index\":0,\"scale\":" ++ scale ++ "}" else "") ++ "}],"
   ++ "\"textures\":[\{\"source\":0}],\"images\":[\{\"uri\":\"normal_tilt.png\"}],"
-  ++ "\"buffers\":[\{\"uri\":\"m3d_nm.bin\",\"byteLength\":264}],"
+  // 288 AND NOT 264, and the loader had to start checking before anyone noticed.
+  // The four views below end at 288 -- TANGENT is VEC4, so its 96 bytes are six
+  // times sixteen -- and this said 264, which is what it would be if TANGENT were
+  // VEC3. So the document was illegal (glTF: a bufferView must fit inside its
+  // buffer's byteLength) and every reader of it was reading past the end it
+  // declared. Nothing saw it because the loader bounds-checked against the LENGTH
+  // OF THE FILE, which is 288 because the writer above writes 288.
+  ++ "\"buffers\":[\{\"uri\":\"m3d_nm.bin\",\"byteLength\":288}],"
   ++ "\"bufferViews\":[\{\"buffer\":0,\"byteOffset\":0,\"byteLength\":72},"
   ++ "\{\"buffer\":0,\"byteOffset\":72,\"byteLength\":72},"
   ++ "\{\"buffer\":0,\"byteOffset\":144,\"byteLength\":48},"
