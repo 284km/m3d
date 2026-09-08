@@ -48,6 +48,18 @@ jobs:
       - name: Install the glTF validator
         run: npm install --no-save gltf-validator
 
+      # PILLOW IS AN INSTRUMENT AND NOT A CONVENIENCE. northstar's "draws" and "lit"
+      # columns are counted in Python, gltf_check's second reader is Python, and the
+      # texture oracle is Pillow itself. The runner had none, and for the whole life of
+      # this workflow northstar reported "50 of 50 read, 0 drew, 0 lit" -- a missing
+      # library reading as a black frame. The gate now says so in its own words instead;
+      # this is what makes it not have to.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Pillow
+        run: python3 -m pip install --upgrade pillow
+
       - name: Gates
         env:
           MERE: ${{ github.workspace }}/mere/_build/default/bin/mere.exe

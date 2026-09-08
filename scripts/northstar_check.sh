@@ -33,6 +33,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MERE="${MERE:-mere}"
 command -v "$MERE" >/dev/null 2>&1 || { echo "northstar: no mere — set MERE=..." >&2; exit 1; }
 . "$ROOT/scripts/ccflags.sh"
+# THE TWO PIXEL COLUMNS NEED PILLOW, AND A MISSING LIBRARY MUST NOT READ AS A BLACK
+# FRAME. Without this check the per-model measurement below fails, `stats` comes back
+# empty, `${cov:-0}` is 0, and the table says "50 of 50 read, 0 drew, 0 lit" -- which is
+# what CI said for the whole life of this gate, because the runner had no Pillow. An
+# absent instrument has to say so in its own words; it is not evidence about the
+# renderer. See feedback: an empty list is not a refusal.
+HAVE_PIL=0
+python3 -c 'import PIL' >/dev/null 2>&1 && HAVE_PIL=1
 command -v "$CC" >/dev/null 2>&1 || { echo "northstar: SKIP — no $CC, and the interpreter is far too slow for this"; exit 0; }
 cd "$ROOT"
 T="${TMPDIR:-/tmp}/m3d_ns.$$"; mkdir -p "$T"; trap 'rm -rf "$T"' EXIT
@@ -138,6 +146,13 @@ PY
   brighter=$(echo "$stats" | cut -d' ' -f2)
   bright=$(echo "$stats" | cut -d' ' -f3)
   dark=$(echo "$stats" | cut -d' ' -f4)
+  # WITH PILLOW PRESENT, AN EMPTY MEASUREMENT IS A FAILURE AND NOT A ZERO. The two are
+  # indistinguishable downstream -- both make `${cov:-0}` zero -- and only one of them
+  # is a statement about the picture.
+  if [ "$HAVE_PIL" = 1 ] && [ -z "$cov" ]; then
+    echo "northstar: $m — the pixel measurement produced nothing, so no column can be read"
+    fail=1; continue
+  fi
   dcol=no; lcol=no
   [ "${cov:-0}" -gt 20 ] && { dcol=yes; drew=$((drew + 1)); }
   # ANY pixel getting brighter, and the count is printed so a weak response is visible
@@ -169,8 +184,13 @@ fi
   fail=1; }
 # A run that rendered nothing is not a run that passed.
 [ "$total" -ge 3 ] || { echo "northstar: only $total model(s) in the corpus, which is not a check"; fail=1; }
-[ "$drew" = "$((read_ok - nomesh))" ] || { echo "northstar: $((read_ok - nomesh - drew)) model(s) with geometry read but drew nothing"; fail=1; }
-[ "$lit" = "$drew" ] || { echo "northstar: $((drew - lit)) model(s) drew but came out no brighter than ambient"; fail=1; }
+if [ "$HAVE_PIL" = 1 ]; then
+  [ "$drew" = "$((read_ok - nomesh))" ] || { echo "northstar: $((read_ok - nomesh - drew)) model(s) with geometry read but drew nothing"; fail=1; }
+  [ "$lit" = "$drew" ] || { echo "northstar: $((drew - lit)) model(s) drew but came out no brighter than ambient"; fail=1; }
+else
+  echo "northstar: SKIP the draws and lit columns — no Pillow, so the pixels were never"
+  echo "northstar: counted. READS is still asserted; the other two say nothing today."
+fi
 
 [ "$fail" = 0 ] && echo "PASS northstar" || echo "FAIL northstar"
 exit $fail
