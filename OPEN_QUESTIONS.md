@@ -124,68 +124,56 @@ instead of merely embarrassing.
   the program were rejected for some unrelated reason -- reporting "still open" about a
   question it never tested.
 
-## Q-10: a `region` reclaims what is written inside it, and not what a function returns
+## Q-10: a `region` does not reclaim what a function returns — ANSWERED, in three steps
 
-- **State**: **half of it was answered** by mere v0.1.456 (2026-09-09); the half that costs
-  this renderer anything is still open, and the language now knows why it is hard.
-- **What the block reclaims, re-measured at v0.1.456** (read out of the emitted C, and
-  confirmed by peak RSS):
+- **State**: resolved (2026-09-09) on the interpreter, the C backend and the LLVM
+  backend. What is left is named at the bottom and is not what this question asked.
+- **What it was, and what each step changed** (every row measured, not remembered):
 
-  | written as | allocated from | reclaimed by the block |
+  | written as | v0.1.447 | now |
   |---|---|---|
-  | `vec_new ()` lexically inside `region R { }` | `__region_R` | **yes** (always was) |
-  | `bytebuf_new n` lexically inside `region R { }` | `__region_R` | **yes — this is the change** |
-  | `read_bytes path` (anywhere) | `__lang_current_region` | **yes** (always was) |
-  | a `Vec` or `ByteBuf` **returned by a function** | `(&__lang_default_region)` | **no** |
+  | `vec_new ()` lexically inside `region R { }` | `__region_R`, reclaimed | unchanged |
+  | `bytebuf_new n` lexically inside `region R { }` | default region, **kept** | `__region_R`, **reclaimed** (v0.1.458) |
+  | a container a **function returns**, called from inside the block | default region, **kept** | the caller's region, **reclaimed** (C v0.1.464, LLVM v0.1.466) |
 
-- **The number that used to be in this entry has moved.** Two hundred iterations of a 4 MB
-  `bytebuf_new` inside a `region R { }` reached **770 MB** of peak RSS at v0.1.447. At
-  v0.1.456 the same program is **5.8 MB**. Writing the same loop with the buffer built by a
-  one-line FUNCTION called from inside the block reaches **847 MB** — so the meter still
-  works, the difference is the last row of the table, and it is the only row left.
-- **Why the last row cannot simply be flipped, which is the part that is now known.** mere
-  tried exactly that in v0.1.453: settle an undecided region on the caller's, which the
-  backends lower to the runtime current region. It shipped, and **this renderer was the
-  witness that killed it** — a segfault from the second frame on, in v0.1.453, 454 and 455.
-  A body and its call site hold **different copies** of the region variable, and in a chain
-  (`render_at` → `one_frame_into` → `attr` → `Acache.floats` → `Acc.floats`) only the
-  outermost copy is bound by the block. The innermost body allocates through the scheme's
-  own variable, which nothing bound; lowered to the runtime current region, the value went
-  into the frame's arena while every type said the default one, and the accessor cache read
-  it back after the arena was reused. Withdrawn in v0.1.456.
-  **`dune runtest`, parity, every gate and all 29 dogfood type-checks were green** while
-  three released versions could not render a second frame here.
-- **So the remaining answer is one of two, and both are bigger than a lowering change**:
-  pass the region in as a hidden argument, or specialise a function per region. mere's
-  Q-127 measured that region **cannot** be a monomorphization axis in the C backend — the
-  region is not part of the C type (`Vec[R,T]` and `Vec[__heap,T]` are both
-  `mere_vec_<T>*`), so duplicating instances cannot distinguish them.
-- **What survives the withdrawal, and it is not nothing**: the TYPES still name the block,
-  so carrying a callee-built container out of a `region` is a type error now. Being typed
-  to a region the value does not actually live in is over-strict and never unsound, which
-  is the direction it errs in.
-- **What it costs here**: unchanged. The render target is allocated once and cleared per
-  frame rather than made per frame, and decoded textures and accessors live in caches the
-  caller owns. The **0.7 MB/frame** that neither cache can remove — 924 world matrices, the
-  animation's seven arrays, 84 skins' joint matrices, all different every frame — is the
-  last row of that table and nothing else.
-- **The accessor cache is no longer "code that would be rejected".** The previous version of
-  this entry said the real fix would make `Acache` a type error and force it into a warm
-  pass. That prediction was about the design mere has now withdrawn; under either remaining
-  candidate the cache is ordinary code, because a container the caller allocates and a
-  callee fills is exactly what passing the region in expresses.
-- **Verify**: `printf '%s\n' 'let mk = fn (n: int) -> bytebuf_new 16;' 'let one = fn (i: int) -> region R { let b = mk i in bytebuf_get b 0 };' 'let two = fn (i: int) -> region S { let b = bytebuf_new 16 in bytebuf_get b 0 };' 'let _ = print (str_of_int (one 0 + two 0));' '0' > /tmp/m3dq10.mere && "$MERE" -c /tmp/m3dq10.mere > /tmp/m3dq10.c 2>/dev/null && grep -q 'mere_bytebuf_new(__region_S' /tmp/m3dq10.c && grep -q 'mere_bytebuf_new((&__lang_default_region)' /tmp/m3dq10.c`
-- **Why that shape**: the entry now claims TWO things, and the check asserts both. The first
-  grep is the answered half used as a positive control — a buffer written lexically inside a
-  block must come out as `__region_S`, so a compiler that stopped emitting regions, or one
-  that regressed to the v0.1.447 behaviour, fails here instead of reporting the remaining
-  half open. The second grep is the remaining claim, by name. Both are of the emitted C
-  rather than of a peak-RSS measurement, which is quantised, machine-dependent, and would
-  make this gate flaky for no gain. **Both greps were run against a build of `1b538a9`**, the
-  last commit before the change: the control grep finds nothing there and the check exits
-  non-zero, so it is a live control and not a decoration. That is the correct answer for an
-  older compiler — this entry describes v0.1.456 and would need rewriting for any tree where
-  the control does not hold.
+- **The numbers this entry has carried, all three of them.** Two hundred iterations of a
+  4 MB `bytebuf_new` inside a `region R { }`: **770 MB** at v0.1.447, **5.8 MB** once the
+  lexical case was fixed. The same buffer built by a one-line **function**: **847 MB**,
+  and now **5.5 MB**. The last one is this question.
+- **How it was done, and how it was NOT done.** The region is passed IN, as a leading
+  argument: a call site hands the callee whichever region it bound — a block it is
+  inside, its own region parameter (which is how the outermost block reaches a body three
+  calls down), or the default region where nothing decided. The other way — letting the
+  callee ask what region is current at run time — was tried in mere v0.1.453 and is
+  unsound for a chain of calls. **This renderer is what proved that**: it could not draw a
+  second frame, in three released versions, and v0.1.456 withdrew it.
+- **It did not weaken the escape check.** Carrying a callee-built container out of the
+  block is still a type error, and nothing new was written to make it one: the call site
+  binds the callee's region to the block, so the type follows the value and the check that
+  was already there fires. mere pins the shape as `test/escape/callee_built_into_vec.mere`.
+- **What is left, and it is not what this question asked**:
+  - a function used as a VALUE, or applied to fewer arguments than it takes, keeps the
+    default region — a closure has nowhere to carry a region. Measured across mere's 286
+    examples and this renderer: **zero** such functions.
+  - on LLVM, the innermost body of a curried multi-argument function is a separate
+    `define` that cannot see the argument, so it keeps the default region too.
+  - **this renderer's own 0.7 MB a frame is untouched, and not because of any of that.**
+    The scene state (924 world matrices, the animation arrays, 84 skins' joint matrices)
+    is built inside `one_frame_into` and consumed inside it, so it appears in NO enclosing
+    signature — there is no type position to key a region argument on. `--dump-region-params`
+    reports this program as having **zero** call sites inside a `region` block, which is
+    correct: there is one block in the whole renderer (`src/view.mere`) and the frame path
+    does not call a region-parameterised function from inside it. Reclaiming that state
+    needs a block around the work that builds it, which is this repository's to write, not
+    the language's.
+- **Verify**: none — answered, and the answer is asserted continuously somewhere better
+  than here: mere's `scripts/region_reclaim_check.sh` builds a container in a function,
+  calls it from inside a block, and requires the footprint NOT to follow the iteration
+  count, on the C and LLVM backends separately. A grep of emitted C in this file would be
+  a second, weaker copy of that — and the previous version of this Verify shows why a copy
+  is worse: it looked for the ABSENCE of `(&__lang_default_region)`, which an unrelated
+  allocation elsewhere in the same file satisfies, so it would have gone on passing for
+  the wrong reason after the question was answered.
 
 ## Q-11: a buffer is as long as its `byteLength` says, and not as long as its file
 

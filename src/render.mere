@@ -1252,13 +1252,19 @@ module Render {
   // call, which is right for a single picture; a frame loop makes one and clears it,
   // because A REGION DOES NOT RECLAIM A ByteBuf.
   //
-  // That is measured and not assumed: two hundred iterations of a 4 MB `bytebuf_new`
-  // inside a `region R { }` reach 770 MB of peak RSS against 5 MB for one iteration,
-  // and the emitted C says `mere_bytebuf_new((&__lang_default_region), ...)` even for
-  // a call written directly inside the block -- a container whose region marker is
-  // `__heap` gets the default region, which is never freed. So a per-frame target
-  // grows without bound however the frame is wrapped, and the only fix available
-  // here is not to allocate one per frame.
+  // THAT REASON EXPIRED ON 2026-09-09 AND THE ARRANGEMENT IS KEPT ANYWAY, which is
+  // worth writing down rather than silently leaving a comment that argues for it.
+  // It used to be measured: two hundred iterations of a 4 MB `bytebuf_new` inside a
+  // `region R { }` reached 770 MB of peak RSS against 5 MB for one, because the
+  // emitted C said `mere_bytebuf_new((&__lang_default_region), ...)` even for a call
+  // written directly inside the block. Both halves are fixed now -- mere v0.1.458 for
+  // the lexical case (5.8 MB) and v0.1.464/466 for a buffer a FUNCTION returns
+  // (847 MB -> 5.5 MB) -- so a per-frame target inside a block would now be reclaimed.
+  //
+  // It stays one-per-frame because that is what a renderer does anyway: the target is
+  // the same size every frame, clearing it is cheaper than allocating it, and the
+  // pixels are read by `Window.show` after the frame's work is done. What changed is
+  // that this is now a choice and not a workaround. See OPEN_QUESTIONS Q-10.
   let one_frame_into = fn (d: doc) -> fn (t: target) -> fn (depth) -> fn (lit: bool) ->
                       fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
                       fn (cam: (v3 * v3 * float * float * float * mat4)) -> fn (cache) ->

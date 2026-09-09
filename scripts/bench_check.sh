@@ -146,9 +146,17 @@ echo "bench: the frame loop does not grow with the frame count"
 # cache can hold them, and RecursiveSkeletons is the only model in the corpus with
 # enough nodes for it to show: Suzanne grows 1 MB over forty frames and Fox 5.
 #
-# The reason nothing is reclaimed is the same one throughout: a container a FUNCTION
-# returns has the region marker `__heap`, which is lowered to the DEFAULT region, which
-# is never freed, and a `region` block around the caller does not change that (Q-10).
+# THE REASON IS NOT THE ONE THIS COMMENT USED TO GIVE, and the difference matters for
+# whoever reads the number next. It said: a container a FUNCTION returns has the region
+# marker `__heap`, lowered to the default region, and a `region` block around the caller
+# does not change that. Since mere v0.1.464 (C) and v0.1.466 (LLVM) it does -- the region
+# is passed in and a callee allocates where its caller decided.
+#
+# This state still is not reclaimed, for a different and narrower reason: it is built
+# inside `one_frame_into` and consumed inside it, so it appears in NO enclosing signature
+# and there is no type position to key a region argument on. `mere --dump-region-params`
+# reports this renderer as having zero call sites inside a `region` block. Reclaiming it
+# needs a block around the work that builds it, which is this repository's to write.
 #
 # THE MEASUREMENT THAT USED TO BE HERE WAS ABOUT A CASE THAT IS NOW FIXED, and replacing
 # it rather than deleting it is the point. It read: 200 iterations of a 4 MB

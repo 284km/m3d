@@ -1179,9 +1179,11 @@ So the decoded arrays are cached by accessor index, in a table the caller owns.
 forced rather than chosen. A `texture` holds a `ByteBuf[R]`, so one decoded inside a
 `region` cannot be stored anywhere that outlives it and Mere rejects the path outright;
 that is why images are filled by a warm pass run outside. A decoded accessor is a `Vec`
-**a function returned**, which by Q-10 lands in the default region no matter which
+**a function returned**, which at the time landed in the default region no matter which
 region called it — so storing one from inside a frame's region is accepted. *The rule
-that leaks it is the rule that makes it cacheable.*
+that leaked it is the rule that made it cacheable.* (Q-10 has since been answered: as of
+mere v0.1.464/466 a callee's container follows the region the CALL SITE decided. It does
+not change this code, because no call here is made from inside a block — see below.)
 
 **The sentence that used to end that paragraph was wrong, and it was tested.** It said
 that if Q-10 were ever fixed this would stop compiling at the `vec_set` — the loud
@@ -1204,7 +1206,15 @@ is real; the guarantee that the compiler would catch its removal was not.
 `RecursiveSkeletons` adds about **0.7 MB a frame** and it is no longer the vertex data:
 it is the per-frame scene state — 924 world matrices, seven arrays of animation state,
 the joint matrices of 84 skins — produced by functions, so allocated in the default
-region, and *different every frame*, so no cache can hold it. Only Q-10 can.
+region, and *different every frame*, so no cache can hold it.
+
+**And Q-10 turned out not to be able to either, which is only clear now that it is
+answered.** A callee's container follows the region its caller decided (mere v0.1.464 and
+v0.1.466), and this state still does not move: it is built inside `one_frame_into` and
+consumed inside it, so it appears in **no enclosing signature** and there is no type
+position to key a region argument on. `mere --dump-region-params` reports this renderer as
+having **zero** call sites inside a `region` block. Reclaiming it needs a block around the
+work that builds it, which is this repository's to write.
 
 ### The 19 seconds were not the renderer
 
@@ -1255,8 +1265,9 @@ Ranked by what the corpus table says, rather than by what seems interesting:
 - **The last of the frame-loop growth.** `RecursiveSkeletons` — 924 nodes, 84 skins,
   no images — still grows about **0.7 MB a frame**, which is the per-frame scene state:
   924 world matrices, seven arrays of animation state and 84 skins' joint matrices,
-  produced by functions and so allocated in a default region that is never freed
-  (Q-10), and different every frame, so no cache can hold them. Every ordinary model is
+  built inside `one_frame_into` and consumed inside it, so they appear in no enclosing
+  signature and the region-passing that answered Q-10 has nothing to key on; different
+  every frame, so no cache can hold them either. Every ordinary model is
   now flat — `Suzanne` grows 1 MB over forty frames. `scripts/bench_check.sh` prints
   the number rather than asserting it, because a threshold loose enough to admit it
   could not catch the tenfold leak the gate exists for.
