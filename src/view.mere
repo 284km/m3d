@@ -120,8 +120,7 @@ let cache = Render.caches d;
 // so the lookup inside a frame never allocates anything that would have to escape.
 let _ = Render.warm_cache d (fst cache);
 let render_at = fn (o) ->
-  let (ft, fdep) = frame_target in
-  Render.one_frame_into d ft fdep true bgv time anim
+  Render.one_frame_into d frame_target true bgv time anim
     (Frame.orbit_framed o aspect autocam) cache;
 
 // WITH NO `--orbit`, THE FRAME COMES FROM THE UNTOUCHED AUTO PATH -- not from
@@ -130,7 +129,7 @@ let render_at = fn (o) ->
 // would move every pinned reference number in scripts/ref/pinned.txt by a hair for
 // no reason at all. The interactive loop picks up `o_start` from the round trip the
 // moment anything is dragged, which is where a 1e-16 difference belongs.
-let (t, depth, drawn, eye, ctr, th, zn, zf) =
+let (t, drawn, eye, ctr, th, zn, zf) =
   match orbit_flag with
   | None -> Render.one_frame_anim d size size true bgv time anim
   | Some _ -> render_at o_start;
@@ -196,7 +195,7 @@ let code =
       // since a tuple built in here could not leave.
       let frame = fn (o) -> region FR {
         let a = now_ms () in
-        let (t2, _d2, _dr, _e2, _c2, _t3, _z1, _z2) = render_at o in
+        let (t2, _dr, _e2, _c2, _t3, _z1, _z2) = render_at o in
         let b = now_ms () in
         let ok = Window.show win (canvas { w = t2.w, h = t2.h, px = t2.color }) bg in
         let c = now_ms () in
@@ -285,7 +284,13 @@ let code =
           match out with
           | None -> ()
           | Some o2 ->
-            let asrc = target { w = got.w, h = got.h, color = got.px } in
+            // THE ONE PLACE THE PAIR WAS MORE CONVENIENT, and it is worth saying so
+            // rather than making the empty vector look deliberate. These are pixels
+            // read back OUT of the window; there is no depth buffer behind them and
+            // `to_png_rgb` reads only w, h and colour. With depth beside the target a
+            // colour-only value could just be built; inside it, one has to be supplied.
+            let asrc = target { w = got.w, h = got.h, color = got.px,
+                                depth = vec_new () } in
             let _ = write_bytes o2
                       (bytes_of_vec (encode_rgb8 (Render.to_png_rgb asrc) got.w got.h)) in
             print ("wrote " ++ o2) in
@@ -329,7 +334,7 @@ let code =
       // alternative to saying so is a window that silently stops updating and looks
       // frozen for no visible reason.
       let show_it = fn (o) ->
-        let (t2, _d2, _dr, _e2, _c2, _t3, _z1, _z2) = render_at o in
+        let (t2, _dr, _e2, _c2, _t3, _z1, _z2) = render_at o in
         if Window.show win (canvas { w = t2.w, h = t2.h, px = t2.color }) bg then ()
         else print "m3d-view: the window refused a frame — the picture is no longer being updated" in
 

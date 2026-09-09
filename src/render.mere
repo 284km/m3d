@@ -744,9 +744,10 @@ module Frame {
 }
 
 module Render {
-  // Vertex attributes, read once per primitive. These travel as a tuple because a
-  // record field could not hold a `Vec` when this was written (OPEN_QUESTIONS Q-8);
-  // since mere v0.1.456 it can, and a record here would be a readability change.
+  // Vertex attributes, read once per primitive. A tuple rather than a record because
+  // these are five optional arrays with no name worth giving the group -- not because a
+  // record could not hold them: it can, since mere v0.1.456 (OPEN_QUESTIONS Q-8), which
+  // is what let `target` absorb its depth buffer.
   let attr = fn (d: doc) -> fn (ac) -> fn (prim: Json.json) -> fn (name: str) ->
     match J.field (J.req prim "attributes") name with
     | None -> None
@@ -1265,7 +1266,7 @@ module Render {
   // the same size every frame, clearing it is cheaper than allocating it, and the
   // pixels are read by `Window.show` after the frame's work is done. What changed is
   // that this is now a choice and not a workaround. See OPEN_QUESTIONS Q-10.
-  let one_frame_into = fn (d: doc) -> fn (t: target) -> fn (depth) -> fn (lit: bool) ->
+  let one_frame_into = fn (d: doc) -> fn (t: target) -> fn (lit: bool) ->
                       fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
                       fn (cam: (v3 * v3 * float * float * float * mat4)) -> fn (cache) ->
     // TWO CACHES, ONE ARGUMENT: the decoded images and the decoded accessors. They are
@@ -1275,7 +1276,7 @@ module Render {
     let (tcache, acache) = cache in
     let w = t.w in
     let h = t.h in
-    let _ = Target.clear t depth (int_of_float bg.x) (int_of_float bg.y) (int_of_float bg.z) in
+    let _ = Target.clear t (int_of_float bg.x) (int_of_float bg.y) (int_of_float bg.z) in
     let (eye, ctr, th, zn, zf, vp) = cam in
     // A REGION AROUND THE FRAME'S OWN WORKING SET, and it took the language two
     // answers to make this worth writing. Everything between here and the count is
@@ -1777,7 +1778,7 @@ module Render {
                         // hole rather than as a surface.
                         let nsign = if sarea < 0.0 then 0.0 - 1.0 else 1.0 in
                         let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in
-                        RasterS.triangle t depth (not mat.double_sided)
+                        RasterS.triangle t (not mat.double_sided)
                           (sv p nsign) (sv q nsign) (sv r nsign)
                           shader in
                       // THE NEAR PLANE IS CROSSED HERE, and the count of corners it
@@ -1831,7 +1832,7 @@ module Render {
                       let (sx, sy, z, iw, w) = thin_v k in
                       let _ = if w > 0.0 then
                                 let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in
-                                RasterP.point t depth sx sy z (thin_col k)
+                                RasterP.point t sx sy z (thin_col k)
                               else () in
                       pts (i + 1) in
                   let seg = fn (ka: int) -> fn (kb: int) ->
@@ -1849,7 +1850,7 @@ module Render {
                     if aww <= 0.0 || bww <= 0.0 then ()
                     else
                       let _ = vec_set drawn 0 (vec_get drawn 0 + 1) in
-                      RasterP.line t depth axx ayy az aw (thin_col ka)
+                      RasterP.line t axx ayy az aw (thin_col ka)
                                             bxx byy bz bw (thin_col kb) in
                   let rec strip = fn (i: int) ->
                     if i + 1 >= vec_len idx then ()
@@ -1872,14 +1873,14 @@ module Render {
         prims (J.arr (J.req mesh "primitives"))) in
     vec_get drawn 0
     } in
-    (t, depth, drawn_n, eye, ctr, th, zn, zf);
+    (t, drawn_n, eye, ctr, th, zn, zf);
 
   // A fresh target per call, for a caller that wants one picture.
   let one_frame_cached = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->
                       fn (bg: v3) -> fn (time: float) -> fn (anim: int) ->
                       fn (cam: (v3 * v3 * float * float * float * mat4)) -> fn (cache) ->
-    let (t, depth) = Target.make w h in
-    one_frame_into d t depth lit bg time anim cam cache;
+    let t = Target.make w h in
+    one_frame_into d t lit bg time anim cam cache;
 
   // BOTH CACHES A FRAME NEEDS, made together so a caller cannot make one and forget
   // the other. The warm pass is separate because only the images need one.

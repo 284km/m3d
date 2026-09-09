@@ -24,9 +24,9 @@ let ht = 24;
 // which pixels it touched. Drawing them into one target could not tell "the
 // second triangle also covered this" from "the second triangle overwrote it".
 let coverage = fn (v0: rvert) -> fn (v1: rvert) -> fn (v2: rvert) ->
-  let (t, d) = Target.make wd ht in
-  let _ = Target.clear t d 0 0 0 in
-  let _ = Raster.triangle t d false v0 v1 v2 in
+  let t = Target.make wd ht in
+  let _ = Target.clear t 0 0 0 in
+  let _ = Raster.triangle t false v0 v1 v2 in
   let c = vec_new () in
   let rec go = fn (i: int) ->
     if i == wd * ht then ()
@@ -125,9 +125,9 @@ let _ = check "winding.same_coverage_when_not_culled" (same 0 0 == 0);
 let _ = check "winding.front_is_not_empty" (count front > 20);
 
 let culled =
-  let (t, d) = Target.make wd ht in
-  let _ = Target.clear t d 0 0 0 in
-  let _ = Raster.triangle t d true (v 4.5 4.5) (v 6.5 16.5) (v 15.5 6.5) in
+  let t = Target.make wd ht in
+  let _ = Target.clear t 0 0 0 in
+  let _ = Raster.triangle t true (v 4.5 4.5) (v 6.5 16.5) (v 15.5 6.5) in
   let rec go = fn (i: int) -> fn (n: int) ->
     if i == wd * ht then n
     else let (r, _, _) = Target.get t (i % wd) (i / wd) in go (i + 1) (n + (if r > 0 then 1 else 0)) in
@@ -144,14 +144,14 @@ let _ = check "degenerate.duplicate_vertex" (count (coverage (v 3.5 3.5) (v 3.5 
 
 // --- the depth test keeps the nearer one -----------------------------------
 let depth_pick = fn (name: str) -> fn (zfar: float) -> fn (znear: float) -> fn (want_r: int) ->
-  let (t, d) = Target.make wd ht in
-  let _ = Target.clear t d 0 0 0 in
+  let t = Target.make wd ht in
+  let _ = Target.clear t 0 0 0 in
   let far = fn (x: float) -> fn (y: float) ->
     rvert { x = x, y = y, z = zfar, iw = 1.0, r = 1.0, g = 0.0, b = 0.0 } in
   let near = fn (x: float) -> fn (y: float) ->
     rvert { x = x, y = y, z = znear, iw = 1.0, r = 0.0, g = 1.0, b = 0.0 } in
-  let _ = Raster.triangle t d false (far 2.5 2.5) (far 20.5 2.5) (far 2.5 20.5) in
-  let _ = Raster.triangle t d false (near 2.5 2.5) (near 20.5 2.5) (near 2.5 20.5) in
+  let _ = Raster.triangle t false (far 2.5 2.5) (far 20.5 2.5) (far 2.5 20.5) in
+  let _ = Raster.triangle t false (near 2.5 2.5) (near 20.5 2.5) (near 2.5 20.5) in
   let (r, _, _) = Target.get t 5 5 in
   check name (r == want_r);
 // The near one wins whichever order it is drawn in, which is the whole point of

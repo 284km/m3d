@@ -106,7 +106,7 @@ let write_tri = fn (a: int) -> fn (b: int) -> fn (c: int) -> write_tri_n a b c 1
 // two answers and not one. The flat box had the first and not the second.
 let render_stats = fn () ->
   let d = Gltf.load "/tmp/m3d_rp.gltf" in
-  let (t, dep, drawn, e, c, th, zn, zf) = Render.one_frame d 32 32 in
+  let (t, drawn, e, c, th, zn, zf) = Render.one_frame d 32 32 in
   let rec go = fn (i: int) -> fn (n: int) -> fn (mx: int) ->
     if i == 32 * 32 then (n, mx)
     else
@@ -123,7 +123,7 @@ let render_stats = fn () ->
 // bug this file has to be able to see.
 let render_hash = fn (path: str) ->
   let d = Gltf.load path in
-  let (t, dep, drawn, e, c, th, zn, zf) = Render.one_frame d 32 32 in
+  let (t, drawn, e, c, th, zn, zf) = Render.one_frame d 32 32 in
   let rec go = fn (i: int) -> fn (h: int) ->
     if i == 32 * 32 then h
     else
@@ -264,14 +264,14 @@ let depth_not_written = fn () ->
               fn (u1: float) -> fn (v1: float) -> fn (fa: v3) -> fn (fb: v3) -> fn (c: v3) ->
     Some (v3 { x = 1.0, y = 1.0, z = 1.0 }) in
   let paint = fn (near) -> fn (far) ->
-    let (t2, d2) = Target.make 32 32 in
-    let _ = Target.clear t2 d2 0 0 0 in
+    let t2 = Target.make 32 32 in
+    let _ = Target.clear t2 0 0 0 in
     let _ = match near with
             | None -> ()
-            | Some sh -> RasterS.triangle t2 d2 false (sv 0 0.1) (sv 1 0.1) (sv 2 0.1) sh in
+            | Some sh -> RasterS.triangle t2 false (sv 0 0.1) (sv 1 0.1) (sv 2 0.1) sh in
     let _ = match far with
             | None -> ()
-            | Some sh -> RasterS.triangle t2 d2 false (sv 0 0.9) (sv 1 0.9) (sv 2 0.9) sh in
+            | Some sh -> RasterS.triangle t2 false (sv 0 0.9) (sv 1 0.9) (sv 2 0.9) sh in
     let rec count = fn (i: int) -> fn (n: int) ->
       if i == 32 * 32 then n
       else
@@ -303,10 +303,10 @@ let _ = check "mask.a_declined_pixel_does_not_occlude" (n_behind > 20);
 // shading is not linear in the normal -- so the middle of the triangle must
 // come out differently.
 let two_ways = fn () ->
-  let (t1, d1) = Target.make 32 32 in
-  let (t2, d2) = Target.make 32 32 in
-  let _ = Target.clear t1 d1 0 0 0 in
-  let _ = Target.clear t2 d2 0 0 0 in
+  let t1 = Target.make 32 32 in
+  let t2 = Target.make 32 32 in
+  let _ = Target.clear t1 0 0 0 in
+  let _ = Target.clear t2 0 0 0 in
   let mat = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 0.0,
                        roughness = 0.25, er = 0.0, eg = 0.0, eb = 0.0,
                        alpha_mode = 0, cutoff = 0.5, double_sided = false } in
@@ -331,7 +331,7 @@ let two_ways = fn () ->
   let gv = fn (k: int) ->
     let l = shade1 k in
     rvert { x = sx k, y = sy k, z = 0.0, iw = 1.0, r = l.x, g = l.y, b = l.z } in
-  let _ = Raster.triangle t1 d1 false (gv 0) (gv 1) (gv 2) in
+  let _ = Raster.triangle t1 false (gv 0) (gv 1) (gv 2) in
   // Per pixel, through the attribute-carrying one.
   let pv = fn (k: int) ->
     let n = ns k in let w = wp k in
@@ -343,7 +343,7 @@ let two_ways = fn () ->
                fn (u1: float) -> fn (v1: float) -> fn (fa: v3) -> fn (fb: v3) -> fn (c: v3) ->
     let vd = V3.normalize (V3.sub eye w) in
     Some (V3.add (Shade.direct mat n vd li) (Shade.ambient mat 0.15)) in
-  let _ = RasterS.triangle t2 d2 false (pv 0) (pv 1) (pv 2) shader in
+  let _ = RasterS.triangle t2 false (pv 0) (pv 1) (pv 2) shader in
   (t1, t2);
 
 let (tg, tp) = two_ways ();
@@ -360,10 +360,10 @@ let _ = check "shading.the_difference_is_large" (
 // every corpus model is. Without this the check above could pass for a per-pixel
 // path that was simply wrong.
 let same_normals = fn () ->
-  let (t1, d1) = Target.make 32 32 in
-  let (t2, d2) = Target.make 32 32 in
-  let _ = Target.clear t1 d1 0 0 0 in
-  let _ = Target.clear t2 d2 0 0 0 in
+  let t1 = Target.make 32 32 in
+  let t2 = Target.make 32 32 in
+  let _ = Target.clear t1 0 0 0 in
+  let _ = Target.clear t2 0 0 0 in
   let mat = material { br = 1.0, bg = 1.0, bb = 1.0, ba = 1.0, metallic = 0.0,
                        roughness = 0.25, er = 0.0, eg = 0.0, eb = 0.0,
                        alpha_mode = 0, cutoff = 0.5, double_sided = false } in
@@ -379,7 +379,7 @@ let same_normals = fn () ->
   let l = V3.add (Shade.direct mat n vd li) (Shade.ambient mat 0.15) in
   let gv = fn (k: int) -> rvert { x = sx k, y = sy k, z = 0.0, iw = 1.0,
                                   r = l.x, g = l.y, b = l.z } in
-  let _ = Raster.triangle t1 d1 false (gv 0) (gv 1) (gv 2) in
+  let _ = Raster.triangle t1 false (gv 0) (gv 1) (gv 2) in
   let pv = fn (k: int) -> svert { sx = sx k, sy = sy k, sz = 0.0, siw = 1.0, su1 = 0.0, sv1 = 0.0,
             fax = 0.0, fay = 0.0, faz = 0.0, fbx = 0.0, fby = 0.0, fbz = 0.0,
                                   wx = w.x, wy = w.y, wz = w.z,
@@ -389,7 +389,7 @@ let same_normals = fn () ->
                fn (u1: float) -> fn (v1: float) -> fn (fa: v3) -> fn (fb: v3) -> fn (c: v3) ->
     Some (V3.add (Shade.direct mat nn (V3.normalize (V3.sub eye ww)) li)
                  (Shade.ambient mat 0.15)) in
-  let _ = RasterS.triangle t2 d2 false (pv 0) (pv 1) (pv 2) shader in
+  let _ = RasterS.triangle t2 false (pv 0) (pv 1) (pv 2) shader in
   let rec cmp = fn (i: int) -> fn (bad: int) ->
     if i == 32 * 32 then bad
     else
@@ -783,9 +783,9 @@ let _ = check "normalmap.the_derived_frame_is_not_the_other_handedness" (h_nm_de
 // pixel and one segment, and routing them through a glTF document would put the
 // loader between the question and the answer.
 let pl_frame = fn (paint) ->
-  let (t, dep) = Target.make 32 32 in
-  let _ = Target.clear t dep 0 0 0 in
-  let _ = paint t dep in
+  let t = Target.make 32 32 in
+  let _ = Target.clear t 0 0 0 in
+  let _ = paint t in
   let rec go = fn (i: int) -> fn (n: int) ->
     if i == 32 * 32 then n
     else
@@ -798,19 +798,19 @@ let white = v3 { x = 1.0, y = 1.0, z = 1.0 };
 // with the comment "glTF spec says points should be 1px", so this is the
 // reference's own answer and not a simplification of it.
 let _ = check "point.is_exactly_one_pixel"
-  (pl_frame (fn (t) -> fn (d) -> RasterP.point t d 8.5 9.5 0.5 white) == 1);
+  (pl_frame (fn (t) -> RasterP.point t 8.5 9.5 0.5 white) == 1);
 // And outside the frame it is no pixels rather than a fault.
 let _ = check "point.outside_the_frame_is_dropped"
-  (pl_frame (fn (t) -> fn (d) -> let _ = RasterP.point t d (0.0 - 5.0) 9.5 0.5 white in
-                                 RasterP.point t d 99.0 9.5 0.5 white) == 0);
+  (pl_frame (fn (t) -> let _ = RasterP.point t (0.0 - 5.0) 9.5 0.5 white in
+                                 RasterP.point t 99.0 9.5 0.5 white) == 0);
 // A POINT RESPECTS DEPTH, and this READS THE COLOUR rather than counting pixels.
 // Counting cannot see it: with no depth test the far point OVERWRITES the near
 // one at the same pixel and the count is still one. Measured -- removing the
 // depth test passed a counting version of this check.
 let pl_pixel = fn (paint) ->
-  let (t, dep) = Target.make 32 32 in
-  let _ = Target.clear t dep 0 0 0 in
-  let _ = paint t dep in
+  let t = Target.make 32 32 in
+  let _ = Target.clear t 0 0 0 in
+  let _ = paint t in
   let (r, g, b) = Target.get t 8 9 in
   r;
 let red = v3 { x = 1.0, y = 0.0, z = 0.0 };
@@ -819,45 +819,45 @@ let dim = v3 { x = 0.2, y = 0.0, z = 0.0 };
 // one channel. Both orderings, because either alone passes for a renderer that
 // always keeps the first write or always keeps the last.
 let _ = check "point.the_near_one_wins_whichever_is_drawn_first"
-  (pl_pixel (fn (t) -> fn (d) -> let _ = RasterP.point t d 8.5 9.5 0.2 red in
-                                 RasterP.point t d 8.5 9.5 0.8 dim)
-   == pl_pixel (fn (t) -> fn (d) -> let _ = RasterP.point t d 8.5 9.5 0.8 dim in
-                                    RasterP.point t d 8.5 9.5 0.2 red));
+  (pl_pixel (fn (t) -> let _ = RasterP.point t 8.5 9.5 0.2 red in
+                                 RasterP.point t 8.5 9.5 0.8 dim)
+   == pl_pixel (fn (t) -> let _ = RasterP.point t 8.5 9.5 0.8 dim in
+                                    RasterP.point t 8.5 9.5 0.2 red));
 let _ = check "point.and_the_near_one_is_the_bright_one"
-  (pl_pixel (fn (t) -> fn (d) -> let _ = RasterP.point t d 8.5 9.5 0.8 dim in
-                                 RasterP.point t d 8.5 9.5 0.2 red) > 200);
+  (pl_pixel (fn (t) -> let _ = RasterP.point t 8.5 9.5 0.8 dim in
+                                 RasterP.point t 8.5 9.5 0.2 red) > 200);
 
 // A LINE REACHES BOTH ITS ENDPOINTS. A horizontal run of 10 pixels is 10 pixels:
 // Bresenham inclusive of both ends, which is what makes two segments of a strip
 // meet rather than leave a gap at every joint.
-let hline = fn (t) -> fn (d) ->
-  RasterP.line t d 2.5 5.5 0.5 1.0 white 11.5 5.5 0.5 1.0 white;
+let hline = fn (t) ->
+  RasterP.line t 2.5 5.5 0.5 1.0 white 11.5 5.5 0.5 1.0 white;
 let _ = check "line.spans_both_endpoints" (pl_frame hline == 10);
 // A diagonal is as long as its LONG axis, not the sum of the two -- a line that
 // stepped both axes every pixel would draw 20 here and look twice as thick.
 let _ = check "line.a_diagonal_is_as_long_as_its_long_axis"
-  (pl_frame (fn (t) -> fn (d) ->
-     RasterP.line t d 2.5 2.5 0.5 1.0 white 11.5 7.5 0.5 1.0 white) == 10);
+  (pl_frame (fn (t) ->
+     RasterP.line t 2.5 2.5 0.5 1.0 white 11.5 7.5 0.5 1.0 white) == 10);
 // A line is clipped, not wrapped: a segment leaving the frame draws the part
 // inside it and no pixel on the far edge.
 let _ = check "line.is_clipped_not_wrapped"
-  (pl_frame (fn (t) -> fn (d) ->
-     RasterP.line t d 28.5 5.5 0.5 1.0 white 40.5 5.5 0.5 1.0 white) == 4);
+  (pl_frame (fn (t) ->
+     RasterP.line t 28.5 5.5 0.5 1.0 white 40.5 5.5 0.5 1.0 white) == 4);
 // AND A LINE RESPECTS DEPTH, read as a colour for the same reason.
 let pl_line_pixel = fn (paint) ->
-  let (t, dep) = Target.make 32 32 in
-  let _ = Target.clear t dep 0 0 0 in
-  let _ = paint t dep in
+  let t = Target.make 32 32 in
+  let _ = Target.clear t 0 0 0 in
+  let _ = paint t in
   let (r, g, b) = Target.get t 5 5 in
   r;
 let _ = check "line.the_near_one_wins"
-  (pl_line_pixel (fn (t) -> fn (d) ->
-     let _ = RasterP.line t d 2.5 5.5 0.8 1.0 dim 11.5 5.5 0.8 1.0 dim in
-     RasterP.line t d 2.5 5.5 0.2 1.0 red 11.5 5.5 0.2 1.0 red) > 200);
+  (pl_line_pixel (fn (t) ->
+     let _ = RasterP.line t 2.5 5.5 0.8 1.0 dim 11.5 5.5 0.8 1.0 dim in
+     RasterP.line t 2.5 5.5 0.2 1.0 red 11.5 5.5 0.2 1.0 red) > 200);
 let _ = check "line.and_the_far_one_does_not_overwrite_it"
-  (pl_line_pixel (fn (t) -> fn (d) ->
-     let _ = RasterP.line t d 2.5 5.5 0.2 1.0 red 11.5 5.5 0.2 1.0 red in
-     RasterP.line t d 2.5 5.5 0.8 1.0 dim 11.5 5.5 0.8 1.0 dim) > 200);
+  (pl_line_pixel (fn (t) ->
+     let _ = RasterP.line t 2.5 5.5 0.2 1.0 red 11.5 5.5 0.2 1.0 red in
+     RasterP.line t 2.5 5.5 0.8 1.0 dim 11.5 5.5 0.8 1.0 dim) > 200);
 
 
 // --- animation ---------------------------------------------------------------
@@ -1062,9 +1062,9 @@ let same_bytes = fn (a: target) -> fn (b: target) ->
     else go (i + 1) in
   a.w == b.w && a.h == b.h && go 0;
 
-let (auto_t, _ad, _adr, _ae, _ac, _ath, _azn, _azf) =
+let (auto_t, _adr, _ae, _ac, _ath, _azn, _azf) =
   Render.one_frame_anim cam_doc 48 48 true cam_bg 0.0 0;
-let (expl_t, _ed, _edr, _ee, _ec, _eth, _ezn, _ezf) =
+let (expl_t, _edr, _ee, _ec, _eth, _ezn, _ezf) =
   Render.one_frame_cam cam_doc 48 48 true cam_bg 0.0 0 cam_auto;
 let _ = check "camera.explicit_given_the_auto_camera_is_byte_identical"
   (same_bytes auto_t expl_t);
@@ -1078,7 +1078,7 @@ let moved_eye = V3.add c0 (V3.scale (V3.sub e0 c0) (0.0 - 1.0));
 let moved = (moved_eye, c0, th0, zn0, zf0,
              M4.mul (M4x.perspective_from_tan th0 1.0 zn0 zf0)
                     (M4x.look_at moved_eye c0 (v3 { x = 0.0, y = 1.0, z = 0.0 })));
-let (moved_t, _md, _mdr, _me, _mc, _mth, _mzn, _mzf) =
+let (moved_t, _mdr, _me, _mc, _mth, _mzn, _mzf) =
   Render.one_frame_cam cam_doc 48 48 true cam_bg 0.0 0 moved;
 let _ = check "camera.a_different_camera_gives_a_different_picture"
   (not (same_bytes auto_t moved_t));
@@ -1270,7 +1270,7 @@ let _ = check "clip.an_invented_corner_carries_interpolated_attributes"
 // against three.js. A camera assembled here would be a second spelling of the framing
 // rule, and the two could drift.
 let inside_cam = Frame.orbit_framed (Frame.orbit_of_flag cam_auto 30.0 20.0 0.3) 1.0 cam_auto;
-let (inside_t, _id, _idr, _ie, _ic, _ith, _izn, _izf) =
+let (inside_t, _idr, _ie, _ic, _ith, _izn, _izf) =
   Render.one_frame_cam cam_doc 32 32 true cam_bg 0.0 0 inside_cam;
 let covered_of = fn (tg: target) ->
   let rec go = fn (i: int) -> fn (acc: int) ->

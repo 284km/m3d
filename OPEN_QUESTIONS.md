@@ -95,11 +95,16 @@ instead of merely embarrassing.
   compares a record of two `Vec` fields across the interpreter, C, LLVM and Wasm on every
   parity run. That is a better home for it than a check here, because the claim is the
   language's.
-- **What is still true here**: `Target` returns `(target, depth)` rather than one record.
-  Collapsing it is now possible and is a readability change, not a correctness one — six
-  signatures in `src/raster.mere` and `src/render.mere` take the two together. Not done,
-  because the pair already cannot drift (every function takes both) and the renderer's
-  gates are the expensive thing to re-run for a cosmetic gain.
+- **Collapsed (2026-09-10).** `target` carries `depth: Vec[R, float]` and every function
+  that draws takes one argument where it took two — `Target.clear`, both `triangle`s,
+  `point`, `line`, `one_frame_into` — and the frame tuple lost an element. What the pair
+  bought (a caller cannot hold a colour buffer and a depth buffer of different sizes) the
+  record buys by construction rather than by everyone remembering to pass both.
+- **One place the pair was better, kept visible rather than tidied away**: the window's
+  read-back path builds a `target` from pixels it got from SDL, for `to_png_rgb`, which
+  reads only `w`, `h` and colour. Beside the target, a colour-only value could just be
+  built; inside it, an empty depth vector has to be supplied, and `src/view.mere` says so
+  at the line that supplies one.
 - **Verify**: none — answered, and the answer is asserted by the language's own parity run
   rather than by prose here.
 

@@ -28,41 +28,36 @@ import "./srgb.mere";
 // linearly in screen space, and divided by the interpolated 1/w at the end.
 type rvert = { x: float, y: float, z: float, iw: float, r: float, g: float, b: float };
 
-// Colour, and depth ALONGSIDE IT RATHER THAN INSIDE IT.
+// Colour AND depth, in one value.
 //
-// This was forced when it was written: a record field could hold a `ByteBuf[R]`
-// and could not hold a `Vec[R, T]`, a `StrBuf[R]` or a `Map[R, K, V]` -- the
-// first three gave `expected &R unit, got &__heap unit`, because a record type
-// had no way to be parameterised over the region its field's container lives
-// in, and ByteBuf escaped that only because its region is erased from the
-// type's tag. Tuples and function signatures were both fine, which is why the
-// pair below works and a third field would not have.
+// Depth used to travel beside the target rather than inside it, because a record field
+// could hold a `ByteBuf[R]` and could not hold a `Vec[R, T]`: the first three container
+// kinds gave `expected &R unit, got &__heap unit`, since a record type had no way to be
+// parameterised over the region its field's container lives in, and ByteBuf escaped it
+// only because its region is erased from the type's tag. Tuples and function signatures
+// were both fine, which is why the pair worked and a third field did not.
 //
-// SINCE mere v0.1.456 A FIELD CAN HOLD ANY OF THEM, so this is now a shape and
-// not a workaround: depth could be a third field. It has not been collapsed
-// because the pair already cannot drift -- every function here takes the two
-// together -- and the change would be a readability one across six signatures.
-// See OPEN_QUESTIONS Q-8, which records the measurement on both compilers.
+// mere v0.1.456 made a field able to hold any of them (OPEN_QUESTIONS Q-8), so this is
+// one value now and every function that draws takes one argument instead of two. What
+// the pair bought -- a caller cannot hold a colour buffer and a depth buffer of
+// different sizes -- the record buys by construction rather than by everyone remembering
+// to pass both.
 //
-// Depth is a Vec of doubles rather than four more bytes because it is compared
-// and not blended, and a byte has nowhere near the resolution a depth test
-// needs. Every function here takes the two together so they cannot drift
-// apart, and `Target.make` builds them as one value.
-type target = { w: int, h: int, color: ByteBuf[R] };
+// Depth is a Vec of doubles rather than four more bytes because it is compared and not
+// blended, and a byte has nowhere near the resolution a depth test needs.
+type target = { w: int, h: int, color: ByteBuf[R], depth: Vec[R, float] };
 
 module Target {
   // Depth starts at the far plane. NDC z runs -1 (near) to +1 (far) here, the
   // OpenGL convention `M4x.perspective_from_tan` produces, so "nothing drawn
   // yet" is +1 and the test is less-than.
-  // Returns the pair, so a caller cannot end up holding a colour buffer and a
-  // depth buffer of different sizes.
   let make = fn (w: int) -> fn (h: int) ->
     let d = vec_new () in
     let rec fill = fn (i: int) -> if i == w * h then () else let _ = vec_push d 1.0 in fill (i + 1) in
     let _ = fill 0 in
-    (target { w = w, h = h, color = bytebuf_new (w * h * 4) }, d);
+    target { w = w, h = h, color = bytebuf_new (w * h * 4), depth = d };
 
-  let clear = fn (t: target) -> fn (depth) -> fn (r: int) -> fn (g: int) -> fn (b: int) ->
+  let clear = fn (t: target) -> fn (r: int) -> fn (g: int) -> fn (b: int) ->
     let rec go = fn (i: int) ->
       if i == t.w * t.h then ()
       else
@@ -71,7 +66,7 @@ module Target {
         let _ = bytebuf_set t.color (o + 1) g in
         let _ = bytebuf_set t.color (o + 2) b in
         let _ = bytebuf_set t.color (o + 3) 255 in
-        let _ = vec_set depth i 1.0 in
+        let _ = vec_set t.depth i 1.0 in
         go (i + 1) in
     go 0;
 
@@ -120,7 +115,7 @@ module Raster {
   // always dropped, because a degenerate triangle has no inside and its edge
   // functions are all zero, which the rule above would otherwise read as "every
   // pixel is on every edge".
-  let triangle = fn (t: target) -> fn (depth) -> fn (cull: bool) ->
+  let triangle = fn (t: target) -> fn (cull: bool) ->
                  fn (v0: rvert) -> fn (v1: rvert) -> fn (v2: rvert) ->
     let area = edge v0.x v0.y v1.x v1.y v2.x v2.y in
     if area == 0.0 then ()
@@ -172,7 +167,7 @@ module Raster {
                   // needs the 1/w correction below.
                   let z = w0 * a.z + w1 * b.z + w2 * c.z in
                   let idx = y * t.w + x in
-                  if z < vec_get depth idx then
+                  if z < vec_get t.depth idx then
                     let iw = w0 * a.iw + w1 * b.iw + w2 * c.iw in
                     let inv = 1.0 / iw in
                     let cr = (w0 * a.r * a.iw + w1 * b.r * b.iw + w2 * c.r * c.iw) * inv in
@@ -188,7 +183,7 @@ module Raster {
                     // 0.01, which is banding you can see.
                     let q = Srgb.encode in
                     let o = idx * 4 in
-                    let _ = vec_set depth idx z in
+                    let _ = vec_set t.depth idx z in
                     let _ = bytebuf_set t.color o (q cr) in
                     let _ = bytebuf_set t.color (o + 1) (q cg) in
                     let _ = bytebuf_set t.color (o + 2) (q cb) in
@@ -262,7 +257,7 @@ module RasterS {
   // vector -- it gives one that is short by however much they diverge, and a
   // short normal makes a surface darker toward the middle of every triangle,
   // which looks like faceting and is not.
-  let triangle = fn (t: target) -> fn (depth) -> fn (cull: bool) ->
+  let triangle = fn (t: target) -> fn (cull: bool) ->
                  fn (a0: svert) -> fn (a1: svert) -> fn (a2: svert) -> fn (shade) ->
     let area = Raster.edge a0.sx a0.sy a1.sx a1.sy a2.sx a2.sy in
     if area == 0.0 then ()
@@ -296,7 +291,7 @@ module RasterS {
                   let w2 = e2 * inv_area in
                   let z = w0 * a.sz + w1 * b.sz + w2 * c.sz in
                   let idx = y * t.w + x in
-                  if z < vec_get depth idx then
+                  if z < vec_get t.depth idx then
                     let iw = w0 * a.siw + w1 * b.siw + w2 * c.siw in
                     let inv = 1.0 / iw in
                     // Perspective-correct: every attribute is carried as
@@ -339,7 +334,7 @@ module RasterS {
                     | None -> ()
                     | Some lit ->
                       let o = idx * 4 in
-                      let _ = vec_set depth idx z in
+                      let _ = vec_set t.depth idx z in
                       let _ = bytebuf_set t.color o (Srgb.encode lit.x) in
                       let _ = bytebuf_set t.color (o + 1) (Srgb.encode lit.y) in
                       let _ = bytebuf_set t.color (o + 2) (Srgb.encode lit.z) in
@@ -368,17 +363,17 @@ module RasterS {
 module RasterP {
   // One pixel, depth-tested. `shade` takes nothing: a point has no normal to
   // interpolate and no area to interpolate across.
-  let point = fn (t: target) -> fn (depth) -> fn (sx: float) -> fn (sy: float) ->
+  let point = fn (t: target) -> fn (sx: float) -> fn (sy: float) ->
               fn (z: float) -> fn (lit: v3) ->
     let x = int_of_float (floor sx) in
     let y = int_of_float (floor sy) in
     if x < 0 || y < 0 || x >= t.w || y >= t.h then ()
     else
       let idx = y * t.w + x in
-      if z >= vec_get depth idx then ()
+      if z >= vec_get t.depth idx then ()
       else
         let o = idx * 4 in
-        let _ = vec_set depth idx z in
+        let _ = vec_set t.depth idx z in
         let _ = bytebuf_set t.color o (Srgb.encode lit.x) in
         let _ = bytebuf_set t.color (o + 1) (Srgb.encode lit.y) in
         let _ = bytebuf_set t.color (o + 2) (Srgb.encode lit.z) in
@@ -393,7 +388,7 @@ module RasterP {
   //
   // Perspective-correct the same way the triangle is: the attribute is carried as
   // attribute/w, interpolated, and divided by the interpolated 1/w.
-  let line = fn (t: target) -> fn (depth) ->
+  let line = fn (t: target) ->
              fn (ax: float) -> fn (ay: float) -> fn (az: float) -> fn (aw: float) -> fn (ca: v3) ->
              fn (bx: float) -> fn (by: float) -> fn (bz: float) -> fn (bw: float) -> fn (cb: v3) ->
     let x0 = int_of_float (floor ax) in
@@ -417,10 +412,10 @@ module RasterP {
           if x < 0 || y < 0 || x >= t.w || y >= t.h then ()
           else
             let idx = y * t.w + x in
-            if z >= vec_get depth idx then ()
+            if z >= vec_get t.depth idx then ()
             else
               let o = idx * 4 in
-              let _ = vec_set depth idx z in
+              let _ = vec_set t.depth idx z in
               let _ = bytebuf_set t.color o (Srgb.encode (pc ca.x cb.x)) in
               let _ = bytebuf_set t.color (o + 1) (Srgb.encode (pc ca.y cb.y)) in
               let _ = bytebuf_set t.color (o + 2) (Srgb.encode (pc ca.z cb.z)) in
