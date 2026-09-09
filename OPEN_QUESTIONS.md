@@ -181,9 +181,11 @@ instead of merely embarrassing.
   that regressed to the v0.1.447 behaviour, fails here instead of reporting the remaining
   half open. The second grep is the remaining claim, by name. Both are of the emitted C
   rather than of a peak-RSS measurement, which is quantised, machine-dependent, and would
-  make this gate flaky for no gain. An older compiler fails the control, which is correct:
-  this entry describes v0.1.456 and would need rewriting for any tree where the control does
-  not hold.
+  make this gate flaky for no gain. **Both greps were run against a build of `1b538a9`**, the
+  last commit before the change: the control grep finds nothing there and the check exits
+  non-zero, so it is a live control and not a decoration. That is the correct answer for an
+  older compiler — this entry describes v0.1.456 and would need rewriting for any tree where
+  the control does not hold.
 
 ## Q-11: a buffer is as long as its `byteLength` says, and not as long as its file
 
