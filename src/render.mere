@@ -1276,6 +1276,26 @@ module Render {
     let w = t.w in
     let h = t.h in
     let _ = Target.clear t depth (int_of_float bg.x) (int_of_float bg.y) (int_of_float bg.z) in
+    let (eye, ctr, th, zn, zf, vp) = cam in
+    // A REGION AROUND THE FRAME'S OWN WORKING SET, and it took the language two
+    // answers to make this worth writing. Everything between here and the count is
+    // scratch: the animation state, the 924 world matrices, every skin's joint
+    // matrices, and every per-vertex array the walk decodes. None of it outlives the
+    // frame, and all of it is different next frame, so no cache can hold it -- it was
+    // simply never freed. About 0.7 MB a frame on RecursiveSkeletons.
+    //
+    // It could not be a block before, twice over: a container written inside one went
+    // to the default region anyway (mere v0.1.458 fixed that), and a container a
+    // FUNCTION returned did too, whatever region the call was in (v0.1.464 on C and
+    // v0.1.466 on LLVM fixed that, by passing the caller's region in). Both had to
+    // land before a block here reclaimed anything.
+    //
+    // ONLY AN INT LEAVES. `t` and `depth` are the caller's and are written through, not
+    // returned; the camera values are the caller's too, destructured above so the tuple
+    // can be built outside. A `region` block cannot hand back a container, which is
+    // the rule that makes this shape the only one available -- and the rule that says
+    // the scratch really is scratch.
+    let drawn_n = region SC {
     let ast = Scene.anim_state_ac d acache time anim in
     // HOISTED OUT OF THE WALK. This transforms EVERY node in the document and depends
     // only on `d` and `ast`, both fixed for the frame -- calling it per skinned node
@@ -1283,7 +1303,6 @@ module Render {
     // nodes): 198/247 ms a frame became 153/157, with every picture byte-identical.
     // The same shape as the texture decode: frame-constant work repeated per node.
     let all_worlds = Scene.world_matrices_at d ast in
-    let (eye, ctr, th, zn, zf, vp) = cam in
     let k = if lit then 3.0 else 0.0 in
     let light = dirlight { dx = 0.0 - 0.4, dy = 0.0 - 0.7, dz = 0.0 - 0.6, lr = k, lg = k, lb = k } in
     let fw = float_of_int w in
@@ -1851,7 +1870,9 @@ module Render {
                   else go 0 in
             prims rest in
         prims (J.arr (J.req mesh "primitives"))) in
-    (t, depth, vec_get drawn 0, eye, ctr, th, zn, zf);
+    vec_get drawn 0
+    } in
+    (t, depth, drawn_n, eye, ctr, th, zn, zf);
 
   // A fresh target per call, for a caller that wants one picture.
   let one_frame_cached = fn (d: doc) -> fn (w: int) -> fn (h: int) -> fn (lit: bool) ->

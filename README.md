@@ -1208,13 +1208,22 @@ it is the per-frame scene state — 924 world matrices, seven arrays of animatio
 the joint matrices of 84 skins — produced by functions, so allocated in the default
 region, and *different every frame*, so no cache can hold it.
 
-**And Q-10 turned out not to be able to either, which is only clear now that it is
-answered.** A callee's container follows the region its caller decided (mere v0.1.464 and
-v0.1.466), and this state still does not move: it is built inside `one_frame_into` and
-consumed inside it, so it appears in **no enclosing signature** and there is no type
-position to key a region argument on. `mere --dump-region-params` reports this renderer as
-having **zero** call sites inside a `region` block. Reclaiming it needs a block around the
-work that builds it, which is this repository's to write.
+**And Q-10 alone could not reach it, which is only clear now that it is answered.** A
+callee's container follows the region its caller decided (mere v0.1.464 and v0.1.466), but
+this state appears in **no enclosing signature** — it is built inside `one_frame_into` and
+consumed inside it — so there is no type position to key a region argument on. What it
+needed was a **block around the work that builds it**, which is now there:
+`one_frame_into` opens a `region SC { }` and lets only the primitive count out.
+
+| 1 → 40 frames at 256² | before | after |
+|---|---|---|
+| `RecursiveSkeletons` | 293 → 323 MB | **158 → 175 MB** |
+| `Suzanne` | 372 → 373 MB | **329 → 330 MB** |
+
+About **0.4 MB a frame** instead of 0.7, the peak roughly halved, and all 50 northstar
+pictures unchanged. The block is only worth writing because the two mere fixes made one
+reclaim what a callee allocates — and writing it found a compiler bug that had been
+there since v0.1.453, because nothing had put a closure inside a region block before.
 
 ### The 19 seconds were not the renderer
 

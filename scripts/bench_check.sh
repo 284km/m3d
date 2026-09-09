@@ -139,24 +139,30 @@ echo "bench: the frame loop does not grow with the frame count"
 # A REPORTED RESIDUAL, NOT AN ASSERTION, and named so it is not mistaken for solved.
 #
 # What remains, after the texture cache, after the target stopped being reallocated per
-# frame, and after the decoded accessors were cached, is ABOUT 0.7 MB A FRAME on this
-# one model. It is no longer the vertex data: it is the PER-FRAME SCENE STATE -- 924
-# world matrices, seven arrays of animation state, and the joint matrices of 84 skins.
-# Every one of those is produced by a function and is different every frame, so no
-# cache can hold them, and RecursiveSkeletons is the only model in the corpus with
+# frame, after the decoded accessors were cached, and after the frame's working set went
+# inside a `region SC { }`, is ABOUT 0.4 MB A FRAME on this one model -- down from 0.7,
+# with the peak roughly halved. What the block reclaims is the PER-FRAME SCENE STATE --
+# 924 world matrices, seven arrays of animation state, and the joint matrices of 84
+# skins. Every one of those is produced by a function and is different every frame, so no
+# cache could ever have held them, and RecursiveSkeletons is the only model with
 # enough nodes for it to show: Suzanne grows 1 MB over forty frames and Fox 5.
 #
-# THE REASON IS NOT THE ONE THIS COMMENT USED TO GIVE, and the difference matters for
-# whoever reads the number next. It said: a container a FUNCTION returns has the region
-# marker `__heap`, lowered to the default region, and a `region` block around the caller
-# does not change that. Since mere v0.1.464 (C) and v0.1.466 (LLVM) it does -- the region
-# is passed in and a callee allocates where its caller decided.
+# MOST OF IT IS RECLAIMED NOW, and the numbers below are what is left. `one_frame_into`
+# puts a `region SC { }` around the frame's working set -- the animation state, the world
+# matrices, every skin's joint matrices, every per-vertex array the walk decodes -- and
+# lets only the primitive count out.
 #
-# This state still is not reclaimed, for a different and narrower reason: it is built
-# inside `one_frame_into` and consumed inside it, so it appears in NO enclosing signature
-# and there is no type position to key a region argument on. `mere --dump-region-params`
-# reports this renderer as having zero call sites inside a `region` block. Reclaiming it
-# needs a block around the work that builds it, which is this repository's to write.
+# That block could not have paid for itself before 2026-09-09. A container written inside
+# one went to the default region anyway (mere v0.1.458 fixed the lexical half) and a
+# container a FUNCTION returned did too, whatever region the call was in (v0.1.464 on C
+# and v0.1.466 on LLVM: the caller's region is passed in). Both had to land first.
+#
+#   RecursiveSkeletons, 1 -> 40 frames at 256:  293 -> 323 MB   became   158 -> 175 MB
+#   Suzanne, same:                              372 -> 373 MB   became   329 -> 330 MB
+#
+# What is left grows about 0.4 MB a frame rather than 0.7, and the peak is roughly half.
+# The remainder is allocation the block cannot see: values built by functions called from
+# OUTSIDE it, and the caches the frame is handed.
 #
 # THE MEASUREMENT THAT USED TO BE HERE WAS ABOUT A CASE THAT IS NOW FIXED, and replacing
 # it rather than deleting it is the point. It read: 200 iterations of a 4 MB
@@ -175,9 +181,10 @@ if [ -f "$RS" ]; then
   set -- $(growth "$RS")
   if [ -n "${1:-}" ] && [ -n "${2:-}" ] && [ "$1" -gt 0 ]; then
     echo "bench: RecursiveSkeletons $(($1 / 1024)) MB for 1 frame, $(($2 / 1024)) MB for 40 —"
-    echo "bench: a KNOWN residual — the per-frame scene state (924 world matrices, the"
-    echo "bench: animation arrays, 84 skins' joint matrices) is returned by functions, so"
-    echo "bench: it lands in the default region and is never freed; about 0.7 MB a frame"
+    echo "bench: a KNOWN residual — about 0.4 MB a frame, down from 0.7 since the frame"
+    echo "bench: working set (924 world matrices, the animation arrays, 84 skins joint"
+    echo "bench: matrices) went inside a region block. What is left is allocation that"
+    echo "bench: block cannot see: values built by functions called from outside it."
   fi
 fi
 echo "bench: ok"

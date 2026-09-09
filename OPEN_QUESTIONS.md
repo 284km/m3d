@@ -157,15 +157,26 @@ instead of merely embarrassing.
     examples and this renderer: **zero** such functions.
   - on LLVM, the innermost body of a curried multi-argument function is a separate
     `define` that cannot see the argument, so it keeps the default region too.
-  - **this renderer's own 0.7 MB a frame is untouched, and not because of any of that.**
-    The scene state (924 world matrices, the animation arrays, 84 skins' joint matrices)
-    is built inside `one_frame_into` and consumed inside it, so it appears in NO enclosing
-    signature — there is no type position to key a region argument on. `--dump-region-params`
-    reports this program as having **zero** call sites inside a `region` block, which is
-    correct: there is one block in the whole renderer (`src/view.mere`) and the frame path
-    does not call a region-parameterised function from inside it. Reclaiming that state
-    needs a block around the work that builds it, which is this repository's to write, not
-    the language's.
+  - **this renderer's own residual needed a block, not a region argument, and now has
+    one.** The scene state (924 world matrices, the animation arrays, 84 skins' joint
+    matrices) is built inside `one_frame_into` and consumed inside it, so it appears in NO
+    enclosing signature and there is no type position to key a region argument on.
+    `one_frame_into` now opens a `region SC { }` around that work and lets only the
+    primitive count out — which is worth doing only because the two fixes above made a
+    block reclaim what a callee allocates. Measured, 1 → 40 frames at 256²:
+
+    | | before | after |
+    |---|---|---|
+    | `RecursiveSkeletons` | 293 → 323 MB | **158 → 175 MB** |
+    | `Suzanne` | 372 → 373 MB | **329 → 330 MB** |
+
+    About **0.4 MB a frame** instead of 0.7, with the peak roughly halved, and all 50
+    northstar pictures unchanged. What is left is allocation the block cannot see: values
+    built by functions called from outside it, and the caches the frame is handed.
+  - **the first program to write that shape found a compiler bug** — a closure inside a
+    `region` block calling an inner function that allocates emitted C and IR naming values
+    that were not there, on both compiled backends, since mere v0.1.453. Nothing had
+    written it before. Fixed in mere v0.1.467.
 - **Verify**: none — answered, and the answer is asserted continuously somewhere better
   than here: mere's `scripts/region_reclaim_check.sh` builds a container in a function,
   calls it from inside a block, and requires the footprint NOT to follow the iteration
