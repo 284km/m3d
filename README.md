@@ -1272,14 +1272,16 @@ Ranked by what the corpus table says, rather than by what seems interesting:
   `SDL_WINDOW_ALLOW_HIGHDPI` is set and moving between displays of different scale
   can.
 - **The last of the frame-loop growth.** `RecursiveSkeletons` — 924 nodes, 84 skins,
-  no images — still grows about **0.7 MB a frame**, which is the per-frame scene state:
-  924 world matrices, seven arrays of animation state and 84 skins' joint matrices,
-  built inside `one_frame_into` and consumed inside it, so they appear in no enclosing
-  signature and the region-passing that answered Q-10 has nothing to key on; different
-  every frame, so no cache can hold them either. Every ordinary model is
-  now flat — `Suzanne` grows 1 MB over forty frames. `scripts/bench_check.sh` prints
-  the number rather than asserting it, because a threshold loose enough to admit it
-  could not catch the tenfold leak the gate exists for.
+  no images — grows about **0.4 MB a frame**, down from 0.7 since the frame's working
+  set went inside a `region SC { }` (293 → 323 MB became 158 → 175 over forty frames).
+  What the block reclaims is the per-frame scene state: 924 world matrices, seven arrays
+  of animation state and 84 skins' joint matrices, all different every frame, so no
+  cache could ever have held them. What is left is allocation the block cannot see —
+  values built by functions called from outside it, and the caches the frame is handed.
+  Every ordinary model is flat: `Suzanne` is 329 MB at one frame and 330 at forty.
+  `scripts/bench_check.sh` prints the number rather than asserting it, because a
+  threshold loose enough to admit it could not catch the tenfold leak the gate exists
+  for.
 - **The scene walk on a large document, on the first frame.** `RecursiveSkeletons`
   costs **25 ms** for its first 64×64 image and **3 ms** for every frame after it — all
   setup and no pixels — down from 240 when the walk was quadratic in
