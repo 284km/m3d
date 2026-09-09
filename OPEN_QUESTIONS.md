@@ -63,39 +63,45 @@ instead of merely embarrassing.
   repository, not to this one.
 - **Verify**: `! ls "$MERE_SRC/contrib/encoding/base64.mere" >/dev/null 2>&1`
 
-## Q-8: a record field cannot hold a `Vec`, a `StrBuf` or a `Map`
+## Q-8: a record field cannot hold a `Vec`, a `StrBuf` or a `Map` — ANSWERED: it can, since mere v0.1.456
 
-- **State**: open in the language; worked around here, and the workaround is fine.
-- **Measured** (mere v0.1.447), a record with one field of each:
+- **State**: resolved (2026-09-09) in the language. The workaround here still stands and
+  is still fine; it is no longer forced.
+- **What it was**, measured at mere v0.1.447: a record with one field of each —
 
-  | field type | result |
-  |---|---|
-  | `ByteBuf[R]` | **works** |
-  | `Vec[R, T]` | `type error: expected &R unit, got &__heap unit` |
-  | `StrBuf[R]` | same |
-  | `Map[R, K, V]` | same |
+  | field type | v0.1.447 | v0.1.456 |
+  |---|---|---|
+  | `ByteBuf[R]` | works | works |
+  | `Vec[R, T]` | `type error: expected &R unit, got &__heap unit` | **works** |
+  | `StrBuf[R]` | same error | **works** |
+  | `Map[R, K, V]` | same error | **works** |
 
-  A tuple holding a `Vec` works, and so does a function taking or returning one -- a
-  function's signature can be generalised over the region and a record's field cannot.
-  `ByteBuf` escapes it because its region is erased from the type's tag.
-- **Why it showed up here**: a framebuffer wants a colour buffer AND a depth buffer, and
-  depth has to be floats. `contrib/raster`'s canvas gets away with one field because that
-  field is a `ByteBuf`.
-- **The workaround, and why it is not a bad one**: `Target.make` returns the pair, and
-  every function takes the two together, so they cannot end up different sizes. It reads
-  worse than one record and is otherwise the same program.
-- **The alternative that was rejected**: keeping depth as f32 bit patterns inside a second
-  `ByteBuf`, which would fit in the record. It costs four `bytebuf_get` plus a shift and a
-  widening per depth test, in the innermost loop of the rasterizer, to buy a nicer type.
-- **Verify**: `printf "%s\n" "type ok8 = { v: int };" "let a = ok8 { v = 1 };" "print_int a.v" > /tmp/m3dq8ctl.mere && "$MERE" /tmp/m3dq8ctl.mere >/dev/null 2>&1 && printf "%s\n" "type box8 = { v: Vec[R, float] };" "let b = box8 { v = vec_new () };" "print_int (vec_len b.v)" > /tmp/m3dq8.mere && "$MERE" /tmp/m3dq8.mere 2>&1 | grep -q "__heap"`
-- **The previous version of this check was VACUOUS**, and building `questions_check.sh`
-  found it. It wrote the program with `printf '...\{...'`, where `\{` is not an escape
-  any printf here expands -- so the file contained a literal backslash, `mere` answered
-  `parse error: expected type`, and the check (a bare `! mere file`) passed because the
-  program did not parse rather than because a record cannot hold a `Vec`. The claim was
-  still true; nothing had been testing it. This version writes the braces as ARGUMENTS
-  rather than inside the format string, requires a plain-`int` record to run first as a
-  positive control, and GREPS THE ERROR by name (`__heap`) instead of negating.
+  Re-measured against a build of the last commit before the change (`1b538a9`) and against
+  HEAD, so the attribution is a measurement rather than a guess: the old binary still
+  prints `expected &R unit, got &__heap unit` for the same file.
+- **Why it was so, and what changed**: the field's declared region was the rigid name `R`
+  and `vec_new ()` produced the rigid name `__heap`, and two rigid names do not unify. A
+  function's signature can be generalised over the region and a record's field cannot, so
+  the one shape a record wanted was the one shape that could not be written. `ByteBuf`
+  escaped it because its region is erased from the type's tag — the exception that gave the
+  cause away. mere's Q-127 work made the allocation marker a **variable until something
+  decides it**, and here the field's own declaration is what decides it.
+- **It did not open an escape route**, checked in both directions: a record whose field is
+  typed `Vec[A, float]` and built inside `region A { }` is still refused by name when it is
+  carried out (`region escape: 'sink' now holds a value from region 'A'`), and one built
+  inside a block whose field names a DIFFERENT region is refused at construction
+  (`expected &Rg unit, got &A unit`).
+- **Asserted continuously, in the language repository**: `test/parity/record_holds_containers.mere`
+  compares a record of two `Vec` fields across the interpreter, C, LLVM and Wasm on every
+  parity run. That is a better home for it than a check here, because the claim is the
+  language's.
+- **What is still true here**: `Target` returns `(target, depth)` rather than one record.
+  Collapsing it is now possible and is a readability change, not a correctness one — six
+  signatures in `src/raster.mere` and `src/render.mere` take the two together. Not done,
+  because the pair already cannot drift (every function takes both) and the renderer's
+  gates are the expensive thing to re-run for a cosmetic gain.
+- **Verify**: none — answered, and the answer is asserted by the language's own parity run
+  rather than by prose here.
 
 ## Q-9: the rasterizer runs on two backends, not four
 
@@ -118,71 +124,66 @@ instead of merely embarrassing.
   the program were rejected for some unrelated reason -- reporting "still open" about a
   question it never tested.
 
-## Q-10: a `region` does not reclaim a `ByteBuf`, so a frame loop cannot lean on one
+## Q-10: a `region` reclaims what is written inside it, and not what a function returns
 
-- **State**: open in the language; worked around here, twice, and the workaround costs
-  something both times.
-- **Measured** (mere v0.1.447): two hundred iterations of a 4 MB `bytebuf_new` INSIDE a
-  `region R { }` reach 770 MB of peak RSS, against 5 MB for one iteration. Nothing is
-  freed at the end of the block.
-- **Why**: a container whose region marker is `__heap` is allocated from the DEFAULT
-  region, and the default region is never freed. The emitted C says so directly -- a
-  `bytebuf_new` written *inside* the block still comes out as
-  `mere_bytebuf_new((&__lang_default_region), ...)` -- so this is not about escape
-  analysis or about the value outliving the block. It cannot outlive it; it is simply
-  not allocated where the block can free it.
-- **AND THE RULE IS NARROWER THAN "A REGION DOES NOTHING", which is worth stating
-  because the wide version is the one a reader would take away.** Read out of the
-  emitted C:
+- **State**: **half of it was answered** by mere v0.1.456 (2026-09-09); the half that costs
+  this renderer anything is still open, and the language now knows why it is hard.
+- **What the block reclaims, re-measured at v0.1.456** (read out of the emitted C, and
+  confirmed by peak RSS):
 
   | written as | allocated from | reclaimed by the block |
   |---|---|---|
-  | `vec_new ()` lexically inside `region R { }` | `__region_R` | **yes** |
-  | `read_bytes path` (anywhere) | `__lang_current_region` | **yes** |
-  | a `Vec` or `ByteBuf` returned by a FUNCTION | `(&__lang_default_region)` | no |
+  | `vec_new ()` lexically inside `region R { }` | `__region_R` | **yes** (always was) |
+  | `bytebuf_new n` lexically inside `region R { }` | `__region_R` | **yes — this is the change** |
+  | `read_bytes path` (anywhere) | `__lang_current_region` | **yes** (always was) |
+  | a `Vec` or `ByteBuf` **returned by a function** | `(&__lang_default_region)` | **no** |
 
-  `Acc.floats` is the third row -- `mere_vec_float_new((&__lang_default_region))` -- and
-  that one line is the renderer's whole remaining per-frame growth: the vertex data,
-  decoded again every frame into a region nothing frees. A function's return type is
-  generalised over the region, `__heap` is what it generalises to, and the lowering
-  reads `__heap` as the default region rather than as the caller's.
-- **What it cost here**: the render target is allocated once and cleared per frame
-  rather than made per frame (`one_frame_into` takes a target), and the decoded textures
-  live in a cache the caller owns rather than in the frame's region. Both are what a
-  renderer would do anyway, which is why neither is a hardship -- but neither is a
-  choice, and a reader would otherwise assume the `region` around a frame was doing the
-  work.
-- **What would answer it -- AND NOT THE OBVIOUS ONE.** "Give `__heap` containers the
-  current region in non-lib mode" is what this entry used to propose, and the language
-  repository has now measured that it does not work (mere v0.1.452). Two things came
-  out of trying it:
-
-  - **`--lib` mode already does exactly that, and it is broken there.** A host that
-    calls an exported function which stores a returned `Vec` into module state, and then
-    makes one more call, reads back garbage: the container is a pointer into the arena
-    that call reclaimed. So the proposal is not untested; it is tested, and it fails.
-  - **Nothing here would have noticed.** With the lowering flipped, all 50 of this
-    renderer's pictures stay byte-identical and every gate passes. Producing a witness
-    needs the region to be REUSED before the read -- a second block that allocates over
-    it -- and a sanitiser cannot see it either, because the arena is one live
-    allocation.
-
-  What the containers are stored into does not save them, either: containers in this
-  language are shared by identity, so the store copies the strings and records inside
-  and not the container. The real answer is the one that stops `__heap` meaning two
-  things at once -- the caller's region instantiated at the call site -- which makes
-  "carried out of the block" a type error. **This renderer's accessor cache is the code
-  that would be rejected**, and it would become a warm pass like the texture cache; that
-  is already written down beside it.
-
-  Until then a `region` block reclaims the small values and none of the buffers.
-- **Verify**: `printf '%s\n' 'let one = fn (i: int) -> region R { let b = bytebuf_new 16 in bytebuf_get b 0 };' 'let _ = print (str_of_int (one 0));' '0' > /tmp/m3dq10.mere && "$MERE" -c /tmp/m3dq10.mere > /tmp/m3dq10.c 2>/dev/null && grep -q '__lang_region_block_acquire("region R")' /tmp/m3dq10.c && grep -q 'mere_bytebuf_new((&__lang_default_region)' /tmp/m3dq10.c`
-- **Why that shape**: the first grep is a POSITIVE CONTROL -- it requires the region
-  block to have been emitted at all, so a compiler that stopped emitting regions (or a
-  probe the optimiser deleted) fails rather than reporting the question answered. The
-  second is the claim itself, by name. Both greps are of the emitted C rather than of a
-  peak-RSS measurement, which is quantised, machine-dependent, and would make this gate
-  flaky for no gain.
+- **The number that used to be in this entry has moved.** Two hundred iterations of a 4 MB
+  `bytebuf_new` inside a `region R { }` reached **770 MB** of peak RSS at v0.1.447. At
+  v0.1.456 the same program is **5.8 MB**. Writing the same loop with the buffer built by a
+  one-line FUNCTION called from inside the block reaches **847 MB** — so the meter still
+  works, the difference is the last row of the table, and it is the only row left.
+- **Why the last row cannot simply be flipped, which is the part that is now known.** mere
+  tried exactly that in v0.1.453: settle an undecided region on the caller's, which the
+  backends lower to the runtime current region. It shipped, and **this renderer was the
+  witness that killed it** — a segfault from the second frame on, in v0.1.453, 454 and 455.
+  A body and its call site hold **different copies** of the region variable, and in a chain
+  (`render_at` → `one_frame_into` → `attr` → `Acache.floats` → `Acc.floats`) only the
+  outermost copy is bound by the block. The innermost body allocates through the scheme's
+  own variable, which nothing bound; lowered to the runtime current region, the value went
+  into the frame's arena while every type said the default one, and the accessor cache read
+  it back after the arena was reused. Withdrawn in v0.1.456.
+  **`dune runtest`, parity, every gate and all 29 dogfood type-checks were green** while
+  three released versions could not render a second frame here.
+- **So the remaining answer is one of two, and both are bigger than a lowering change**:
+  pass the region in as a hidden argument, or specialise a function per region. mere's
+  Q-127 measured that region **cannot** be a monomorphization axis in the C backend — the
+  region is not part of the C type (`Vec[R,T]` and `Vec[__heap,T]` are both
+  `mere_vec_<T>*`), so duplicating instances cannot distinguish them.
+- **What survives the withdrawal, and it is not nothing**: the TYPES still name the block,
+  so carrying a callee-built container out of a `region` is a type error now. Being typed
+  to a region the value does not actually live in is over-strict and never unsound, which
+  is the direction it errs in.
+- **What it costs here**: unchanged. The render target is allocated once and cleared per
+  frame rather than made per frame, and decoded textures and accessors live in caches the
+  caller owns. The **0.7 MB/frame** that neither cache can remove — 924 world matrices, the
+  animation's seven arrays, 84 skins' joint matrices, all different every frame — is the
+  last row of that table and nothing else.
+- **The accessor cache is no longer "code that would be rejected".** The previous version of
+  this entry said the real fix would make `Acache` a type error and force it into a warm
+  pass. That prediction was about the design mere has now withdrawn; under either remaining
+  candidate the cache is ordinary code, because a container the caller allocates and a
+  callee fills is exactly what passing the region in expresses.
+- **Verify**: `printf '%s\n' 'let mk = fn (n: int) -> bytebuf_new 16;' 'let one = fn (i: int) -> region R { let b = mk i in bytebuf_get b 0 };' 'let two = fn (i: int) -> region S { let b = bytebuf_new 16 in bytebuf_get b 0 };' 'let _ = print (str_of_int (one 0 + two 0));' '0' > /tmp/m3dq10.mere && "$MERE" -c /tmp/m3dq10.mere > /tmp/m3dq10.c 2>/dev/null && grep -q 'mere_bytebuf_new(__region_S' /tmp/m3dq10.c && grep -q 'mere_bytebuf_new((&__lang_default_region)' /tmp/m3dq10.c`
+- **Why that shape**: the entry now claims TWO things, and the check asserts both. The first
+  grep is the answered half used as a positive control — a buffer written lexically inside a
+  block must come out as `__region_S`, so a compiler that stopped emitting regions, or one
+  that regressed to the v0.1.447 behaviour, fails here instead of reporting the remaining
+  half open. The second grep is the remaining claim, by name. Both are of the emitted C
+  rather than of a peak-RSS measurement, which is quantised, machine-dependent, and would
+  make this gate flaky for no gain. An older compiler fails the control, which is correct:
+  this entry describes v0.1.456 and would need rewriting for any tree where the control does
+  not hold.
 
 ## Q-11: a buffer is as long as its `byteLength` says, and not as long as its file
 

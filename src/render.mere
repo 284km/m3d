@@ -118,10 +118,22 @@ type texslot = { img: texture, ws: int, wt: int, mag: int,
 // storing one from inside a frame's region is accepted, and measured to work on the
 // interpreter and the C backend both.
 //
-// THAT IS A DEPENDENCE ON Q-10 AND IT IS WRITTEN DOWN THERE. If the language ever
-// gives those allocations the caller's region, this stops compiling -- loudly, at the
-// `vec_set` below -- and wants the warm pass the textures have. A silent version of
-// that change would be a dangling reference; the type system is what makes it loud.
+// THAT IS A DEPENDENCE ON Q-10 AND IT IS WRITTEN DOWN THERE -- and the sentence that
+// used to end this paragraph was WRONG, so it is worth keeping the correction. It said:
+// "if the language ever gives those allocations the caller's region, this stops
+// compiling -- loudly, at the `vec_set` below; the type system is what makes it loud."
+//
+// mere v0.1.453 made exactly that change and THIS DID NOT STOP COMPILING. It segfaulted
+// from the second frame on, here, in three released versions. The type system could not
+// make it loud because the body of `Acc.floats` and the call site that reaches it hold
+// DIFFERENT COPIES of the region variable: the outermost call inside `region FR { }`
+// binds its copy, and nothing binds the one the body allocates through. So the value
+// went into the frame's arena while every type involved still said the default region --
+// no type was violated, and the check had nothing to fire on. mere withdrew the change
+// in v0.1.456 and Q-10 records why.
+//
+// The dependence is real and still here. What is not true is that the compiler would
+// catch its removal for us.
 module Acache {
   let make = fn (d: doc) ->
     let n = match J.field d.j "accessors" with | None -> 0 | Some a -> J.arr_len a in
@@ -732,8 +744,9 @@ module Frame {
 }
 
 module Render {
-  // Vertex attributes, read once per primitive. A record cannot hold a Vec
-  // (OPEN_QUESTIONS Q-8), so these travel as a tuple.
+  // Vertex attributes, read once per primitive. These travel as a tuple because a
+  // record field could not hold a `Vec` when this was written (OPEN_QUESTIONS Q-8);
+  // since mere v0.1.456 it can, and a record here would be a readability change.
   let attr = fn (d: doc) -> fn (ac) -> fn (prim: Json.json) -> fn (name: str) ->
     match J.field (J.req prim "attributes") name with
     | None -> None

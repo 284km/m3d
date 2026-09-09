@@ -149,8 +149,14 @@ echo "bench: the frame loop does not grow with the frame count"
 # The reason nothing is reclaimed is the same one throughout: a container a FUNCTION
 # returns has the region marker `__heap`, which is lowered to the DEFAULT region, which
 # is never freed, and a `region` block around the caller does not change that (Q-10).
-# Measured: 200 iterations of a 4 MB `bytebuf_new` inside a region reach 770 MB of peak
-# RSS against 5 MB for one.
+#
+# THE MEASUREMENT THAT USED TO BE HERE WAS ABOUT A CASE THAT IS NOW FIXED, and replacing
+# it rather than deleting it is the point. It read: 200 iterations of a 4 MB
+# `bytebuf_new` inside a region reach 770 MB of peak RSS against 5 MB for one. At mere
+# v0.1.456 that same program is 5.8 MB -- a buffer written LEXICALLY inside a block now
+# comes from the block's arena. Writing the buffer in a one-line function called from
+# inside the block reaches 847 MB, and that is the case this residual is: the last row
+# of Q-10's table, and the only one left.
 #
 # It is printed rather than asserted because the threshold that would catch it is
 # tighter than the noise, and because the fix is in the language rather than here. If

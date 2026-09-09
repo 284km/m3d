@@ -993,8 +993,10 @@ That is the failure mode this whole gate is aimed at, and it shapes the design:
   *absent*, and a negation succeeds when its subject fails for any reason at all — no
   compiler, a misspelled flag, an unset variable. Q-9 now greps the refusal *by name*
   (`bytebuf_new has no LLVM lowering`) and requires the C backend to accept the same
-  program first. Q-8 greps `__heap` and requires a plain-`int` record to run first as
-  a control.
+  program first. Q-8 greped `__heap` and required a plain-`int` record to run first as
+  a control — and that check has since done its job in the other direction: mere
+  v0.1.456 made a record field able to hold a `Vec`, the grep stopped matching, and the
+  gate reported Q-8 as a retire candidate rather than letting it read as open.
 - **The gate establishes its own positive controls before running anything.** `mere
   -te` must find a builtin that certainly exists, and `MERE_SRC` must name a tree that
   actually has a `contrib/` — otherwise every "this is still absent" check is
@@ -1148,8 +1150,9 @@ Every one of the 49 pictures readable at the time is byte-identical and the one 
 is unchanged.
 
 **It made the reader stricter, and that was not free.** Where buffer `i` starts in the
-blob has to be *derivable* from the JSON — a record cannot hold a `Vec` (Q-8), so a
-table of offsets has nowhere to live — so each buffer contributes exactly its declared
+blob has to be *derivable* from the JSON — a record could not hold a `Vec` when this
+was written (Q-8; since mere v0.1.456 it can), so a table of offsets had nowhere to
+live — so each buffer contributes exactly its declared
 `byteLength` and an accessor is bounds-checked against its buffer's declared end rather
 than against the length of the file. glTF says a bufferView must fit inside its buffer
 and the Khronos validator agrees, so the strict reading is the specified one; it is
@@ -1178,8 +1181,18 @@ forced rather than chosen. A `texture` holds a `ByteBuf[R]`, so one decoded insi
 that is why images are filled by a warm pass run outside. A decoded accessor is a `Vec`
 **a function returned**, which by Q-10 lands in the default region no matter which
 region called it — so storing one from inside a frame's region is accepted. *The rule
-that leaks it is the rule that makes it cacheable.* If Q-10 is ever fixed this stops
-compiling, at the `vec_set`, which is the loud failure rather than the silent one.
+that leaks it is the rule that makes it cacheable.*
+
+**The sentence that used to end that paragraph was wrong, and it was tested.** It said
+that if Q-10 were ever fixed this would stop compiling at the `vec_set` — the loud
+failure rather than the silent one. mere v0.1.453 made that change and **this did not
+stop compiling**: it segfaulted from the second frame on, here, in three released
+versions. `Acc.floats`'s body and the call site that reaches it through
+`render_at → one_frame_into → attr → Acache.floats` hold *different copies* of the
+region variable; only the outermost is bound by the block, so the value went into the
+frame's arena while every type still said the default region. No type was violated and
+the check had nothing to fire on. mere withdrew the change in v0.1.456. The dependence
+is real; the guarantee that the compiler would catch its removal was not.
 
 | | 64² | 512² | peak RSS, 1 → 40 frames at 256² |
 |---|---|---|---|

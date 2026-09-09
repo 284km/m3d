@@ -30,13 +30,19 @@ type rvert = { x: float, y: float, z: float, iw: float, r: float, g: float, b: f
 
 // Colour, and depth ALONGSIDE IT RATHER THAN INSIDE IT.
 //
-// A record field can hold a `ByteBuf[R]` and cannot hold a `Vec[R, T]`, a
-// `StrBuf[R]` or a `Map[R, K, V]` -- measured, not assumed: the first three
-// give `expected &R unit, got &__heap unit`, because a record type has no way
-// to be parameterised over the region its field's container lives in, and
-// ByteBuf escapes that only because its region is erased from the type's tag.
-// Tuples and function signatures are both fine, which is why the pair below
-// works and a third field would not. See OPEN_QUESTIONS Q-8.
+// This was forced when it was written: a record field could hold a `ByteBuf[R]`
+// and could not hold a `Vec[R, T]`, a `StrBuf[R]` or a `Map[R, K, V]` -- the
+// first three gave `expected &R unit, got &__heap unit`, because a record type
+// had no way to be parameterised over the region its field's container lives
+// in, and ByteBuf escaped that only because its region is erased from the
+// type's tag. Tuples and function signatures were both fine, which is why the
+// pair below works and a third field would not have.
+//
+// SINCE mere v0.1.456 A FIELD CAN HOLD ANY OF THEM, so this is now a shape and
+// not a workaround: depth could be a third field. It has not been collapsed
+// because the pair already cannot drift -- every function here takes the two
+// together -- and the change would be a readability one across six signatures.
+// See OPEN_QUESTIONS Q-8, which records the measurement on both compilers.
 //
 // Depth is a Vec of doubles rather than four more bytes because it is compared
 // and not blended, and a byte has nowhere near the resolution a depth test
